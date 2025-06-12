@@ -1,0 +1,8 @@
+streamlit
+geoalchemy2
+langchain_core
+typing_extensions
+langchain_community
+langgraph
+langchain_google_vertexai
+sqlalchemy
