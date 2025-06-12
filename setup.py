@@ -14,6 +14,25 @@ from geoalchemy2 import Geometry
 from parameters import custom_table_info, include_tables
 
 
+def enable_tracing():
+    """Enables LangSmith tracing."""
+    os.environ['LANGSMITH_TRACING'] = st.secrets['LANGSMITH_TRACING']
+    os.environ['LANGSMITH_API_KEY'] = st.secrets['LANGSMITH_API_KEY']
+
+
+def set_google_credentials() -> None:
+    """Set Google Cloud credentials for database access.
+
+    Writes credentials from secrets to a temporary file and sets the environment variable.
+    """
+    st.toast("Setting Google credentials...", icon=":material/build:")
+    credentials_json = st.secrets["GOOGLE_CREDENTIALS_JSON"]
+    temp_file_path = "google_credentials.json"
+    with open(temp_file_path, "w") as f:
+        f.write(credentials_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
+
+
 def get_llm() -> ChatVertexAI:
     """Initialize the Grok 3 Beta language model.
 
@@ -46,7 +65,7 @@ def get_db() -> SQLDatabase:
 
         # Define metadata with custom Geometry type
         metadata = MetaData()
-        Table('3d_condours', metadata,  # Replace 'your_table' with actual table name
+        Table('3d_condours', metadata,
               Column('id', Integer, primary_key=True),
               Column('contour_bound', Geometry)
         )

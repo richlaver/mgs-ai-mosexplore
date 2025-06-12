@@ -26,6 +26,8 @@ def main() -> None:
     ui.render_initial_ui()
 
     if not st.session_state.setup_complete:
+        setup.enable_tracing()
+        setup.set_google_credentials()
         st.session_state.llm = setup.get_llm()
         st.session_state.db = setup.get_db()
 
