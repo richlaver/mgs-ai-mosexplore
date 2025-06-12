@@ -6,4 +6,4 @@ langchain_community
 langgraph
 langchain_google_vertexai
 sqlalchemy
-cloud-sql-python-connector[pg8000]
+mysql-connector-python
