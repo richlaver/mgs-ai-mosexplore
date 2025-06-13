@@ -11,10 +11,15 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool, ListSQLDatabaseTool
+from langchain_community.tools.sql_database.tool import (
+    ListSQLDatabaseTool,
+    QuerySQLCheckerTool,
+    QuerySQLDatabaseTool,
+)
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langgraph.prebuilt import create_react_agent
 from langchain.agents import AgentExecutor
+from classes import CustomInfoSQLDatabaseTool
 import time
 import logging
 
@@ -41,8 +46,8 @@ def build_graph_agent(llm, db) -> StateGraph:
 
 
     def generate_response(state: State) -> Generator[State, None, None]:
-        toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-        tools = toolkit.get_tools()
+        DescribeSQLDatabaseTool = CustomInfoSQLDatabaseTool()
+        tools=[DescribeSQLDatabaseTool, ListSQLDatabaseTool(db=db), QuerySQLDatabaseTool(db=db), QuerySQLCheckerTool(db=db, llm=llm)]
 
         system_message = """
         You are an agent designed to interact with a SQL database.
