@@ -101,6 +101,19 @@ def render_initial_ui() -> None:
             display: flex;
             justify-content: flex-end;
         }
+        .intermediate-step {
+            background-color: #f5f5f5;
+            border-left: 4px solid #ccc;
+            padding: 10px;
+            margin: 5px 0;
+            font-size: 0.9em;
+            color: #666;
+        }
+        .intermediate-step code {
+            background-color: #e8e8e8;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
         </style>
         <script>
         function scrollToBottom() {
@@ -151,8 +164,11 @@ def render_chat_content() -> None:
         return
     
 
-    def render_message_content(content):
-        st.markdown(content, unsafe_allow_html=True)
+    def render_message_content(content, msg_type=None):
+        if msg_type in ["action", "step"]:
+            st.markdown(f'<div class="intermediate-step">{content}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(content, unsafe_allow_html=True)
 
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
@@ -191,46 +207,43 @@ def render_chat_content() -> None:
                 try:
                     def stream_tokens():
                         accumulated_content = ""
-                        for chunk, metadata in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
-                            logging.debug(f"Streamed state: {chunk}")
-                            if isinstance(chunk, dict) and chunk.get("type") == "ai" and not chunk.get("additional_kwargs", {}).get("chunk"):
-                                content = chunk.get("content", "")
+                        stream_container = st.empty()
+                        with stream_container:
+                            for chunk, metadata in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
+                                logging.debug(f"Streamed chunk in render_chat_content: {chunk}")
+                                content = chunk.content
                                 if content:
-                                    accumulated_content += content
-                                    yield content
-                            elif hasattr(chunk, "content") and chunk.content:
-                                yield chunk.content
-                            # state_messages = [
-                            #     {
-                            #         "type": msg.type,
-                            #         "content": msg.content,
-                            #         "additional_kwargs": msg.additional_kwargs
-                            #     }
-                            #     for msg in st.session_state.graph.get_state(config).values.get("messages", [])
-                            #     if msg.type in ("human", "ai")
-                            # ]
-                            # st.session_state.messages = initial_state["messages"] + state_messages
-                        final_state = st.session_state.graph.get_state(config).values
-                        if final_state:
-                            ai_messages = [msg for msg in final_state.get("messages", []) if msg.type == "ai" and not msg.additional_kwargs.get("chunk")]
-                            if ai_messages:
-                                final_message = ai_messages[-1]
-                                if final_message not in st.session_state.messages:
-                                    st.session_state.messages.append(final_message)
+                                    if content.startswith('Calling Tool:'):
+                                        chunk_type = 'action'
+                                    elif content.startswith('Tool Result:'):
+                                        chunk_type = 'step'
+                                    elif content.startswith('Final Output:'):
+                                        chunk_type = 'output'
+                                    else:
+                                        chunk_type = 'undefined'
+                                    if chunk_type in ["action", "step"]:
+                                        stream_container.markdown(f'<div class="intermediate-step">{content}</div>', unsafe_allow_html=True)
+                                        yield content
+                                    else:
+                                        accumulated_content += content
+                                        stream_container.markdown(accumulated_content, unsafe_allow_html=True)
+                                        yield content
                         return accumulated_content
 
                     stream_container = st.empty()
                     with stream_container:
-                        stream_container.write_stream(stream_tokens())
-
+                        final_content = stream_container.write_stream(stream_tokens())
+                    
+                    # Update final message in session state
                     final_state = st.session_state.graph.get_state(config).values
                     if final_state:
-                        ai_messages = [msg for msg in final_state.get("messages", []) if isinstance(msg, AIMessage) and not getattr(msg, "type", "") == "tool_call"]
+                        ai_messages = [msg for msg in final_state.get("messages", []) if isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output"]
                         if ai_messages:
                             final_message = ai_messages[-1]
-
-                            stream_container.empty()
-                            render_message_content(final_message.content)
+                            if final_message not in st.session_state.messages:
+                                st.session_state.messages.append(final_message)
+                            stream_container.markdown(final_content, unsafe_allow_html=True)
 
                 except Exception as e:
                     st.error(f"Error streaming response: {e}")
+                    logging.error(f"Streaming error: {e}")

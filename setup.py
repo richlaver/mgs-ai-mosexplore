@@ -10,8 +10,14 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_community.utilities import SQLDatabase
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
-
 from parameters import custom_table_info, include_tables
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 
 def enable_tracing():
@@ -79,6 +85,7 @@ def get_db() -> SQLDatabase:
             sample_rows_in_table_info=3,
             lazy_table_reflection=True
         )
+        logging.debug(f"Available tables: {db.get_usable_table_names()}")
 
         st.toast("Connected to the MissionOS CP03 database", icon=":material/check_circle:")
         return db

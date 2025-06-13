@@ -31,7 +31,7 @@ def main() -> None:
         st.session_state.llm = setup.get_llm()
         st.session_state.db = setup.get_db()
 
-        st.session_state.graph = graph.build_graph(
+        st.session_state.graph = graph.build_graph_agent(
             llm=st.session_state.llm,
             db=st.session_state.db
         )

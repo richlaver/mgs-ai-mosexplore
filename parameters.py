@@ -303,6 +303,10 @@ custom_table_info = {
         - item_id: 0 -> review on instrument. If review on job, then this will be the job id.
         - instr_id: if review on instrument, id of instrument that review is set-up on. References column instr_id of table instrum.
             if review on job, id of position for job.
+        - review_type:
+            1 -> upper (checks if field value is greater than threshold)
+            -1 -> lower (checks if field value is lower than threshold)
+            0 -> upper and lower
         - review_field: system field name for field review is set-up on
         - review_status: ON -> review active, OFF -> review inactive
         - effective_from: timestamp when review becomes effective
@@ -313,6 +317,7 @@ custom_table_info = {
             "id" INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             "item_id" INT NOT NULL DEFAULT 0,
             "instr_id" VARCHAR(256) NOT NULL REFERENCES "instrum" ("instr_id"),
+            "review_type" ENUM("0","1","-1"),
             "review_field" VARCHAR(256) NOT NULL,
             "review_status" ENUM('ON','OFF'),
             "effective_from" DATETIME NOT NULL,

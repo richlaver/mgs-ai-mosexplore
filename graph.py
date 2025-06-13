@@ -11,7 +11,10 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
+from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool, ListSQLDatabaseTool
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langgraph.prebuilt import create_react_agent
+from langchain.agents import AgentExecutor
 import time
 import logging
 
@@ -24,11 +27,96 @@ logging.basicConfig(
 )
 
 
+def build_graph_agent(llm, db) -> StateGraph:
+    """Builds the LangGraph workflow for query processing.
+
+    Args:
+        llm: Language model instance.
+        db: SQL database instance.
+
+    Returns:
+        Compiled LangGraph instance.
+    """
+    st.toast("Building LangGraph workflow...", icon=":material/build:")
+
+
+    def generate_response(state: State) -> Generator[State, None, None]:
+        toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+        tools = toolkit.get_tools()
+
+        system_message = """
+        You are an agent designed to interact with a SQL database.
+        Given an input question, create a syntactically correct {dialect} query to run,
+        then look at the results of the query and return the answer. Unless the user
+        specifies a specific number of examples they wish to obtain, always limit your
+        query to at most {top_k} results.
+
+        You can order the results by a relevant column to return the most interesting
+        examples in the database. Never query for all the columns from a specific table,
+        only ask for the relevant columns given the question.
+
+        You MUST double check your query before executing it. If you get an error while
+        executing a query, rewrite the query and try again.
+
+        DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
+        database.
+
+        To start you should ALWAYS look at the tables in the database to see what you
+        can query. Do NOT skip this step.
+
+        Then you should query the schema of the most relevant tables.
+        """.format(
+            dialect="MySQL",
+            top_k=5,
+        )
+        question = state["messages"][-1].content
+
+        agent = create_react_agent(llm, tools, prompt=system_message)
+        logging.debug('agent:')
+        logging.debug(agent)
+        agent_executor = AgentExecutor(agent=agent, tools=tools)
+        logging.debug('agent_executor:')
+        logging.debug(agent_executor)
+        logging.debug(f'Question: {question}')
+
+        new_state = state.copy()
+        for chunk in agent_executor.stream({'messages': [HumanMessage(content=question)]}):
+            logging.debug('Streamed chunk in generate_response: ')
+            logging.debug(chunk)
+            content = ''
+            if 'actions' in chunk:
+                for action in chunk['actions']:
+                    try:
+                        content = f'Calling Tool: `{action.tool}` with input `{action.tool_input}`'
+                        new_state['messages'] = new_state['messages'] + [AIMessage(content=content)]
+                        yield new_state
+                    except Exception as e:
+                        logging.error(f'Action in chunk: {action}')
+            elif 'steps' in chunk:
+                for step in chunk['steps']:
+                    content = f'Tool Result: `{step.observation}`'
+                    new_state['messages'] = new_state['messages'] + [AIMessage(content=content)]
+                    yield new_state
+            elif 'output' in chunk:
+                content = f'Final Output: {chunk['output']}'
+                new_state['messages'] = new_state['messages'] + [AIMessage(content=content)]
+                yield new_state
+            else:
+                raise ValueError()    
+
+    graph_builder = StateGraph(State)
+    graph_builder.add_node('response_generation', generate_response)
+    graph_builder.set_entry_point('response_generation')
+    graph_builder.set_finish_point('response_generation')
+    return graph_builder.compile(checkpointer=MemorySaver())
+
+
 def build_graph(llm, db) -> StateGraph:
     """Builds the LangGraph workflow for query processing.
 
     Args:
         llm: Language model instance.
+        db: SQL database instance.
 
     Returns:
         Compiled LangGraph instance.

@@ -1,3 +1,5 @@
 /.streamlit/secrets.toml
 **/*.log
 /__pycache__/
+google_credentials.json
+chunk_output.py
