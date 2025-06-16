@@ -69,6 +69,17 @@ def build_graph_agent(llm, db) -> StateGraph:
         To start you should ALWAYS look at the tables in the database to see what you
         can query. Do NOT skip this step.
 
+        For queries about instrumentation monitoring data, you should ALWAYS refer to
+        the `type_config_normalized` table in columns giving names, labels, 
+        descriptions and units to get clues concerning the types of instrument listed 
+        in table `instrum` and the context for data stored in table `mydata`. For 
+        instance, groundwater monitoring instruments would typically have names, labels and
+        descriptions with words like "water" and "level", and the measurement unit would
+        be a length or elevation unit like "m" and "mPD". DO NOT rely on columns `type`,
+        `subtype`, `type1` or `subtype1` to infer instrument types. Instead, use names, labels,
+        descriptions and units from `type_config_normalized` to infer the type of instrument
+        and the context of the data stored in `mydata`.
+
         Then you should query the schema of the most relevant tables.
         """.format(
             dialect="MySQL",

@@ -81,7 +81,7 @@ def get_db() -> SQLDatabase:
             engine=engine,
             metadata=metadata,
             include_tables=include_tables,
-            custom_table_info=custom_table_info,
+            # custom_table_info=custom_table_info,
             sample_rows_in_table_info=3,
             lazy_table_reflection=True
         )
