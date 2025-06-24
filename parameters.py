@@ -1,3 +1,66 @@
+context1 = {
+    'instrument_types': [
+        {'settlement marker': """
+            A point on the ground or a structure whose level or elevation is surveyed to ascertain vertical movement. 
+            Typical types include ground, utility, building and track settlement markers.
+            It measures vertical displacement of a location.
+            Typical fields include:
+            - settlement: vertical displacement measured positive downwards (common units: millimetre, mm)
+            - level: surveyed level or elevation of settlement marker (common units: mRL, mPD)
+        """},
+        {'piezometer': """
+            A piezometer installed in the ground to measure hydraulic head.
+            It measures hydraulic head at a location.
+            Common alternative names include standpipe, vibrating wire piezometer, observation well.
+        """}
+    ]
+}
+context = {
+    'instrument_types': [
+        {
+            'settlement marker': {
+                'alternative_names': [],
+                'context_for_type_config_normalized': {
+                    'regex_for_type': ['[A-Z]*SM'],
+                    'keywords_for_user_field_name': ['settlement'],
+                    'keywords_for_user_label': ['settlement'],
+                    'keywords_for_user_description': ['settlement'],
+                },
+                'regex_for_common_abbreviations': ['[A-Z]*SM'],
+                'function': 'measures vertical displacement of a location',
+                'description': 'A point on the ground or a structure whose level or elevation is surveyed to ascertain \
+                    vertical movement. Typical types include ground, utility, building and track settlement markers.',
+                'fields': [
+                    {
+                        'names': ['settlement'],
+                        'keywords': ['settlement'],
+                        'description': 'vertical displacement measured positive downwards',
+                        'common_units': ['millimetre', 'mm']
+                    },
+                    {
+                        'names': ['level'],
+                        'keywords': ['survey', 'elevation'],
+                        'description': 'surveyed level or elevation of settlement marker',
+                        'common_units': ['mRL', 'mPD']
+                    }
+                ]
+            }
+        },
+        {
+            'piezometer': {
+                'alternative_names': ['standpipe', 'vibrating wire piezometer', 'observation well'],
+                'context_for_type_config_normalized': {
+                    'regex_for_type': ['VWP', 'SP', 'OW'],
+                    'keywords_for_user_field_name': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
+                    'keywords_for_user_label': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
+                    'keywords_for_user_description': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
+                },
+                'regex_for_common_abbreviations': ['VWP', 'SP', 'OW'],
+                'function': 'measures hydraulic head at a location',
+                'description': 'A piezometer installed in the ground to measure hydraulic head.'
+            }
+        }    ]
+}
 include_tables=[
     'geo_12_users',
     'mg_user_types',
@@ -18,7 +81,9 @@ include_tables=[
     'review_instruments',
     'review_instruments_values',
     'review_levels',
-    'type_config_normalized'
+    'type_config_normalized',
+    'types',
+    'graph_template'
 ]
 table_info = [
     {
@@ -328,6 +393,50 @@ table_info = [
              for other field types: order of display of fields e.g. in uploaded tables'},
             {'name': 'created_on', 'description': 'timestamp when field was created'},
             {'name': 'updated_on', 'description': 'timestamp when field was updated'}
+        ]
+    },
+    {
+        'name': 'types',
+        'description': 'Table listing instrument types their descriptions. \
+         Use this table to understand the context of instrument types.',
+        'columns': [
+            {'name': 'id', 'description': 'unique identifier for table rows'},
+            {'name': 'type1', 'description': 'instrument type. Type is a way to categorise instruments. \
+             References column type1 of table instrum'},
+            {'name': 'descript', 'description': 'description of instrument type. \
+             Use this to understand the context of instrument type.'},
+            {'name': 'subtype1', 'description': 'instrument subtype. Subtype is a subcategory of type'}
+        ]
+    },
+    {
+        'name': 'graph_template',
+        'description': 'Table defining graph labelling for plotting instrument fields. \
+         Use this table to understand the context of instrument fields.',
+        'columns': [
+            {'name': 'id', 'description': 'unique identifier for a graph'},
+            {'name': 'graph_name', 'description': 'name of graph in graph collection'},
+            {'name': 'type', 'description': 'type of instrument whose fields are plotted in the graph. \
+             If this instrument is compound, the type will be that of the parent instrument. \
+             References column type of table type_config_normalized and column type1 of table instrum'},
+            {'name': 'subtype', 'description': 'subtype of instrument whose fields are plotted in the graph. \
+             If this instrument is compound, the subtype will be that of the parent instrument. \
+             References column subtype of table type_config_normalized and column subtype1 of table instrum'},
+            {'name': 'child_type', 'description': 'type of child instrument whose fields are plotted in the graph. \
+             Only relevant to compound instruments. \
+             References column type of table type_config_normalized and column type1 of table instrum'},
+            {'name': 'child_sub_type', 'description': 'subtype of child instrument whose fields are plotted in the graph. \
+             Only relevant to compound instruments. \
+             References column subtype of table type_config_normalized and column subtype1 of table instrum'},
+            {'name': 'Graph_title1', 'description': 'title of graph. \
+             Use this to understand the context of instrument fields plotted in the graph'},
+            {'name': 'x', 'description': 'system field name for field plotted on x-axis of graph. \
+             References column field_name of table type_config_normalized'},
+            {'name': 'y', 'description': 'system field name for field plotted on y-axis of graph. \
+             References column field_name of table type_config_normalized'},
+            {'name': 'x_caption', 'description': 'x-axis label for graph. \
+             Use this to understand the context of instrument field plotted on x-axis of graph'},
+            {'name': 'y_caption', 'description': 'y-axis label for graph. \
+             Use this to understand the context of instrument field plotted on y-axis of graph'}
         ]
     }
 ]

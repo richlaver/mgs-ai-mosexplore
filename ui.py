@@ -114,6 +114,15 @@ def render_initial_ui() -> None:
             padding: 2px 4px;
             border-radius: 3px;
         }
+        [data-testid="stExpander"] > details,
+        [data-testid="stExpander"] > details > summary,
+        [data-testid="stExpander"] > details > div {
+            background-color: #FFE4CC;
+            border: none !important;
+            box-shadow: none !important;
+            border-radius: 5px;
+            padding: 10px;
+        }
         </style>
         <script>
         function scrollToBottom() {
@@ -172,13 +181,21 @@ def render_chat_content() -> None:
 
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
+    current_query_steps = []
+    query_index = 0
+
     for msg in st.session_state.get('messages', []):
         if isinstance(msg, HumanMessage):
             with st.chat_message("user"):
                 st.markdown(msg.content)
-        elif isinstance(msg, AIMessage):
+            if query_index < len(st.session_state.intermediate_steps_history):
+                with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):
+                    for step in st.session_state.intermediate_steps_history[query_index]:
+                        st.markdown(f'<div class="intermediate-step">{step}</div>', unsafe_allow_html=True)
+            query_index += 1
+        elif isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output":
             with st.chat_message("assistant"):
-                render_message_content(msg.content)
+                render_message_content(msg.content, msg.additional_kwargs.get("type"))
     st.markdown("</div>", unsafe_allow_html=True)
 
     if question := st.chat_input(
@@ -191,6 +208,11 @@ def render_chat_content() -> None:
         with st.chat_message("user"):
             st.markdown(question)
 
+        # Truncate history to prevent excessive memory usage
+        MAX_HISTORY = 1000
+        if len(st.session_state.messages) > MAX_HISTORY:
+            st.session_state.messages = st.session_state.messages[-MAX_HISTORY:]
+
         config = {
             "configurable": {
                 "thread_id": st.session_state.thread_id,
@@ -198,52 +220,44 @@ def render_chat_content() -> None:
             }
         }
         initial_state = {
-            "messages": [user_message],
+            "messages": st.session_state.messages,
             "timings": []
         }
 
         with st.spinner("Generating..."):
             with st.chat_message("assistant"):
-                try:
-                    def stream_tokens():
-                        accumulated_content = ""
-                        stream_container = st.empty()
-                        with stream_container:
-                            for chunk, metadata in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
-                                logging.debug(f"Streamed chunk in render_chat_content: {chunk}")
-                                content = chunk.content
-                                if content:
-                                    if content.startswith('Calling Tool:'):
-                                        chunk_type = 'action'
-                                    elif content.startswith('Tool Result:'):
-                                        chunk_type = 'step'
-                                    elif content.startswith('Final Output:'):
-                                        chunk_type = 'output'
-                                    else:
-                                        chunk_type = 'undefined'
-                                    if chunk_type in ["action", "step"]:
-                                        stream_container.markdown(f'<div class="intermediate-step">{content}</div>', unsafe_allow_html=True)
-                                        yield content
-                                    else:
-                                        accumulated_content += content
-                                        stream_container.markdown(accumulated_content, unsafe_allow_html=True)
-                                        yield content
-                        return accumulated_content
+                with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=True):
+                    thinking_container = st.empty()
+                response_container = st.empty()
 
-                    stream_container = st.empty()
-                    with stream_container:
-                        final_content = stream_container.write_stream(stream_tokens())
-                    
-                    # Update final message in session state
-                    final_state = st.session_state.graph.get_state(config).values
-                    if final_state:
-                        ai_messages = [msg for msg in final_state.get("messages", []) if isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output"]
-                        if ai_messages:
-                            final_message = ai_messages[-1]
-                            if final_message not in st.session_state.messages:
-                                st.session_state.messages.append(final_message)
-                            stream_container.markdown(final_content, unsafe_allow_html=True)
+                thinking_text = ""
+                response_text = ""
+                is_output_started = False
 
-                except Exception as e:
-                    st.error(f"Error streaming response: {e}")
-                    logging.error(f"Streaming error: {e}")
+                for chunk in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
+                    message, metadata = chunk if isinstance(chunk, tuple) else (chunk, {})
+                    content = message.content if hasattr(message, 'content') else str(message)
+                    msg_type = message.additional_kwargs.get("type", "undefined") if hasattr(message, 'additional_kwargs') else "undefined"
+
+                    if msg_type in ["action", "step"]:
+                        thinking_text += f'<div class="intermediate-step">{content}</div>\n'
+                        current_query_steps.append(content)
+                        thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+                        st.session_state.messages.append(
+                            AIMessage(content=content, additional_kwargs={"type": msg_type})
+                        )
+                    elif msg_type == "output":
+                        if not is_output_started:
+                            st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False)
+                            is_output_started = True
+                        response_text += content
+                        response_container.markdown(response_text, unsafe_allow_html=True)
+
+                if current_query_steps:
+                    st.session_state.intermediate_steps_history.append(current_query_steps)
+                if len(st.session_state.intermediate_steps_history) > MAX_HISTORY // 2:
+                    st.session_state.intermediate_steps_history = st.session_state.intermediate_steps_history[-MAX_HISTORY // 2:]
+
+                st.session_state.messages.append(
+                    AIMessage(content=response_text, additional_kwargs={"type": "output"})
+                )

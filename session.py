@@ -30,3 +30,5 @@ def setup_session() -> None:
     if "admin_logged_in" not in st.session_state:
         # st.session_state.admin_logged_in = False
         st.session_state.admin_logged_in = True
+    if "intermediate_steps_history" not in st.session_state:
+        st.session_state.intermediate_steps_history = []

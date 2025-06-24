@@ -47,7 +47,8 @@ def get_llm() -> ChatVertexAI:
     """
     st.toast("Setting up the Gemini 2.0 Flash LLM...", icon=":material/build:")
     return ChatVertexAI(
-        model="gemini-2.0-flash-001"
+        model="gemini-2.0-flash-001",
+        temperature = 0.1
         # model="gemini-2.5-pro-preview-05-06"        
     )
 
