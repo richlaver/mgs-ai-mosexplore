@@ -14,7 +14,7 @@ import ui
 def main() -> None:
     """Initializes and runs the MissionHelp Demo application."""
     st.set_page_config(
-        page_title="MissionOS Reference",
+        page_title="MissionOS Explore",
         page_icon="mgs-small-logo.svg",
         layout="centered",
         initial_sidebar_state="expanded",

@@ -156,7 +156,7 @@ def render_initial_ui() -> None:
         st.divider()
         cols = st.columns([3, 1])
         with cols[0]:
-            st.markdown('<div class="app-title">MISSION REFERENCE</div>', unsafe_allow_html=True)
+            st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
 
     # Reserve space for chat input
     with st.empty():
@@ -231,27 +231,109 @@ def render_chat_content() -> None:
                 response_container = st.empty()
 
                 thinking_text = ""
-                response_text = ""
-                is_output_started = False
+                thinking_buffer = ""
+                final_response_chunks = []
+                last_non_output_index = -1
+                all_chunks = []
+                last_msg_type = None
 
-                for chunk in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
+                for i, chunk in enumerate(st.session_state.graph.stream(initial_state, stream_mode="messages", config=config)):
                     message, metadata = chunk if isinstance(chunk, tuple) else (chunk, {})
                     content = message.content if hasattr(message, 'content') else str(message)
                     msg_type = message.additional_kwargs.get("type", "undefined") if hasattr(message, 'additional_kwargs') else "undefined"
+                    all_chunks.append((content, msg_type))
+                    logging.debug(f'Received message in ui.py: {message}')
 
                     if msg_type in ["action", "step"]:
-                        thinking_text += f'<div class="intermediate-step">{content}</div>\n'
-                        current_query_steps.append(content)
+                        # Close previous CoT div if open
+                        if last_msg_type == "output":
+                            thinking_buffer += "</div>\n"
+                            thinking_text += thinking_buffer
+                            thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+                            thinking_buffer = ""
+                        # Add complete div for action or step
+                        thinking_buffer += f'<div class="intermediate-step">{content}</div>\n'
+                        thinking_text += thinking_buffer
                         thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-                        st.session_state.messages.append(
-                            AIMessage(content=content, additional_kwargs={"type": msg_type})
-                        )
+                        thinking_buffer = ""
+                        last_non_output_index = i
                     elif msg_type == "output":
-                        if not is_output_started:
-                            st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False)
-                            is_output_started = True
-                        response_text += content
-                        response_container.markdown(response_text, unsafe_allow_html=True)
+                        # Start new CoT div only if not continuing an output
+                        if last_msg_type != "output":
+                            thinking_buffer += f'<div class="intermediate-step"><strong>Chain-of-Thought: </strong>{content}'
+                        else:
+                            # Append to existing CoT div
+                            thinking_buffer += content
+                    else:
+                        # Handle undefined or other types
+                        if last_msg_type == "output":
+                            thinking_buffer += "</div>\n"
+                            thinking_text += thinking_buffer
+                            thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+                            thinking_buffer = ""
+                        thinking_buffer += f'<div class="intermediate-step">{content}</div>\n'
+                        thinking_text += thinking_buffer
+                        thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+                        thinking_buffer = ""
+                    current_query_steps.append(content)
+                    last_msg_type = msg_type
+                    logging.debug(f'Thinking buffer: {thinking_buffer}')
+                    st.session_state.messages.append(
+                        AIMessage(content=content, additional_kwargs={"type": msg_type})
+                    )
+
+                # Flush any remaining buffered content
+                if thinking_buffer:
+                    if last_msg_type == "output":
+                        thinking_buffer += "</div>\n"
+                    thinking_text += thinking_buffer
+                    thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+
+                for i, (content, msg_type) in enumerate(all_chunks):
+                    if i > last_non_output_index and msg_type == "output":
+                        final_response_chunks.append(content)
+
+                #     if msg_type in ["action", "step"]:
+                #         # Close previous CoT div if open
+                #         if last_msg_type == "output":
+                #             thinking_text += "</div>\n"
+                #         # Start new div for action or step
+                #         thinking_text += f'<div class="intermediate-step">{content}</div>\n'
+                #         last_non_output_index = i
+                #     elif msg_type == "output":
+                #         # Start new CoT div only if not continuing an output
+                #         if last_msg_type != "output":
+                #             thinking_text += f'<div class="intermediate-step"><strong>Chain-of-Thought: </strong>{content}'
+                #         else:
+                #             # Append to existing CoT div
+                #             thinking_text += content
+                #     else:
+                #         # Handle undefined or other types
+                #         if last_msg_type == "output":
+                #             thinking_text += "</div>\n"
+                #         thinking_text += f'<div class="intermediate-step">{content}</div>\n'
+                #     current_query_steps.append(content)
+                #     last_msg_type = msg_type
+                #     thinking_container.markdown(thinking_text + ("" if msg_type != "output" else "</div>"), unsafe_allow_html=True)
+                #     logging.debug(f'Thinking container updated with {thinking_text}')
+                #     st.session_state.messages.append(
+                #         AIMessage(content=content, additional_kwargs={"type": msg_type})
+                #     )
+
+                # if last_msg_type == "output":
+                #     thinking_text += "</div>\n"
+                #     thinking_container.markdown(thinking_text, unsafe_allow_html=True)
+
+                # for i, (content, msg_type) in enumerate(all_chunks):
+                #     if i > last_non_output_index and msg_type == "output":
+                #         final_response_chunks.append(content)
+
+                response_text = "".join(final_response_chunks)
+                if response_text:
+                    response_container.markdown(response_text, unsafe_allow_html=True)
+                    st.session_state.messages.append(
+                        AIMessage(content=response_text, additional_kwargs={"type": "output"})
+                    )
 
                 if current_query_steps:
                     st.session_state.intermediate_steps_history.append(current_query_steps)
