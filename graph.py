@@ -7,10 +7,7 @@ language model and vector store.
 from typing import Generator
 
 import streamlit as st
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, AIMessageChunk, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from langchain.agents import create_tool_calling_agent
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langchain_community.tools.sql_database.tool import (
@@ -18,18 +15,15 @@ from langchain_community.tools.sql_database.tool import (
     QuerySQLCheckerTool,
     QuerySQLDatabaseTool
 )
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langgraph.prebuilt import create_react_agent
-from langchain.agents import AgentExecutor
-# from classes import CustomInfoSQLDatabaseTool, InstrTypeTool00, UserPermissionsTool
-from classes import CustomInfoSQLDatabaseTool, InstrTypeTool00
-import time
+from tools.get_user_permissions import UserPermissionsTool
+from tools.get_database_schema import CustomInfoSQLDatabaseTool
+from tools.write_sql_with_permissions import CustomQuerySQLDatabaseTool
 import json
 import logging
 
 from classes import State
 from prompts import prompts
-from langchain import hub
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -52,14 +46,11 @@ def build_graph(llm, db) -> StateGraph:
 
 
     def orchestrate_flow(state: State, config: dict) -> Generator[State, None, None]:
-        DescribeSQLDatabaseTool = CustomInfoSQLDatabaseTool()
-        InferInstrTypeTool = InstrTypeTool00(db=db, llm=llm)
-        # GetUserPermissionsTool = UserPermissionsTool(db=db)
         tools=[
-            # GetUserPermissionsTool,
-            InferInstrTypeTool,
-            DescribeSQLDatabaseTool,
+            UserPermissionsTool(db=db),
+            CustomInfoSQLDatabaseTool(),
             ListSQLDatabaseTool(db=db),
+            # CustomQuerySQLDatabaseTool(db=db),
             QuerySQLDatabaseTool(db=db),
             QuerySQLCheckerTool(db=db, llm=llm)
         ]
@@ -81,7 +72,6 @@ def build_graph(llm, db) -> StateGraph:
                 content = ''
                 
                 if isinstance(message, AIMessageChunk):
-                    # Handle tool calls
                     if message.tool_calls:
                         for tool_call in message.tool_calls:
                             args_str = json.dumps(tool_call["args"], ensure_ascii=False)
@@ -91,7 +81,6 @@ def build_graph(llm, db) -> StateGraph:
                             ]
                             logging.debug(f"Tool call: {tool_call['name']} with args: {tool_call['args']}")
                             yield new_state
-                    # Handle token-by-token response
                     elif message.content:
                         content = message.content
                         new_state['messages'] = new_state['messages'] + [

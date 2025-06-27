@@ -9,6 +9,14 @@ import graph
 import session
 import setup
 import ui
+from tools.get_user_permissions import UserPermissionsTool
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 
 def main() -> None:
@@ -30,6 +38,8 @@ def main() -> None:
         setup.set_google_credentials()
         st.session_state.llm = setup.get_llm()
         st.session_state.db = setup.get_db()
+        st.session_state.user_permissions = setup.get_user_permissions()
+        st.session_state.table_relationship_graph = setup.build_relationship_graph()
 
         st.session_state.graph = graph.build_graph(
             llm=st.session_state.llm,

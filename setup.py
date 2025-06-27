@@ -10,7 +10,10 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_community.utilities import SQLDatabase
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
-from parameters import custom_table_info, include_tables
+from parameters import include_tables, table_info
+from collections import defaultdict
+from typing import List, Tuple
+from tools.get_user_permissions import UserPermissionsTool, UserPermissionsToolOutput
 import logging
 
 logging.basicConfig(
@@ -24,6 +27,26 @@ def enable_tracing():
     """Enables LangSmith tracing."""
     os.environ['LANGSMITH_TRACING'] = st.secrets['LANGSMITH_TRACING']
     os.environ['LANGSMITH_API_KEY'] = st.secrets['LANGSMITH_API_KEY']
+
+
+def build_relationship_graph(table_info=table_info) -> defaultdict[str, List[Tuple]]:
+    """Build a relationship graph from table_info."""
+    st.toast("Building table relationship graph...", icon=":material/account_tree:")
+    graph = defaultdict(list)
+    for table in table_info:
+        table_name = table['name']
+        for rel in table.get('relationships', []):
+            graph[table_name].append(
+                (rel['referenced_table'], rel['column'], rel['referenced_column'])
+            )
+    return graph
+
+
+def get_user_permissions() -> UserPermissionsToolOutput:
+    st.toast("Loading user permissions...", icon=":material/lock_open:")
+    return UserPermissionsTool(db=st.session_state.db).invoke(
+        input={'user_id': st.session_state.selected_user_id}
+    )
 
 
 def set_google_credentials() -> None:

@@ -1,3 +1,21 @@
+users = [
+    {
+        'id': 1,
+        'display_name': 'Super Admin' 
+    },
+    {
+        'id': 26,
+        'display_name': 'MGS Developer (Charuthu)' 
+    },
+    {
+        'id': 185,
+        'display_name': 'User (Tran Nguyen Quan)' 
+    },
+    {
+        'id': 7777777,
+        'display_name': 'Not-Existent User' 
+    },
+]
 context1 = {
     'instrument_types': [
         {'settlement marker': """
@@ -61,30 +79,6 @@ context = {
             }
         }    ]
 }
-include_tables=[
-    'geo_12_users',
-    'mg_user_types',
-    'user_access_groups_users',
-    'user_access_groups',
-    'user_access_groups_permissions',
-    'projects',
-    'contracts',
-    'sites',
-    'zones',
-    'location',
-    'instrum',
-    # 'raw_instr_typestbl',
-    # 'object_class_type',
-    # 'object_class',
-    'hierarchy_members',
-    'hierarchies',
-    'review_instruments',
-    'review_instruments_values',
-    'review_levels',
-    'type_config_normalized',
-    'types',
-    'graph_template'
-]
 table_info = [
     {
         'name': 'geo_12_users',
@@ -210,7 +204,19 @@ table_info = [
             {'column': 'contract_id', 'referenced_table': 'contracts', 'referenced_column': 'id'},
             {'column': 'site_id', 'referenced_table': 'sites', 'referenced_column': 'id'},
             {'column': 'zone_id', 'referenced_table': 'zones', 'referenced_column': 'id'}
-        ]
+        ],
+        'hierarchy_permissions_implementation': {
+            'num_joins_from_location_table': 0,
+            'sql_extension_template': """
+                WITH original_query AS ({original_query}) 
+                SELECT original_query.* 
+                FROM original_query 
+                JOIN location ON location.id = original_query.id 
+                WHERE original_query.project_id NOT IN ({project_ids}) 
+                AND original_query.contract_id NOT IN ({contract_ids}) 
+                AND original_query.site_id NOT IN ({site_ids})
+            """
+        }
     },
     {
         'name': 'instrum',
@@ -440,6 +446,7 @@ table_info = [
         ]
     }
 ]
+include_tables = [table['name'] for table in table_info]
 custom_table_info = {
     "geo_12_users": """
         /*

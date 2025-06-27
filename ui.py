@@ -5,6 +5,8 @@ This module defines the Streamlit-based UI.
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
+from parameters import users
+import setup
 import logging
 
 logging.basicConfig(
@@ -31,6 +33,36 @@ def login_modal():
                 st.rerun()
             else:
                 st.error("Incorrect password")
+
+
+@st.dialog("Change User")
+def user_modal():
+    """Renders the user selection modal using Streamlit dialog."""
+    with st.form("user_form", enter_to_submit=False):
+        display_names = [user['display_name'] for user in users]
+        
+        selected_user = next((user for user in users 
+                            if user['id'] == st.session_state.get('selected_user_id', None)), None)
+        default_index = display_names.index(selected_user['display_name']) if selected_user else 0
+        
+        selected_display_name = st.selectbox(
+            "Change User",
+            display_names,
+            key="user_select",
+            label_visibility="visible",
+            index=default_index
+        )
+        
+        if st.form_submit_button("Select"):
+            if selected_display_name:
+                selected_user = next(user for user in users 
+                                   if user['display_name'] == selected_display_name)
+                st.session_state.selected_user_id = selected_user['id']
+                st.session_state.user_permissions = setup.get_user_permissions()
+                logging.debug(f'Changed user permissions to {st.session_state.user_permissions}')
+                st.rerun()
+            else:
+                st.error("Please select a user")
 
 
 def render_initial_ui() -> None:
@@ -157,6 +189,13 @@ def render_initial_ui() -> None:
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
+        with cols[1]:
+            with st.popover(
+                label="",
+                icon=":material/menu:",
+                use_container_width=False
+            ):
+                st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
 
     # Reserve space for chat input
     with st.empty():
