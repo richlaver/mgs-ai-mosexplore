@@ -9,7 +9,6 @@ import graph
 import session
 import setup
 import ui
-from tools.get_user_permissions import UserPermissionsTool
 import logging
 
 logging.basicConfig(
@@ -43,7 +42,9 @@ def main() -> None:
 
         st.session_state.graph = graph.build_graph(
             llm=st.session_state.llm,
-            db=st.session_state.db
+            db=st.session_state.db,
+            user_permissions=st.session_state.user_permissions,
+            table_relationship_graph=st.session_state.table_relationship_graph
         )
         st.session_state.setup_complete = True
         st.toast("Set-up complete!", icon=":material/check_circle:")

@@ -16,7 +16,7 @@ from langchain_community.tools.sql_database.tool import (
     QuerySQLDatabaseTool
 )
 from langgraph.prebuilt import create_react_agent
-from tools.get_user_permissions import UserPermissionsTool
+from tools.get_user_permissions import UserPermissionsTool, UserPermissionsToolOutput
 from tools.get_database_schema import CustomInfoSQLDatabaseTool
 from tools.write_sql_with_permissions import CustomQuerySQLDatabaseTool
 import json
@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 
 
-def build_graph(llm, db) -> StateGraph:
+def build_graph(llm, db, user_permissions: UserPermissionsToolOutput, table_relationship_graph) -> StateGraph:
     """Builds the LangGraph workflow for query processing.
 
     Args:
@@ -50,8 +50,11 @@ def build_graph(llm, db) -> StateGraph:
             UserPermissionsTool(db=db),
             CustomInfoSQLDatabaseTool(),
             ListSQLDatabaseTool(db=db),
-            # CustomQuerySQLDatabaseTool(db=db),
-            QuerySQLDatabaseTool(db=db),
+            CustomQuerySQLDatabaseTool(
+                db=db,
+                user_permissions=user_permissions.hierarchy_permissions,
+                table_relationship_graph=dict(table_relationship_graph)),
+            # QuerySQLDatabaseTool(db=db),
             QuerySQLCheckerTool(db=db, llm=llm)
         ]
 
