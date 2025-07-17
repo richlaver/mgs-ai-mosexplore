@@ -4,6 +4,10 @@ users = [
         'display_name': 'Super Admin' 
     },
     {
+        'id': 200,
+        'display_name': 'User (Osvaldo Moro)'
+    },
+    {
         'id': 26,
         'display_name': 'MGS Developer (Charuthu)' 
     },

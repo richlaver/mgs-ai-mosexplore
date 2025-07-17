@@ -13,7 +13,7 @@ from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
 from typing import List, Tuple
-from tools.get_user_permissions import UserPermissionsTool, UserPermissionsToolOutput
+# from tools.get_user_permissions import UserPermissionsTool, UserPermissionsToolOutput
 import logging
 
 logging.basicConfig(
@@ -42,11 +42,31 @@ def build_relationship_graph(table_info=table_info) -> defaultdict[str, List[Tup
     return graph
 
 
-def get_user_permissions() -> UserPermissionsToolOutput:
-    st.toast("Loading user permissions...", icon=":material/lock_open:")
-    return UserPermissionsTool(db=st.session_state.db).invoke(
-        input={'user_id': st.session_state.selected_user_id}
-    )
+# def get_user_permissions() -> UserPermissionsToolOutput:
+#     st.toast("Loading user permissions...", icon=":material/lock_open:")
+#     return UserPermissionsTool(db=st.session_state.db).invoke(
+#         input={'user_id': st.session_state.selected_user_id}
+#     )
+
+
+def get_global_hierarchy_access() -> bool:
+    """Check if the user has global hierarchy access."""
+    st.toast("Checking global hierarchy access...", icon=":material/lock_open:")
+    query = """
+            SELECT uagu.group_id
+            FROM user_access_groups_users uagu
+            RIGHT JOIN geo_12_users gu ON uagu.user_id = gu.id
+            WHERE gu.id = %s
+        """ % st.session_state.selected_user_id
+    result = st.session_state.db.run(query)
+    if not result:
+        logging.warning("No user access groups found for user ID %s", st.session_state.selected_user_id)
+        return False
+    
+    parsed_result = eval(result)
+    row = parsed_result[0]
+    logging.debug(f"Global hierarchy access check for user ID {st.session_state.selected_user_id}: {row[0]}")
+    return row[0] == 0
 
 
 def set_google_credentials() -> None:

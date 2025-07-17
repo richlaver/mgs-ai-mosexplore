@@ -12,8 +12,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langchain_community.tools.sql_database.tool import (
     ListSQLDatabaseTool,
-    QuerySQLCheckerTool,
-    QuerySQLDatabaseTool
+    QuerySQLCheckerTool
 )
 from langgraph.prebuilt import create_react_agent
 from tools.get_user_permissions import UserPermissionsTool, UserPermissionsToolOutput
@@ -32,7 +31,13 @@ logging.basicConfig(
 )
 
 
-def build_graph(llm, db, user_permissions: UserPermissionsToolOutput, table_relationship_graph) -> StateGraph:
+def build_graph(
+        llm,
+        db,
+        table_relationship_graph,
+        user_id: int,
+        global_hierarchy_access: bool = False
+    ) -> StateGraph:
     """Builds the LangGraph workflow for query processing.
 
     Args:
@@ -52,9 +57,10 @@ def build_graph(llm, db, user_permissions: UserPermissionsToolOutput, table_rela
             ListSQLDatabaseTool(db=db),
             CustomQuerySQLDatabaseTool(
                 db=db,
-                user_permissions=user_permissions.hierarchy_permissions,
-                table_relationship_graph=dict(table_relationship_graph)),
-            # QuerySQLDatabaseTool(db=db),
+                table_relationship_graph=dict(table_relationship_graph),
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            ),
             QuerySQLCheckerTool(db=db, llm=llm)
         ]
 

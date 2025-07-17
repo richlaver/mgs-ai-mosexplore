@@ -34,7 +34,9 @@ def setup_session() -> None:
         st.session_state.intermediate_steps_history = []
     if "selected_user_id" not in st.session_state:
         st.session_state.selected_user_id = 1 # Default to Super Admin user
-    if "user_permissions" not in st.session_state:
-        st.session_state.user_permissions = None
+    # if "user_permissions" not in st.session_state:
+    #     st.session_state.user_permissions = None
+    if "global_hierarcy_access" not in st.session_state:
+        st.session_state.global_hierarcy_access = False
     if "table_relationship_graph" not in st.session_state:
         st.session_state.table_relationship_graph = None

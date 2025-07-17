@@ -100,8 +100,8 @@ class UserPermissionsTool(BaseSQLDatabaseTool, BaseTool):
             SELECT p.id AS project_id, p.name AS project_name, c.id AS contract_id, c.name AS contract_name,
                    s.id AS site_id, s.name AS site_name
             FROM sites s
-            LEFT JOIN contracts c ON s.contract_id = c.id
-            LEFT JOIN projects p ON c.project_id = p.id
+            RIGHT JOIN contracts c ON s.contract_id = c.id
+            RIGHT JOIN projects p ON c.project_id = p.id
         """
         all_data = eval(self.db.run(all_data_query))
 

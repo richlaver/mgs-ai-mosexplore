@@ -37,14 +37,16 @@ def main() -> None:
         setup.set_google_credentials()
         st.session_state.llm = setup.get_llm()
         st.session_state.db = setup.get_db()
-        st.session_state.user_permissions = setup.get_user_permissions()
+        # st.session_state.user_permissions = setup.get_user_permissions()
+        st.session_state.global_hierarcy_access = setup.get_global_hierarchy_access()
         st.session_state.table_relationship_graph = setup.build_relationship_graph()
 
         st.session_state.graph = graph.build_graph(
             llm=st.session_state.llm,
             db=st.session_state.db,
-            user_permissions=st.session_state.user_permissions,
-            table_relationship_graph=st.session_state.table_relationship_graph
+            table_relationship_graph=st.session_state.table_relationship_graph,
+            user_id=st.session_state.selected_user_id,
+            global_hierarchy_access=st.session_state.global_hierarcy_access
         )
         st.session_state.setup_complete = True
         st.toast("Set-up complete!", icon=":material/check_circle:")
