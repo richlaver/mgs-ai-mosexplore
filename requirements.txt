@@ -6,4 +6,5 @@ langchain_community
 langgraph
 langchain_google_vertexai
 sqlalchemy
+sqlparse
 mysql-connector-python
