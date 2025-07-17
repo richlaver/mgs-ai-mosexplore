@@ -59,15 +59,15 @@ def user_modal():
                 selected_user = next(user for user in users 
                                    if user['display_name'] == selected_display_name)
                 st.session_state.selected_user_id = selected_user['id']
-                st.session_state.user_permissions = setup.get_user_permissions()
+                # st.session_state.user_permissions = setup.get_user_permissions()
                 st.session_state.graph = graph.build_graph(
                     llm=st.session_state.llm,
                     db=st.session_state.db,
-                    user_permissions=st.session_state.user_permissions,
+                    # user_permissions=st.session_state.user_permissions,
                     table_relationship_graph=st.session_state.table_relationship_graph,
                     user_id=st.session_state.selected_user_id
                 )
-                logging.debug(f'Changed user permissions to {st.session_state.user_permissions}')
+                # logging.debug(f'Changed user permissions to {st.session_state.user_permissions}')
                 st.rerun()
             else:
                 st.error("Please select a user")
