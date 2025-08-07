@@ -11,6 +11,7 @@ import sqlparse
 from collections import deque
 import logging
 
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -59,14 +60,51 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
     args_schema: Type[BaseModel] = _CustomQuerySQLDatabaseToolInput
 
 
+    def strip_markdown(self, query: str) -> str:
+        """Remove markdown code fences and backticks from the query, preserving 
+        valid SQL syntax."""
+        logging.debug(f"Original query before markdown stripping: {query}")
+        
+        query = query.strip()
+        if query.startswith("```sql") or query.startswith("```"):
+            lines = query.splitlines()
+            if lines and lines[-1].strip() == "```":
+                query = "\n".join(lines[1:-1]).strip()
+            else:
+                query = "\n".join(lines[1:]).strip()
+        logging.debug(f"Query after markdown stripping: {query}")
+        return query
+
     def _run(
         self,
         query: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> Union[str, Sequence[Dict[str, Any]], Result]:
         """Execute the query, return the results or an error message."""
+        query = self.strip_markdown(query)
+
+        def check_for_write_statements(query: str) -> Optional[str]:
+            """
+            Check if the query contains write statements, returning an error 
+            message if found."""
+            write_keywords = {
+                'INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE',
+                'TRUNCATE', 'MERGE', 'GRANT', 'REVOKE', 'SET', 'REPLACE'
+            }
+            parsed = sqlparse.parse(query)
+            for statement in parsed:
+                if statement.get_type().upper() in write_keywords:
+                    error_message = f"""Query contains forbidden write 
+                    operation: {statement.get_type().upper()}. Only read-only 
+                    queries are allowed."""
+                    logging.error(error_message)
+                    return error_message
+            logging.debug("No write operations detected in query.")
+            return None
+
         def get_all_tables(query):
-            """Extract all table names and their aliases from FROM and JOIN clauses."""
+            """Extract all table names and their aliases from FROM and JOIN 
+            clauses."""
             parsed = sqlparse.parse(query)[0]
             logging.debug(f'Parsed SQL query: {parsed}')
             tables = []
@@ -123,8 +161,9 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
             return None
 
         def extend_query(query: str) -> str:
-            """Dynamically rewrite the query to add JOIN and WHERE clauses for user permissions."""
+            """Dynamically rewrite the query to add JOIN and WHERE EXISTS clauses for user permissions."""
             logging.debug(f'Original query: {query}')
+            query = query.rstrip(';')
             
             table_aliases = get_all_tables(query)
             if not table_aliases:
@@ -160,75 +199,87 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
                     break
 
             tokens = list(parsed.tokens)
-            new_where_condition = (
-                f"u.id = {self.user_id} AND uagu.user_deleted = 0 AND u.prohibit_portal_access NOT IN (1, 2, 3)"
+            # Set default alias for location if not already set
+            location_alias = location_alias or "location"
+
+            # Define the EXISTS clause for permission checks
+            exists_clause = (
+                f"EXISTS ("
+                f"SELECT 1 "
+                f"FROM user_access_groups_permissions uagp "
+                f"JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                f"JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                f"JOIN geo_12_users u ON uagu.user_id = u.id "
+                f"WHERE u.id = {self.user_id} "
+                f"AND uagu.user_deleted = 0 "
+                f"AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                f"AND ("
+                f"(uagp.project = 0 OR uagp.project = {location_alias}.project_id) "
+                f"AND (uagp.contract = 0 OR uagp.contract = {location_alias}.contract_id OR uagp.project = 0) "
+                f"AND (uagp.site = 0 OR uagp.site = {location_alias}.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                f")"
+                f")"
             )
-            base_permission_joins = [
-                " JOIN user_access_groups_permissions uagp ON (p.id = uagp.project OR uagp.project = 0) AND (c.id = uagp.contract OR uagp.contract = 0) AND (s.id = uagp.site OR uagp.site = 0) ",
-                " JOIN user_access_groups uag ON uagp.user_group_id = uag.id ",
-                " JOIN user_access_groups_users uagu ON uag.id = uagu.group_id ",
-                " JOIN geo_12_users u ON uagu.user_id = u.id "
-            ]
 
             # Define valid target tables that exist in the table_relationship_graph
             valid_targets = [t for t in ["location", "contracts", "projects", "sites"] if t in self.table_relationship_graph]
 
-            if location_alias:
-                # Location is in the query
-                permission_joins = [
+            if location_alias and location_alias != "location":
+                # Location is in the query with a custom alias
+                join_clauses = [
                     f" LEFT JOIN projects p ON {location_alias}.project_id = p.id ",
                     f" LEFT JOIN contracts c ON {location_alias}.contract_id = c.id ",
                     f" LEFT JOIN sites s ON {location_alias}.site_id = s.id ",
-                ] + base_permission_joins
+                ]
                 if where_clause:
-                    new_where = f"{where_clause} AND ({new_where_condition})"
+                    new_where = f"{where_clause} AND {exists_clause}"
                     tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
                 else:
-                    new_where = f" WHERE {new_where_condition}"
+                    new_where = f" WHERE {exists_clause}"
                     tokens = tokens + [new_where]
-                tokens = tokens + permission_joins
+                tokens = tokens + join_clauses
             elif contracts_alias:
                 # Contracts is in the query
-                permission_joins = [
+                join_clauses = [
                     f" LEFT JOIN projects p ON {contracts_alias}.project_id = p.id ",
                     f" LEFT JOIN location ON {contracts_alias}.id = location.contract_id ",
                     f" LEFT JOIN sites s ON location.site_id = s.id ",
-                ] + base_permission_joins
+                ]
                 if where_clause:
-                    new_where = f"{where_clause} AND ({new_where_condition})"
+                    new_where = f"{where_clause} AND {exists_clause}"
                     tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
                 else:
-                    new_where = f" WHERE {new_where_condition}"
+                    new_where = f" WHERE {exists_clause}"
                     tokens = tokens + [new_where]
-                tokens = tokens + permission_joins
+                tokens = tokens + join_clauses
             elif projects_alias:
                 # Projects is in the query
-                permission_joins = [
+                join_clauses = [
                     f" LEFT JOIN contracts c ON {projects_alias}.id = c.project_id ",
                     f" LEFT JOIN location ON c.id = location.contract_id ",
                     f" LEFT JOIN sites s ON location.site_id = s.id ",
-                ] + base_permission_joins
+                ]
                 if where_clause:
-                    new_where = f"{where_clause} AND ({new_where_condition})"
+                    new_where = f"{where_clause} AND {exists_clause}"
                     tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
                 else:
-                    new_where = f" WHERE {new_where_condition}"
+                    new_where = f" WHERE {exists_clause}"
                     tokens = tokens + [new_where]
-                tokens = tokens + permission_joins
+                tokens = tokens + join_clauses
             elif sites_alias:
                 # Sites is in the query
-                permission_joins = [
+                join_clauses = [
                     f" LEFT JOIN contracts c ON {sites_alias}.contract_id = c.id ",
                     f" LEFT JOIN projects p ON c.project_id = p.id ",
                     f" LEFT JOIN location ON {sites_alias}.id = location.site_id ",
-                ] + base_permission_joins
+                ]
                 if where_clause:
-                    new_where = f"{where_clause} AND ({new_where_condition})"
+                    new_where = f"{where_clause} AND {exists_clause}"
                     tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
                 else:
-                    new_where = f" WHERE {new_where_condition}"
+                    new_where = f" WHERE {exists_clause}"
                     tokens = tokens + [new_where]
-                tokens = tokens + permission_joins
+                tokens = tokens + join_clauses
             else:
                 # Find path to location, contracts, projects, or sites
                 min_distance = float('inf')
@@ -259,25 +310,25 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
                         f" LEFT JOIN projects p ON {prev_table}.project_id = p.id ",
                         f" LEFT JOIN contracts c ON {prev_table}.contract_id = c.id ",
                         f" LEFT JOIN sites s ON {prev_table}.site_id = s.id ",
-                    ] + base_permission_joins)
+                    ])
                 elif target_table == "contracts":
                     join_clauses.extend([
                         f" LEFT JOIN projects p ON {prev_table}.project_id = p.id ",
                         f" LEFT JOIN location ON {prev_table}.id = location.contract_id ",
                         f" LEFT JOIN sites s ON location.site_id = s.id ",
-                    ] + base_permission_joins)
+                    ])
                 elif target_table == "projects":
                     join_clauses.extend([
                         f" LEFT JOIN contracts c ON {prev_table}.id = c.project_id ",
                         f" LEFT JOIN location ON c.id = location.contract_id ",
                         f" LEFT JOIN sites s ON location.site_id = s.id ",
-                    ] + base_permission_joins)
+                    ])
                 elif target_table == "sites":
                     join_clauses.extend([
                         f" LEFT JOIN contracts c ON {prev_table}.contract_id = c.id ",
                         f" LEFT JOIN projects p ON c.project_id = p.id ",
                         f" LEFT JOIN location ON {prev_table}.id = location.site_id ",
-                    ] + base_permission_joins)
+                    ])
 
                 from_index = None
                 table_index = None
@@ -307,16 +358,20 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
                 )
 
                 if where_clause:
-                    new_where = f"{where_clause} AND ({new_where_condition})"
+                    new_where = f"{where_clause} AND {exists_clause}"
                     tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
                 else:
-                    new_where = f" WHERE {new_where_condition}"
+                    new_where = f" WHERE {exists_clause}"
                     tokens = tokens + [new_where]
 
             extended_query = "".join(str(token) for token in tokens)
             logging.debug(f'Returning extended query: {extended_query}')
             return extended_query
 
+        write_error = check_for_write_statements(query)
+        if write_error:
+            return write_error
+        
         if self.global_hierarchy_access:
             logging.debug("User has global hierarchy access, returning original query.")
             return self.db.run_no_throw(query)

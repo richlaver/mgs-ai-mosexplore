@@ -59,18 +59,87 @@ def user_modal():
                 selected_user = next(user for user in users 
                                    if user['display_name'] == selected_display_name)
                 st.session_state.selected_user_id = selected_user['id']
-                # st.session_state.user_permissions = setup.get_user_permissions()
-                st.session_state.graph = graph.build_graph(
-                    llm=st.session_state.llm,
-                    db=st.session_state.db,
-                    # user_permissions=st.session_state.user_permissions,
-                    table_relationship_graph=st.session_state.table_relationship_graph,
-                    user_id=st.session_state.selected_user_id
-                )
-                # logging.debug(f'Changed user permissions to {st.session_state.user_permissions}')
+                st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access()
+                match st.session_state.test_mode:
+                    case 'Tool':
+                        st.session_state.graph = graph.build_tool_graph(
+                            llm=st.session_state.llm,
+                            db=st.session_state.db,
+                            table_relationship_graph=st.session_state.table_relationship_graph,
+                            user_id=st.session_state.selected_user_id,
+                            global_hierarchy_access=st.session_state.global_hierarchy_access
+                        )
+                    case 'Sub-agent':
+                        st.session_state.graph = graph.build_subagent_graph(
+                            llm=st.session_state.llm,
+                            db=st.session_state.db,
+                            table_relationship_graph=st.session_state.table_relationship_graph,
+                            user_id=st.session_state.selected_user_id,
+                            global_hierarchy_access=st.session_state.global_hierarchy_access
+                        )
+                    case 'Supervisor':
+                        st.session_state.graph = graph.build_supervisor_graph(
+                            llm=st.session_state.llm,
+                            db=st.session_state.db,
+                            table_relationship_graph=st.session_state.table_relationship_graph,
+                            user_id=st.session_state.selected_user_id,
+                            global_hierarchy_access=st.session_state.global_hierarchy_access
+                        )
                 st.rerun()
             else:
                 st.error("Please select a user")
+
+
+@st.dialog("Select Test")
+def test_mode_modal():
+    """Renders the test mode selection modal using Streamlit dialog."""
+    with st.form("test_mode_form", enter_to_submit=False):
+        test_modes = ["Tool", "Sub-agent", "Supervisor"]
+        default_mode = st.session_state.test_mode
+        
+        selected_test_mode = st.segmented_control(
+            label="Select Test Mode",
+            options=test_modes,
+            selection_mode="single",
+            default=default_mode,
+            key="test_mode_select",
+            label_visibility="visible",
+            help="Choose the component to test: Tool, Sub-agent, or Supervisor."
+        )
+        
+        if st.form_submit_button("Select"):
+            if selected_test_mode:
+                if selected_test_mode != st.session_state.test_mode:
+                    match selected_test_mode:
+                        case "Tool":
+                            st.session_state.graph = graph.build_tool_graph(
+                                llm=st.session_state.llm,
+                                db=st.session_state.db,
+                                table_relationship_graph=st.session_state.table_relationship_graph,
+                                user_id=st.session_state.selected_user_id,
+                                global_hierarchy_access=st.session_state.global_hierarchy_access
+                            )
+                        case "Sub-agent":
+                            st.session_state.graph = graph.build_subagent_graph(
+                                llm=st.session_state.llm,
+                                db=st.session_state.db,
+                                table_relationship_graph=st.session_state.table_relationship_graph,
+                                user_id=st.session_state.selected_user_id,
+                                global_hierarchy_access=st.session_state.global_hierarchy_access
+                            )
+                        case "Supervisor":
+                            st.session_state.graph = graph.build_supervisor_graph(
+                                llm=st.session_state.llm,
+                                db=st.session_state.db,
+                                table_relationship_graph=st.session_state.table_relationship_graph,
+                                user_id=st.session_state.selected_user_id,
+                                global_hierarchy_access=st.session_state.global_hierarchy_access
+                            )
+                st.session_state.test_mode = selected_test_mode
+                st.toast(f"Test mode set to {selected_test_mode}", icon=":material/check_circle:")
+                st.rerun()
+            else:
+                st.error("Please select a test mode")
 
 
 def render_initial_ui() -> None:
@@ -204,6 +273,7 @@ def render_initial_ui() -> None:
                 use_container_width=False
             ):
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
+                st.button(label="Select Test", icon=":material/build:", key="test_mode_button", help="Select test mode", on_click=test_mode_modal, use_container_width=True)
 
     # Reserve space for chat input
     with st.empty():
@@ -240,7 +310,7 @@ def render_chat_content() -> None:
                     for step in st.session_state.intermediate_steps_history[query_index]:
                         st.markdown(f'<div class="intermediate-step">{step}</div>', unsafe_allow_html=True)
             query_index += 1
-        elif isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output":
+        elif isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output" and msg.additional_kwargs.get("final"):
             with st.chat_message("assistant"):
                 render_message_content(msg.content, msg.additional_kwargs.get("type"))
     st.markdown("</div>", unsafe_allow_html=True)

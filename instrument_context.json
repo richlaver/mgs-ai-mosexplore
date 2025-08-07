@@ -1,0 +1,96 @@
+[
+    {
+        "LP-0": [
+            {
+                "query_words": "settlement reading",
+                "database_sources": [
+                    {
+                        "instrument_type": "LP",
+                        "instrument_subtype": "MOVEMENT",
+                        "data_fields": [
+                            {
+                                "field_name": "calculation1",
+                                "field_type": "calc"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "CASA-0": [
+            {
+                "query_words": "groundwater level reading",
+                "database_sources": [
+                    {
+                        "instrument_type": "CASA",
+                        "instrument_subtype": "DEFAULT",
+                        "data_fields": [
+                            {
+                                "field_name": "calculation1",
+                                "field_type": "calc"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "LP-OT-0": [
+            {
+                "query_words": "settlement readings",
+                "database_sources": [
+                    {
+                        "instrument_type": "LP",
+                        "instrument_subtype": "MOVEMENT",
+                        "data_fields": [
+                            {
+                                "field_name": "calculation1",
+                                "field_type": "calc"
+                            }
+                        ]
+                    },
+                    {
+                        "instrument_type": "OT",
+                        "instrument_subtype": "MOVEMENT",
+                        "data_fields": [
+                            {
+                                "field_name": "data1",
+                                "field_type": "data"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "VIBR-0": [
+            {
+                "query_words": "peak particle velocities",
+                "database_sources": [
+                    {
+                        "instrument_type": "VIBR",
+                        "instrument_subtype": "GSS",
+                        "data_fields": [
+                            {
+                                "field_name": "data4",
+                                "field_type": "data"
+                            },
+                            {
+                                "field_name": "data5",
+                                "field_type": "data"
+                            },
+                            {
+                                "field_name": "data6",
+                                "field_type": "data"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+]

@@ -4,6 +4,12 @@ from langchain_core.callbacks import CallbackManagerForToolRun
 from pydantic import BaseModel, Field, ConfigDict
 from langchain_community.utilities.sql_database import SQLDatabase
 
+# 2025-08-05 The UserPermissionsTool is currently superceded by the 
+# CustomQuerySQLDatabaseTool.
+# The CustomQuerySQLDatabaseTool links the nearest table in the generated SQL 
+# query to the `location` table.
+# By doing so, the tool applies a WHERE filter to apply user permissions 
+# according to the user's `user_id``.
 
 class BaseSQLDatabaseTool(BaseModel):
     """Base tool for interacting with a SQL database."""

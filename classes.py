@@ -14,9 +14,11 @@ class State(MessagesState):
     Attributes:
         messages: List of conversation messages (human, AI, or tool).
         timings: List of dictionaries with timing details for nodes and components.
+        next_agent: Identifier for the next agent to handle the conversation.
     """
     is_valid_request: bool
     timings: List[dict]
+    next_agent: str
     
 
 # class InstrTypeToolInput00(BaseModel):

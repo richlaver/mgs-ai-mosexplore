@@ -36,7 +36,9 @@ def setup_session() -> None:
         st.session_state.selected_user_id = 1 # Default to Super Admin user
     # if "user_permissions" not in st.session_state:
     #     st.session_state.user_permissions = None
-    if "global_hierarcy_access" not in st.session_state:
-        st.session_state.global_hierarcy_access = False
+    if "global_hierarchy_access" not in st.session_state:
+        st.session_state.global_hierarchy_access = False
     if "table_relationship_graph" not in st.session_state:
         st.session_state.table_relationship_graph = None
+    if "test_mode" not in st.session_state:
+        st.session_state.test_mode = "Sub-agent"
