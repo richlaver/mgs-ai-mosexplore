@@ -1,6 +1,6 @@
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
-from tools.datetime_toolkit import GetDatetimeNowTool, DatetimeShiftTool
+from tools.datetime_toolkit import GetDatetimeNowTool
 from langchain_core.messages import AIMessage
 from typing import Literal, List
 from classes import State
@@ -39,8 +39,7 @@ def get_date_range_agent(state: State) -> Command[Literal['supervisor']]:
     agent_executor = create_react_agent(
         model=st.session_state.llm,
         tools=[
-            GetDatetimeNowTool(),
-            DatetimeShiftTool()
+            GetDatetimeNowTool()
         ],
         prompt=prompts['prompt-006']['content']
     )

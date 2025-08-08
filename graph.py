@@ -20,18 +20,14 @@ from langchain_community.tools.sql_database.tool import (
     ListSQLDatabaseTool,
     QuerySQLCheckerTool
 )
-# from agents.get_date_range import get_date_range_agent
-# from langgraph.prebuilt import create_react_agent
 from langchain.agents import AgentExecutor, create_react_agent
-from langchain.agents.output_parsers import ReActJsonSingleInputOutputParser
 from tools.get_user_permissions import UserPermissionsTool
 from tools.get_database_schema import CustomInfoSQLDatabaseTool
 from tools.sql_security_toolkit import CustomQuerySQLDatabaseTool
 from tools.datetime_toolkit import (
     GetDatetimeNowTool,
-    DatetimeShiftTool
+    DatetimeShiftWrapperTool
 )
-from agents.get_date_range import GetDateRangeAgentOutput
 from typing import Literal
 import json
 import logging
@@ -105,7 +101,7 @@ def build_supervisor_graph(
             ),
             QuerySQLCheckerTool(db=db, llm=llm),
             GetDatetimeNowTool(),
-            DatetimeShiftTool()
+            DatetimeShiftWrapperTool()
         ]
 
         # Using create_react_agent from langchain.prebuilt
@@ -239,7 +235,7 @@ def build_subagent_graph(
             global_hierarchy_access=global_hierarchy_access
         )
         get_datetime_now_tool = GetDatetimeNowTool()
-        datetime_shift_tool = DatetimeShiftTool()
+        datetime_shift_tool = DatetimeShiftWrapperTool()
         tools = [
             custom_query_sql_database_tool,
             get_datetime_now_tool,
@@ -356,11 +352,20 @@ def build_tool_graph(
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
+        tool = DatetimeShiftWrapperTool()
         question = state["messages"][-1].content
 
         new_state = state.copy()
 
-        response = tool.invoke({'query': question})
+        # Invoking with JSON string
+        response = tool.invoke('''
+        {
+            "input_datetime": "08 August 2025 07:21:02 AM",
+            "operation": "subtract",
+            "value": 1,
+            "unit": "days"
+        }
+        ''')
 
         new_state['messages'] = new_state['messages'] + [
             AIMessage(content=response, additional_kwargs={"type": "output"})

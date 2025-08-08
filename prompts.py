@@ -1428,12 +1428,13 @@ The inputs you formulate must always be consistent with the args schema.
 Check that your action inputs adhere to the args schema defined for the tool 
 before you invoke the tool.
 
-When invoking the {add_or_subtract_datetime_toolname} tool, provide a JSON object with the following fields:
+When invoking the {add_or_subtract_datetime_toolname} tool, provide a JSON string with the following fields:
 - input_datetime: A string in the format 'D[D] MonthName YYYY H[H]:MM:SS AM/PM' (e.g., '20 July 2025 05:53:22 PM').
 - operation: Either 'add' or 'subtract' (optional, defaults to 'add'; use 'subtract' or negative value for subtraction).
 - value: A float representing the time period (e.g., 5.5; negative values imply subtraction).
 - unit: One of 'seconds', 'minutes', 'hours', 'days', 'weeks', 'months', 'years'.
-Example: {{"input_datetime": "20 July 2025 05:53:22 PM", "operation": "add", "value": 2, "unit": "days"}}
+Example:
+{{"input_datetime": "20 July 2025 05:53:22 PM", "operation": "add", "value": 2, "unit": "days"}}
 Do not use incorrect field names like 'interval', 'datetime' or 'days'.
 
 # Examples
