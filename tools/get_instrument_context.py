@@ -52,7 +52,7 @@ class InstrumentContextTool(BaseTool):
     description: str = """
     Extracts instrument context from a user query.
     Input:
-    - A string containing the user's query about instruments and their readings
+    - The user's query
     Returns:
     - InstrumentContextToolOutput containing matched instruments and their data fields.
     Example: "show me all vibration readings"
@@ -63,11 +63,11 @@ class InstrumentContextTool(BaseTool):
         query: str
     ) -> InstrumentContextToolOutput:
         """Run the tool to extract instrument context from a query."""
-        if 'settlement' in query.lower():
+        if any(word in query.lower() for word in ['settlement', 'movement', 'displacement']):
             return InstrumentContextToolOutput(
                 query_words=[
                     QueryWords(
-                        query_words="settlement",
+                        query_words="settlement movement displacement",
                         data_sources=[
                             DataSourcesDict(
                                 instrument_type="LP",

@@ -69,8 +69,10 @@ class GeneralSQLQueryTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, BaseTool
 
 
     def strip_markdown(self, query: str) -> str:
-        """Remove markdown code fences and backticks from the query, preserving 
-        valid SQL syntax."""
+        """
+Remove markdown code fences and backticks from the query, preserving valid SQL 
+syntax. Also handles multiple SQL statements by keeping only the first one.
+"""
         logging.debug(f"Original query before markdown stripping: {query}")
         
         query = query.strip()
@@ -80,7 +82,15 @@ class GeneralSQLQueryTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, BaseTool
                 query = "\n".join(lines[1:-1]).strip()
             else:
                 query = "\n".join(lines[1:]).strip()
-        logging.debug(f"Query after markdown stripping: {query}")
+        
+        parsed = sqlparse.parse(query)
+        if len(parsed) > 1:
+            logging.warning(f"""Multiple SQL statements detected. 
+Only the first statement will be executed. Discarded statements: 
+{len(parsed) - 1}""")
+            query = str(parsed[0])
+        
+        logging.debug(f"Query after markdown stripping and statement isolation: {query}")
         return query
 
     def _run(
@@ -401,17 +411,26 @@ class GeneralSQLQueryTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, BaseTool
             logging.debug(f'Returning extended query: {extended_query}')
             return extended_query
 
+        def process_results(results):
+            """Process query results, handling empty results consistently."""
+            if isinstance(results, str) and not results.strip():
+                return "No data was found in the database matching the specified search criteria."
+            return results
+
         write_error = check_for_write_statements(query)
         if write_error:
             return write_error
         
-        if self.global_hierarchy_access:
-            logging.debug("User has global hierarchy access, returning original query.")
-            return self.db.run_no_throw(query)
         try:
-            extended_query = extend_query(query=query)
-            return self.db.run_no_throw(extended_query)
+            if self.global_hierarchy_access:
+                print("User has global hierarchy access, using original query.")
+                results = self.db.run_no_throw(query)
+            else:
+                extended_query = extend_query(query=query)
+                results = self.db.run_no_throw(extended_query)
+            
+            return process_results(results)
         except Exception as e:
-            logging.error(f"Error extending query: {str(e)}")
+            logging.error(f"Error executing query: {str(e)}")
             raise
 

@@ -125,7 +125,12 @@ def build_supervisor_graph(
         logger.debug("Filtered messages: %s",
                      json.dumps([msg.__dict__ for msg in filtered_messages], default=str, indent=2))
         
-        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+        agent_executor = AgentExecutor(
+            agent=agent,
+            tools=tools,
+            verbose=True,
+            handle_parsing_errors=True
+        )
 
         for chunk in agent_executor.stream(
             input={

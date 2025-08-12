@@ -91,6 +91,8 @@ Example: {'input_datetime': '07 August 2025 06:46:21 PM', 'operation':
     ) -> DatetimeShiftToolOutput:
         """Add or subtract the time period from the datetime."""
         try:
+            if ' 00:' in input_datetime:
+                input_datetime = input_datetime.replace(' 00:', ' 12:')
             dt = datetime.strptime(input_datetime, "%d %B %Y %I:%M:%S %p")
             effective_operation = "subtract" if value < 0 else operation
             abs_value = abs(value)
