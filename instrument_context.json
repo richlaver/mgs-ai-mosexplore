@@ -2,7 +2,7 @@
     {
         "LP-0": [
             {
-                "query_words": "settlement reading",
+                "query_words": "settlement",
                 "database_sources": [
                     {
                         "instrument_type": "LP",
@@ -10,7 +10,8 @@
                         "data_fields": [
                             {
                                 "field_name": "calculation1",
-                                "field_type": "calc"
+                                "field_type": "calc",
+                                "field_units": "mm"
                             }
                         ]
                     }
@@ -21,7 +22,7 @@
     {
         "CASA-0": [
             {
-                "query_words": "groundwater level reading",
+                "query_words": "groundwater level",
                 "database_sources": [
                     {
                         "instrument_type": "CASA",
@@ -29,7 +30,8 @@
                         "data_fields": [
                             {
                                 "field_name": "calculation1",
-                                "field_type": "calc"
+                                "field_type": "calc",
+                                "field_units": "m"
                             }
                         ]
                     }
@@ -40,7 +42,7 @@
     {
         "LP-OT-0": [
             {
-                "query_words": "settlement readings",
+                "query_words": "settlement",
                 "database_sources": [
                     {
                         "instrument_type": "LP",
@@ -48,7 +50,8 @@
                         "data_fields": [
                             {
                                 "field_name": "calculation1",
-                                "field_type": "calc"
+                                "field_type": "calc",
+                                "field_units": "mm"
                             }
                         ]
                     },
@@ -58,7 +61,8 @@
                         "data_fields": [
                             {
                                 "field_name": "data1",
-                                "field_type": "data"
+                                "field_type": "data",
+                                "field_units": "mm"
                             }
                         ]
                     }
@@ -69,7 +73,7 @@
     {
         "VIBR-0": [
             {
-                "query_words": "peak particle velocities",
+                "query_words": "vibration",
                 "database_sources": [
                     {
                         "instrument_type": "VIBR",
@@ -77,15 +81,18 @@
                         "data_fields": [
                             {
                                 "field_name": "data4",
-                                "field_type": "data"
+                                "field_type": "data",
+                                "field_units": "mm/s"
                             },
                             {
                                 "field_name": "data5",
-                                "field_type": "data"
+                                "field_type": "data",
+                                "field_units": "mm/s"
                             },
                             {
                                 "field_name": "data6",
-                                "field_type": "data"
+                                "field_type": "data",
+                                "field_units": "mm/s"
                             }
                         ]
                     }

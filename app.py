@@ -50,7 +50,7 @@ def main() -> None:
                     global_hierarchy_access=st.session_state.global_hierarchy_access
                 )
             case "Sub-agent":
-                st.session_state.graph = graph.build_subagent_graph(
+                st.session_state.graph = graph.build_supervisor_graph(
                     llm=st.session_state.llm,
                     db=st.session_state.db,
                     table_relationship_graph=st.session_state.table_relationship_graph,

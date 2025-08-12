@@ -7,13 +7,9 @@ language model and vector store.
 from typing import Generator
 
 import streamlit as st
-from langchain import hub
-from langgraph.types import Command
-from langgraph_supervisor import create_supervisor
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
-from langchain.output_parsers import PydanticOutputParser
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langchain_community.tools.sql_database.tool import (
@@ -21,16 +17,16 @@ from langchain_community.tools.sql_database.tool import (
     QuerySQLCheckerTool
 )
 from langchain.agents import AgentExecutor, create_react_agent
-from tools.get_user_permissions import UserPermissionsTool
 from tools.get_database_schema import CustomInfoSQLDatabaseTool
-from tools.sql_security_toolkit import CustomQuerySQLDatabaseTool
+from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.datetime_toolkit import (
     GetDatetimeNowTool,
     DatetimeShiftWrapperTool
 )
-from typing import Literal
+from tools.get_instrument_context import InstrumentContextTool
 import json
 import logging
+import re
 
 from classes import State
 from prompts import prompts
@@ -45,37 +41,33 @@ logger = logging.getLogger(__name__)
 
 
 def filter_messages(messages):
-    """Filter messages to include only HumanMessages and AIMessages with final=True."""
+    """Filter messages to include only HumanMessages and AIMessages with type='final'."""
     filtered = []
     for msg in messages:
-        # Keep HumanMessages (queries) and AIMessages with final=True
-        if msg.type == "human" or (msg.type == "ai" and msg.additional_kwargs.get("final") is True):
+        # Keep HumanMessages (user queries)
+        if isinstance(msg, HumanMessage):
+            filtered.append(msg)
+        # Keep AIMessages with type='final' (Final Answer from ReAct agent)
+        elif isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "final":
             filtered.append(msg)
         else:
             logger.debug("Filtered out message: %s", json.dumps(msg.__dict__, default=str))
+    logger.debug("Filtered messages: %s",
+                 json.dumps([msg.__dict__ for msg in filtered], default=str, indent=2))
     return filtered
 
 
-# 2025-08-05 This is a trial implementation for a supervisor agent.
-# This has not yet been trialled.
-def supervisor_agent(state: State) -> Command[Literal[
-    'get_date_range_agent',
-    'END'
-]]:
-    agent_executor = create_react_agent(
-        model=st.session_state.llm,
-        prompt=prompts['prompt-007']['template']
-    )
-    response = agent_executor.invoke({'messages': [
-        msg for msg in state["messages"] if msg.type == "human" or (msg.type == "ai" and msg.additional_kwargs.get("final") is True)
-    ]})
-    new_state = state.copy()
-    new_state['messages'] = new_state['messages'] + [
-        AIMessage(content=response.content, additional_kwargs={"type": "output"})
-    ]
-    return Command(
-        goto=response['next_agent']
-    )
+def parse_thought_from_log(log: str) -> str:
+    """Extract the thought from an agent's action log.
+    
+    Args:
+        log: The log string from an agent action
+        
+    Returns:
+        The extracted thought, or the original log if no thought pattern is found
+    """
+    thought_match = re.search(r'(.*?)(?=\nAction:)', log, re.DOTALL)
+    return thought_match.group(1).strip() if thought_match else log
 
 
 def build_supervisor_graph(
@@ -88,147 +80,8 @@ def build_supervisor_graph(
     st.toast("Building LangGraph workflow...", icon=":material/build:")
 
 
-    def orchestrate_flow(state: State, config: dict) -> Generator[State, None, None]:
-        tools = [
-            UserPermissionsTool(db=db),
-            CustomInfoSQLDatabaseTool(),
-            ListSQLDatabaseTool(db=db),
-            CustomQuerySQLDatabaseTool(
-                db=db,
-                table_relationship_graph=dict(table_relationship_graph),
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access
-            ),
-            QuerySQLCheckerTool(db=db, llm=llm),
-            GetDatetimeNowTool(),
-            DatetimeShiftWrapperTool()
-        ]
-
-        # Using create_react_agent from langchain.prebuilt
-        # get_date_range_agent = create_react_agent(
-        #     name='get_date_range_agent',
-        #     model=llm,
-        #     tools=[
-        #         GetDatetimeNowTool(),
-        #         DatetimeShiftTool()
-        #     ],
-        #     prompt=prompts['prompt-006']['content']
-        # )
-
-        # Using create_react_agent from langchain.agents
-        # prompt = hub.pull("hwchase17/react-json")
-        # agent = create_react_agent(
-        #     llm=llm,
-        #     tools=tools,
-        #     prompt=prompt
-        # )
-
-#         supervisor = create_supervisor(
-#             supervisor_name='supervisor',
-#             model=llm,
-#             agents=[get_date_range_agent],
-#             prompt=("""
-# You are a supervisor managing an agent:
-# - an agent deriving date ranges from a user query. Assign tasks requiring date 
-# ranges to this agent.
-# Assign work to one agent at a time, do not call agents in parallel.
-# Do not do any work yourself.
-#             """),
-#             add_handoff_back_messages=True,
-#             output_mode="full_history",
-#         ).compile()
-
-        system_message = prompts['prompt-001']['content']
-        question = state["messages"][-1].content
-
-        # Log input messages for every query
-        logger.debug("Processing query: %s", question)
-        logger.debug("Input messages to agent_executor: %s",
-                     json.dumps([msg.__dict__ for msg in state["messages"]], default=str, indent=2))
-
-        # Filter messages to include only queries and final responses
-        filtered_messages = filter_messages(state["messages"])
-        logger.debug("Filtered messages: %s",
-                     json.dumps([msg.__dict__ for msg in filtered_messages], default=str, indent=2))
-
-        agent_executor = create_react_agent(model=llm, tools=tools, prompt=system_message)
-        # agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-        # Streaming of the get_date_range_agent
-        # for chunk in get_date_range_agent.stream(
-        #     {'messages': [
-        #         msg for msg in state["messages"] if msg.type == "human" or (msg.type == "ai" and msg.additional_kwargs.get("final") is True)
-        #     ]}):
-        #     logger.debug("Streamed chunk: %s", chunk)
-
-        # Invocation of the get_date_range_agent from langchain.prebuilt
-        response = agent_executor.invoke(
-            {'messages': [
-                msg for msg in state["messages"] if msg.type == "human" or (msg.type == "ai" and msg.additional_kwargs.get("final") is True)
-            ]})
-        logger.debug("Response from get_date_range_agent: %s", response)
-
-        new_state = state.copy()
-
-        for message in response['messages']:
-            logger.debug("Message type: %s", type(message).__name__)
-            logger.debug("Message content: %s", message.content)
-            logger.debug("Message content type: %s", type(message.content).__name__)
-            logger.debug("Message additional_kwargs: %s", message.additional_kwargs)
-            if hasattr(message, 'tool_calls'):
-                logger.debug("Message tool_calls: %s", message.tool_calls)
-            content = ''
-            if isinstance(message, AIMessageChunk):
-                if message.tool_calls:
-                    for tool_call in message.tool_calls:
-                        args_str = json.dumps(tool_call["args"], ensure_ascii=False)
-                        content = f'<strong>Calling Tool</strong>: <code>{tool_call["name"]}</code> with input <code>{args_str}</code>'
-                        new_state['messages'] = new_state['messages'] + [
-                            AIMessage(content=content, additional_kwargs={"type": "action"})
-                        ]
-                        logger.debug("Tool call: %s with args: %s", tool_call['name'], tool_call['args'])
-                        yield new_state
-                elif message.content:
-                    content = message.content
-                    new_state['messages'] = new_state['messages'] + [
-                        AIMessage(content=content, additional_kwargs={"type": "output"})
-                    ]
-                    logger.debug("AIMessageChunk content: %s", content)
-                    yield new_state
-            elif isinstance(message, ToolMessage):
-                content = f'<strong>Tool Result</strong>: <code>{message.content}</code>'
-                new_state['messages'] = new_state['messages'] + [
-                    AIMessage(content=content, additional_kwargs={"type": "step"})
-                ]
-                logger.debug("ToolMessage content: %s", content)
-                yield new_state
-            else:
-                logger.warning("Unexpected message type in chunk: %s", type(message).__name__)
-                content = str(message.content)
-                new_state['messages'] = new_state['messages'] + [
-                    AIMessage(content=content, additional_kwargs={"type": "step"})
-                ]
-                yield new_state
-
-    graph_builder = StateGraph(State)
-    graph_builder.add_node('flow_orchestration', orchestrate_flow)
-    graph_builder.set_entry_point('flow_orchestration')
-    graph_builder.add_edge('flow_orchestration', END)
-    return graph_builder.compile(checkpointer=MemorySaver())
-
-
-def build_subagent_graph(
-        llm: BaseLanguageModel,
-        db,
-        table_relationship_graph,
-        user_id: int,
-        global_hierarchy_access: bool = False
-    ) -> StateGraph:
-    st.toast("Building LangGraph workflow...", icon=":material/build:")
-
-
-    def test_subagent(state: State, config: dict) -> Generator[State, None, None]:
-        custom_query_sql_database_tool = CustomQuerySQLDatabaseTool(
+    def test_supervisor(state: State, config: dict) -> Generator[State, None, None]:
+        general_sql_query_tool = GeneralSQLQueryTool(
             db=db,
             table_relationship_graph=dict(table_relationship_graph),
             user_id=user_id,
@@ -236,10 +89,12 @@ def build_subagent_graph(
         )
         get_datetime_now_tool = GetDatetimeNowTool()
         datetime_shift_tool = DatetimeShiftWrapperTool()
+        get_instrument_context_tool = InstrumentContextTool()
         tools = [
-            custom_query_sql_database_tool,
+            general_sql_query_tool,
             get_datetime_now_tool,
-            datetime_shift_tool
+            datetime_shift_tool,
+            get_instrument_context_tool
         ]
         tool_names = [tool.name for tool in tools]
         with open('instrument_context.json', 'r') as instrument_context_json:
@@ -247,9 +102,11 @@ def build_subagent_graph(
         custom_info_sql_database_tool = CustomInfoSQLDatabaseTool()
         table_info = custom_info_sql_database_tool.invoke({'table_names': include_tables})
 
-        prompt = hub.pull("hwchase17/react")
-        logger.debug(f'hwchase17/react prompt: {prompt}')
-        prompt = PromptTemplate.from_template(prompts['prompt-009']['content'])
+        # The following two lines of code are to view the format of the 
+        # LangChain ReAct prompt.
+        # prompt = hub.pull("hwchase17/react")
+        # logger.debug(f'hwchase17/react prompt: {prompt}')
+        prompt = PromptTemplate.from_template(prompts['prompt-010']['content'])
         logger.debug(f'Prompt for create_react_agent: {prompt}')
         agent = create_react_agent(
             llm=llm,
@@ -270,68 +127,88 @@ def build_subagent_graph(
         
         agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
-        response = agent_executor.invoke(
+        for chunk in agent_executor.stream(
             input={
                 'input': user_query,
                 'tools': tools,
                 'tool_names': tool_names,
-                'instrument_context': instrument_context,
                 'table_info': table_info,
                 'get_datetime_now_toolname': get_datetime_now_tool.name,
                 'add_or_subtract_datetime_toolname': datetime_shift_tool.name,
-                'sql_db_query_toolname': custom_query_sql_database_tool.name,
+                'general_sql_query_toolname': general_sql_query_tool.name,
+                'get_instrument_context_toolname': get_instrument_context_tool.name,
                 'agent_scratchpad': ''
             },
             config=config
-        )
-        logger.debug("Response from get_date_range_agent: %s", response)
+        ):
+            logger.debug("Received chunk in graph.py: %s", chunk)
+            
+            if 'steps' in chunk:
+                for step in chunk['steps']:
+                    logger.debug("Processing step in chunk: %s", json.dumps(step, default=str))
+                    action_msg = AIMessage(
+                        content=f"[ACTION]:{step.action.tool}"
+                    )
+                    logger.debug("Created action_msg: %s", action_msg)
+                    action_input_msg = AIMessage(
+                        content=f"[ACTION_INPUT]:{step.action.tool_input}"
+                    )
+                    logger.debug("Created action_input_msg: %s", action_input_msg)
+                    observation_content = (
+                        json.dumps(step.observation, default=str) 
+                        if hasattr(step.observation, '__dict__') 
+                        else str(step.observation)
+                    )
+                    observation_msg = AIMessage(
+                        content=f"[OBSERVATION]:{observation_content}"
+                    )
+                    logger.debug("Created observation_msg: %s", observation_msg)
+                    yield State(messages=state['messages'] + [
+                        action_msg,
+                        action_input_msg,
+                        observation_msg
+                    ])
+            
+            if 'messages' in chunk:
+                for msg in chunk['messages']:
+                    logger.debug("Processing message in chunk: %s", json.dumps(msg, default=str))
+                    thought_msg = AIMessage(
+                        content=f"[THOUGHT]:{msg.content}"
+                    )
+                    logger.debug("Created thought_msg: %s", thought_msg)
+                    yield State(messages=state['messages'] + [thought_msg])
 
-        new_state = state.copy()
+            if 'actions' in chunk:
+                for action in chunk['actions']:
+                    logger.debug("Processing action in chunk: %s", json.dumps(action, default=str))
+                    action_msg = AIMessage(
+                        content=action.tool,
+                        additional_kwargs={"type": "action"}
+                    )
+                    logger.debug("Created action_msg: %s", action_msg)
+                    action_input_msg = AIMessage(
+                        content=action.tool_input,
+                        additional_kwargs={"type": "action_input"}
+                    )
+                    logger.debug("Created action_input_msg: %s", action_input_msg)
+                    yield State(messages=state['messages'] + [
+                        action_msg,
+                        action_input_msg,
+                        thought_msg
+                    ])
 
-        for message in response['messages']:
-            logger.debug("Message type: %s", type(message).__name__)
-            logger.debug("Message content: %s", message.content)
-            logger.debug("Message content type: %s", type(message.content).__name__)
-            logger.debug("Message additional_kwargs: %s", message.additional_kwargs)
-            if hasattr(message, 'tool_calls'):
-                logger.debug("Message tool_calls: %s", message.tool_calls)
-            content = ''
-            if isinstance(message, AIMessageChunk):
-                if message.tool_calls:
-                    for tool_call in message.tool_calls:
-                        args_str = json.dumps(tool_call["args"], ensure_ascii=False)
-                        content = f'<strong>Calling Tool</strong>: <code>{tool_call["name"]}</code> with input <code>{args_str}</code>'
-                        new_state['messages'] = new_state['messages'] + [
-                            AIMessage(content=content, additional_kwargs={"type": "action"})
-                        ]
-                        logger.debug("Tool call: %s with args: %s", tool_call['name'], tool_call['args'])
-                        yield new_state
-                elif message.content:
-                    content = message.content
-                    new_state['messages'] = new_state['messages'] + [
-                        AIMessage(content=content, additional_kwargs={"type": "output"})
-                    ]
-                    logger.debug("AIMessageChunk content: %s", content)
-                    yield new_state
-            elif isinstance(message, ToolMessage):
-                content = f'<strong>Tool Result</strong>: <code>{message.content}</code>'
-                new_state['messages'] = new_state['messages'] + [
-                    AIMessage(content=content, additional_kwargs={"type": "step"})
-                ]
-                logger.debug("ToolMessage content: %s", content)
-                yield new_state
-            else:
-                logger.warning("Unexpected message type in chunk: %s", type(message).__name__)
-                content = str(message.content)
-                new_state['messages'] = new_state['messages'] + [
-                    AIMessage(content=content, additional_kwargs={"type": "step"})
-                ]
-                yield new_state
+            if 'output' in chunk:
+                logger.debug("Processing output in chunk: %s", json.dumps(chunk['output'], default=str))
+                final_msg = AIMessage(
+                    content=f"[FINAL]:{chunk['output']}"
+                )
+                logger.debug("Created final_msg: %s", final_msg)
+                yield State(messages=state['messages'] + [final_msg])
 
     graph_builder = StateGraph(State)
-    graph_builder.add_node('subagent_test', test_subagent)
-    graph_builder.set_entry_point('subagent_test')
-    graph_builder.add_edge('subagent_test', END)
+    graph_builder.add_node('supervisor_test', test_supervisor)
+    graph_builder.set_entry_point('supervisor_test')
+    graph_builder.add_edge('supervisor_test', END)
     return graph_builder.compile(checkpointer=MemorySaver())
 
 
@@ -346,7 +223,7 @@ def build_tool_graph(
 
 
     def test_tool(state: State, config: dict) -> Generator[State, None, None]:
-        tool = CustomQuerySQLDatabaseTool(
+        tool = GeneralSQLQueryTool(
             db=db,
             table_relationship_graph=dict(table_relationship_graph),
             user_id=user_id,
@@ -357,20 +234,34 @@ def build_tool_graph(
 
         new_state = state.copy()
 
-        # Invoking with JSON string
-        response = tool.invoke('''
-        {
-            "input_datetime": "08 August 2025 07:21:02 AM",
-            "operation": "subtract",
-            "value": 1,
-            "unit": "days"
-        }
-        ''')
+        thought = f"Invoking tool {tool.name}"
+        action = f"{tool.name}"
+        action_input = '''
+{
+    "input_datetime": "08 August 2025 07:21:02 AM",
+    "operation": "subtract",
+    "value": 1,
+    "unit": "days"
+}
+        '''
+        response = tool.invoke(action_input)
+        observation = f"Tool Result: {response}"
+        final_answer = response
 
-        new_state['messages'] = new_state['messages'] + [
-            AIMessage(content=response, additional_kwargs={"type": "output"})
+        # Yield each component as a separate message
+        components = [
+            ("thought", thought),
+            ("action", action),
+            ("action_input", action_input),
+            ("observation", observation),
+            ("final", final_answer)
         ]
-        yield new_state
+
+        for msg_type, msg_content in components:
+            new_state['messages'] = new_state['messages'] + [
+                AIMessage(content=msg_content, additional_kwargs={"type": msg_type})
+            ]
+            yield new_state
 
     graph_builder = StateGraph(State)
     graph_builder.add_node('tool_test', test_tool)

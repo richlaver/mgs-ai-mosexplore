@@ -9,6 +9,8 @@ from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.tools import BaseTool
 import sqlparse
 from collections import deque
+import json
+import re
 import logging
 
 
@@ -41,23 +43,29 @@ class BaseUserPermissionsTool(BaseModel):
     )
 
 
-class _CustomQuerySQLDatabaseToolInput(BaseModel):
-    query: str = Field(..., description="A detailed and correct SQL query.")
-
-
-class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, BaseTool):
-    """Tool for querying a SQL database.
-    The tool will modify the inputted query to ensure the user cannot access 
-    any information beyond the user's hierarchy permissions.
+class GeneralSQLQueryTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, BaseTool):
+    """Tool for executing general-purpose SQL queries with security controls.
+    This tool handles ad-hoc queries and data exploration, applying user permissions
+    to ensure data access is properly restricted. It is not intended for generating
+    plots or formatted tables, which have their own specialized query tools.
     """
 
-    name: str = "sql_db_query"
+    name: str = "general_sql_query"
     description: str = """
-    Execute a SQL query against the database and get back the result.
+    Execute a general-purpose SQL query for data exploration and analysis.
+    Use this tool for ad-hoc queries and general data retrieval.
+    Do not use this tool for generating plots or formatted tables - use specialized tools instead.
+
+    Input:
+    - A string containing a detailed and correct SQL query for general data retrieval
+    Returns:
+    - Raw query results with user's hierarchy permissions automatically applied
+    
     If the query is not correct, an error message will be returned.
     If an error is returned, rewrite the query, check the query, and try again.
+    
+    Example: "SELECT * FROM users LIMIT 10"
     """
-    args_schema: Type[BaseModel] = _CustomQuerySQLDatabaseToolInput
 
 
     def strip_markdown(self, query: str) -> str:
@@ -81,6 +89,31 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> Union[str, Sequence[Dict[str, Any]], Result]:
         """Execute the query, return the results or an error message."""
+        # First strip any markdown formatting that might wrap a JSON string
+        if query.startswith("```"):
+            lines = query.splitlines()
+            if len(lines) > 1:
+                # Remove first line (```json or just ```) and last line (```)
+                if lines[-1].strip() == "```":
+                    query = "\n".join(lines[1:-1])
+                else:
+                    query = "\n".join(lines[1:])
+            query = query.strip()
+        
+        # Handle case where input is a JSON string
+        if '"query":' in query or "'query':" in query:
+            try:
+                import json
+                # Replace single quotes with double quotes if 'query': is found
+                if "'query':" in query:
+                    query = query.replace("'", '"')
+                query_dict = json.loads(query)
+                if isinstance(query_dict, dict) and 'query' in query_dict:
+                    query = query_dict['query']
+            except json.JSONDecodeError:
+                # If JSON parsing fails, treat it as a regular query string
+                pass
+                
         query = self.strip_markdown(query)
 
         def check_for_write_statements(query: str) -> Optional[str]:
@@ -381,3 +414,4 @@ class CustomQuerySQLDatabaseTool(BaseSQLDatabaseTool, BaseUserPermissionsTool, B
         except Exception as e:
             logging.error(f"Error extending query: {str(e)}")
             raise
+

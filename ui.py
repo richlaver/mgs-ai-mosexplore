@@ -4,6 +4,7 @@ This module defines the Streamlit-based UI.
 """
 
 import streamlit as st
+import json
 from langchain_core.messages import AIMessage, HumanMessage
 from parameters import users
 import setup
@@ -15,6 +16,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
+logger = logging.getLogger(__name__)
 
 
 @st.dialog("Login")
@@ -69,14 +71,6 @@ def user_modal():
                             user_id=st.session_state.selected_user_id,
                             global_hierarchy_access=st.session_state.global_hierarchy_access
                         )
-                    case 'Sub-agent':
-                        st.session_state.graph = graph.build_subagent_graph(
-                            llm=st.session_state.llm,
-                            db=st.session_state.db,
-                            table_relationship_graph=st.session_state.table_relationship_graph,
-                            user_id=st.session_state.selected_user_id,
-                            global_hierarchy_access=st.session_state.global_hierarchy_access
-                        )
                     case 'Supervisor':
                         st.session_state.graph = graph.build_supervisor_graph(
                             llm=st.session_state.llm,
@@ -113,14 +107,6 @@ def test_mode_modal():
                     match selected_test_mode:
                         case "Tool":
                             st.session_state.graph = graph.build_tool_graph(
-                                llm=st.session_state.llm,
-                                db=st.session_state.db,
-                                table_relationship_graph=st.session_state.table_relationship_graph,
-                                user_id=st.session_state.selected_user_id,
-                                global_hierarchy_access=st.session_state.global_hierarchy_access
-                            )
-                        case "Sub-agent":
-                            st.session_state.graph = graph.build_subagent_graph(
                                 llm=st.session_state.llm,
                                 db=st.session_state.db,
                                 table_relationship_graph=st.session_state.table_relationship_graph,
@@ -284,17 +270,32 @@ def render_initial_ui() -> None:
         )
 
 
+def extract_message_type_and_content(content):
+    """Extract message type and content from prefixed message."""
+    prefixes = [
+        '[ACTION]:', 'action',
+        '[ACTION_INPUT]:', 'action_input',
+        '[OBSERVATION]:', 'observation',
+        '[THOUGHT]:', 'thought',
+        '[FINAL]:', 'final'
+    ]
+    
+    for prefix, msg_type in zip(prefixes[::2], prefixes[1::2]):
+        if content.startswith(prefix):
+            return msg_type, content[len(prefix):]
+    
+    return None, content
+
+def render_message_content(content):
+    """Render message content."""
+    msg_type, clean_content = extract_message_type_and_content(content)
+    st.markdown(clean_content)
+
+
 def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
     if not st.session_state.setup_complete:
         return
-    
-
-    def render_message_content(content, msg_type=None):
-        if msg_type in ["action", "step"]:
-            st.markdown(f'<div class="intermediate-step">{content}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(content, unsafe_allow_html=True)
 
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
@@ -308,11 +309,11 @@ def render_chat_content() -> None:
             if query_index < len(st.session_state.intermediate_steps_history):
                 with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):
                     for step in st.session_state.intermediate_steps_history[query_index]:
-                        st.markdown(f'<div class="intermediate-step">{step}</div>', unsafe_allow_html=True)
+                        st.markdown(step, unsafe_allow_html=True)
             query_index += 1
-        elif isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") == "output" and msg.additional_kwargs.get("final"):
+        elif isinstance(msg, AIMessage):
             with st.chat_message("assistant"):
-                render_message_content(msg.content, msg.additional_kwargs.get("type"))
+                render_message_content(msg.content)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if question := st.chat_input(
@@ -348,74 +349,35 @@ def render_chat_content() -> None:
                 response_container = st.empty()
 
                 thinking_text = ""
-                thinking_buffer = ""
-                final_response_chunks = []
-                last_non_output_index = -1
-                all_chunks = []
-                last_msg_type = None
+                current_query_steps = []
 
-                for i, chunk in enumerate(st.session_state.graph.stream(initial_state, stream_mode="messages", config=config)):
-                    message, metadata = chunk if isinstance(chunk, tuple) else (chunk, {})
+                for message_and_metadata in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
+                    logger.debug(f'Raw message tuple in ui.py: {message_and_metadata}')
+                    
+                    # Extract content from AIMessageChunk
+                    message = message_and_metadata[0]  # First element is always the message
                     content = message.content if hasattr(message, 'content') else str(message)
-                    msg_type = message.additional_kwargs.get("type", "undefined") if hasattr(message, 'additional_kwargs') else "undefined"
-                    all_chunks.append((content, msg_type))
-                    logging.debug(f'Received message in ui.py: {message}')
+                    
+                    # Check if this is a final answer by looking for [FINAL]: prefix
+                    is_final = content.startswith('[FINAL]:')
+                    
+                    logger.debug(f'Extracted content: {content}')
+                    logger.debug(f'Is final: {is_final}')
 
-                    if msg_type in ["action", "step"]:
-                        # Close previous CoT div if open
-                        if last_msg_type == "output":
-                            thinking_buffer += "</div>\n"
-                            thinking_text += thinking_buffer
-                            thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-                            thinking_buffer = ""
-                        # Add complete div for action or step
-                        thinking_buffer += f'<div class="intermediate-step">{content}</div>\n'
-                        thinking_text += thinking_buffer
-                        thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-                        thinking_buffer = ""
-                        last_non_output_index = i
-                    elif msg_type == "output":
-                        # Start new CoT div only if not continuing an output
-                        if last_msg_type != "output":
-                            thinking_buffer += f'<div class="intermediate-step"><strong>Chain-of-Thought: </strong>{content}'
-                        else:
-                            # Append to existing CoT div
-                            thinking_buffer += content
+                    # Store in session state
+                    new_message = AIMessage(content=content)
+                    st.session_state.messages.append(new_message)
+
+                    # Extract message type and clean content
+                    msg_type, clean_content = extract_message_type_and_content(content)
+                    
+                    if is_final:
+                        # Show final answer in main chat area
+                        response_container.markdown(clean_content)
                     else:
-                        # Handle undefined or other types
-                        if last_msg_type == "output":
-                            thinking_buffer += "</div>\n"
-                            thinking_text += thinking_buffer
-                            thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-                            thinking_buffer = ""
-                        thinking_buffer += f'<div class="intermediate-step">{content}</div>\n'
-                        thinking_text += thinking_buffer
-                        thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-                        thinking_buffer = ""
-                    current_query_steps.append(content)
-                    last_msg_type = msg_type
-                    logging.debug(f'Thinking buffer: {thinking_buffer}')
-                    st.session_state.messages.append(
-                        AIMessage(content=content, additional_kwargs={"type": msg_type, "final": False})
-                    )
-
-                # Flush any remaining buffered content
-                if thinking_buffer:
-                    if last_msg_type == "output":
-                        thinking_buffer += "</div>\n"
-                    thinking_text += thinking_buffer
-                    thinking_container.markdown(thinking_text, unsafe_allow_html=True)
-
-                for i, (content, msg_type) in enumerate(all_chunks):
-                    if i > last_non_output_index and msg_type == "output":
-                        final_response_chunks.append(content)
-
-                response_text = "".join(final_response_chunks)
-                if response_text:
-                    response_container.markdown(response_text, unsafe_allow_html=True)
-                    st.session_state.messages.append(
-                        AIMessage(content=response_text, additional_kwargs={"type": "output", "final": True})
-                    )
+                        # Add to intermediate steps
+                        current_query_steps.append(clean_content)
+                        thinking_container.markdown("\n".join(current_query_steps))
 
                 if current_query_steps:
                     st.session_state.intermediate_steps_history.append(current_query_steps)
