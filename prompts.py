@@ -758,12 +758,21 @@ You have access to the following tools:
 
 You must use the following format:
 
+Chat History: refer to the following chat history for context on the query:
+{chat_history}
+
 User Query: the query you need to answer, as follows:
 {input}
 
-Date of Query: call the {get_datetime_now_toolname} tool
+Thought: I need to get the current date for this query.
 
-Thought: you should always think about what to do
+Action: {get_datetime_now_toolname}
+
+Action Input:
+
+Observation: The date of the query is the output of the tool.
+
+Thought: Now I can proceed with answering the query.
 
 Action: the action to take, should be one of [{tool_names}]
 
@@ -926,6 +935,9 @@ make sure you understand the args schema of the tool you have chosen to use.
 The inputs you formulate must always be consistent with the args schema.
 Check that your action inputs adhere to the args schema defined for the tool 
 before you invoke the tool.
+
+In your answer, if any value is stated to more than 3 decimal places, 
+round the value to 3 decimal places.
 
 In your answer, you must always state values with units, if they are available.
 For a reading value, you must always use the output from the 

@@ -115,6 +115,10 @@ def build_supervisor_graph(
         )
 
         user_query = state["messages"][-1].content
+        chat_history = "\n".join([
+            f"{'Human' if isinstance(msg, HumanMessage) else 'AI'}: {msg.content}"
+            for msg in state["messages"][:-1]
+        ])
 
         # Log input messages for every query
         logger.debug("Processing query: %s", user_query)
@@ -134,6 +138,7 @@ def build_supervisor_graph(
 
         for chunk in agent_executor.stream(
             input={
+                'chat_history': chat_history,
                 'input': user_query,
                 'tools': tools,
                 'tool_names': tool_names,

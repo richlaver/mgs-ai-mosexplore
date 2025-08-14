@@ -5,6 +5,7 @@ This module defines the Streamlit-based UI.
 
 import streamlit as st
 import json
+import uuid
 from langchain_core.messages import AIMessage, HumanMessage
 from parameters import users
 import setup
@@ -126,6 +127,24 @@ def test_mode_modal():
                 st.rerun()
             else:
                 st.error("Please select a test mode")
+
+
+def new_chat() -> None:
+    """Clear chat history and start a new chat by resetting session state variables."""
+    import uuid
+    # Set a flag in session state to trigger the clear on next rerun
+    st.session_state.clear_chat = True
+
+
+def handle_clear_chat() -> None:
+    """Handle clearing the chat if the clear_chat flag is set."""
+    if st.session_state.get('clear_chat', False):
+        # Clear the flag
+        st.session_state.clear_chat = False
+        # Reset chat-related state
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.messages = []
+        st.session_state.intermediate_steps_history = []
 
 
 def render_initial_ui() -> None:
@@ -253,6 +272,15 @@ def render_initial_ui() -> None:
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
         with cols[1]:
+            st.button(
+                label="", 
+                icon=":material/chat_add_on:", 
+                key="new_chat_button", 
+                help="New chat",
+                on_click=lambda: new_chat(),
+                use_container_width=True
+            )
+            
             with st.popover(
                 label="",
                 icon=":material/menu:",
@@ -296,6 +324,9 @@ def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
     if not st.session_state.setup_complete:
         return
+        
+    # Handle clearing chat if needed
+    handle_clear_chat()
 
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
