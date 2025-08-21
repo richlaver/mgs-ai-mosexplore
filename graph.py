@@ -23,14 +23,18 @@ from tools.datetime_toolkit import (
     GetDatetimeNowTool,
     DatetimeShiftWrapperTool
 )
+# Proxy instrument context tool
 from tools.get_instrument_context import InstrumentContextTool
+# Sandeep's prototype instrument context tool
+# from tools.get_instrument_context_20250818 import EnhancedInstrumentContextTool
+from tools.get_trend_info_toolkit import TrendExtractorWrapperTool
 import json
 import logging
 import re
 
 from classes import State
 from prompts import prompts
-from parameters import include_tables
+from parameters import include_tables, trend_context
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -89,12 +93,20 @@ def build_supervisor_graph(
         )
         get_datetime_now_tool = GetDatetimeNowTool()
         datetime_shift_tool = DatetimeShiftWrapperTool()
+        # Using proxy instrument context tool
         get_instrument_context_tool = InstrumentContextTool()
+        # Using Sandeep's prototype instrument context tool
+        # get_instrument_context_tool = EnhancedInstrumentContextTool(
+        #     llm=llm,
+        #     json_file_path="instrument_context_20250818.json"
+        # )
+        get_trend_info_tool = TrendExtractorWrapperTool(sql_tool=general_sql_query_tool)
         tools = [
             general_sql_query_tool,
             get_datetime_now_tool,
             datetime_shift_tool,
-            get_instrument_context_tool
+            get_instrument_context_tool,
+            get_trend_info_tool
         ]
         tool_names = [tool.name for tool in tools]
         with open('instrument_context.json', 'r') as instrument_context_json:
@@ -143,10 +155,13 @@ def build_supervisor_graph(
                 'tools': tools,
                 'tool_names': tool_names,
                 'table_info': table_info,
+                'trend_context': trend_context,
                 'get_datetime_now_toolname': get_datetime_now_tool.name,
                 'add_or_subtract_datetime_toolname': datetime_shift_tool.name,
                 'general_sql_query_toolname': general_sql_query_tool.name,
-                'get_instrument_context_toolname': get_instrument_context_tool.name,
+                'get_instrument_context_toolname': 
+                get_instrument_context_tool.name,
+                'get_trend_info_toolname': get_trend_info_tool.name,
                 'agent_scratchpad': ''
             },
             config=config

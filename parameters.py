@@ -795,3 +795,89 @@ custom_table_info = {
         SELECT "id", "review_name", "is_deleted" FROM "review_levels" LIMIT 3;
     """
 }
+trend_context = [
+    {
+        'instrument_types_subtypes': [
+            {
+                'type': 'LP',
+                'subtypes': ['DEFAULT']
+            }
+        ],
+        'measurands': ['settlement', 'vertical displacement'],
+        'behaviour': [
+            {
+                'mode': 'fluctuating',
+                'causes': ['random survey error'],
+                'impacts': ['inaccurate measurement'],
+                'notes': 'Survey errors typically have an amplitude consistent for a particular survey method. Survey errors will be persistent across all time periods. Error amplitude can be up to 5 mm.'
+            },
+            {
+                'mode': 'steady',
+                'causes': [],
+                'impacts': [],
+                'notes': 'Be aware that changes in between readings may be missed.'
+            },
+            {
+                'mode': 'gradual fall',
+                'causes': [
+                    'consolidation due to groundwater drawdown',
+                    'nearby excavation',
+                    'nearby construction activity causing ground compaction',
+                    'ground losses due to tunnelling',
+                    'slow landslide'
+                ],
+                'impacts': [
+                    'damage to adjacent utilities, structures or buildings',
+                    'uneven ground surface e.g. for road, railtrack or runway'
+                ],
+                'notes': 'Consolidation is marked by a progressively decreasing settlement rate, although the decrease may not be obvious over short time periods. The rate of settlement due to nearby excavation is likely to vary depending on excavation progress. Landslide movements should accelerate with higher groundwater levels e.g. due to rainfall.'
+            },
+            {
+                'mode': 'gradual rise',
+                'causes': [
+                    'nearby grout injection',
+                    'swelling of clay soils',
+                    'upward displacement at the base of a slip circle',
+                    'over-pressure at face of Earth Pressure Balance (EPB) shield'
+                ],
+                'impacts': [
+                    'damage to adjacent utilities, structures or buildings',
+                    'uneven ground surface e.g. for road, railtrack or runway'
+                ],
+                'notes': 'Swelling causes very small heave rates. Heave due to grouting and tunnelling is typically more pronounced.'
+            },
+            {
+                'mode': 'sudden fall',
+                'causes': [
+                    'sinkhole formation or collapse of underground voids',
+                    'sudden surcharge loading',
+                    'nearby compaction activity',
+                    'accidental disturbance of marker'
+                ],
+                'impacts': [
+                    'damage to adjacent utilities, structures or buildings',
+                    'risk of further sudden settlements',
+                    'potholes and major surface cracking'
+                ],
+                'notes': 'Void collapses can occur in quick succession, separated by steady phases.'
+            },
+            {
+                'mode': 'sudden rise',
+                'causes': [
+                    'railtrack tamping',
+                    'accidental disturbance of marker'
+                ],
+                'impacts': [],
+                'notes': 'Sudden rises are uncommon and are usually benign.'
+            },
+            {
+                'mode': 'spike',
+                'causes': [
+                    'error in survey, data processing or data entry'
+                ],
+                'impacts': [],
+                'notes': 'An error is usually characterised by an anomalous single reading. Readings return to normal after the error.'
+            }
+        ]
+    }
+]
