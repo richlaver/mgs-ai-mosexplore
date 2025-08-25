@@ -28,6 +28,10 @@ from tools.get_instrument_context import InstrumentContextTool
 # Sandeep's prototype instrument context tool
 # from tools.get_instrument_context_20250818 import EnhancedInstrumentContextTool
 from tools.get_trend_info_toolkit import TrendExtractorWrapperTool
+from tools.create_output_toolkit import (
+    TimeSeriesPlotWrapperTool,
+    TimeSeriesPlotTool
+)
 import json
 import logging
 import re
@@ -100,13 +104,22 @@ def build_supervisor_graph(
         #     llm=llm,
         #     json_file_path="instrument_context_20250818.json"
         # )
-        get_trend_info_tool = TrendExtractorWrapperTool(sql_tool=general_sql_query_tool)
+        get_trend_info_tool = TrendExtractorWrapperTool(
+            sql_tool=general_sql_query_tool
+        )
+        plot_time_series_tool = TimeSeriesPlotTool(
+            sql_tool=general_sql_query_tool
+        )
+        plot_time_series_tool = TimeSeriesPlotWrapperTool(
+            plot_tool=TimeSeriesPlotTool(sql_tool=general_sql_query_tool)
+        )
         tools = [
             general_sql_query_tool,
             get_datetime_now_tool,
             datetime_shift_tool,
             get_instrument_context_tool,
-            get_trend_info_tool
+            get_trend_info_tool,
+            plot_time_series_tool
         ]
         tool_names = [tool.name for tool in tools]
         with open('instrument_context.json', 'r') as instrument_context_json:
@@ -162,6 +175,7 @@ def build_supervisor_graph(
                 'get_instrument_context_toolname': 
                 get_instrument_context_tool.name,
                 'get_trend_info_toolname': get_trend_info_tool.name,
+                'plot_time_series_toolname': plot_time_series_tool.name,
                 'agent_scratchpad': ''
             },
             config=config

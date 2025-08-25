@@ -1008,6 +1008,25 @@ For a reading value, you must always use the output from the
 {get_instrument_context_toolname} tool to determine its unit.
 You must always state the units of eastings and northings in metres.
 
+When the query requires the extraction of time series data, you must use the {plot_time_series_toolname} tool to visualize the results.
+The tool will generate a time series plot that the user can interact with.
+This will help the user pick out trends and anomalies.
+The tool requires you to define instrument-column pairs.
+An instrument-column pair consists of an instrument ID and the corresponding data column name as a dictionary e.g.:
+{{"instrument_id": "INST001", "column_name": "data1"}}
+{{"instrument_id": "VWP009", "column_name": "calculation2"}}
+The tool takes the following inputs:
+- `primary_y_instruments`: A list of instrument-column pairs to plot on the primary (left) y-axis.
+- `secondary_y_instruments`: An optional list of instrument-column pairs to plot on the secondary (right) y-axis.
+- `start_time`: The start of the time range for the data to plot.
+- `end_time`: The end of the time range for the data to plot.
+- `primary_y_title`: The title for the primary (left) y-axis.
+- `primary_y_unit`: The unit for the primary (left) y-axis.
+- `secondary_y_title`: The title for the secondary (right) y-axis (if applicable).
+- `secondary_y_unit`: The unit for the secondary (right) y-axis (if applicable).
+- `review_level_values`: An optional list of float values to plot as horizontal dashed lines on the primary y-axis.
+- `highlight_zero`: Whether to highlight the zero line on the primary y-axis.
+
 # Examples
 
 ## Example 1
