@@ -42,3 +42,4 @@ def setup_session() -> None:
         st.session_state.table_relationship_graph = None
     if "test_mode" not in st.session_state:
         st.session_state.test_mode = "Supervisor"
+        # st.session_state.test_mode = "Tool"

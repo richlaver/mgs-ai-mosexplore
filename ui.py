@@ -1,16 +1,12 @@
-"""Render the chatbot user interface for the MissionExplore Demo application.
-
-This module defines the Streamlit-based UI.
-"""
-
 import streamlit as st
 import json
 import uuid
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, AIMessageChunk
 from parameters import users
 import setup
 import graph
 import logging
+import plotly.io as pio
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -18,7 +14,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-
 
 @st.dialog("Login")
 def login_modal():
@@ -38,11 +33,10 @@ def login_modal():
             else:
                 st.error("Incorrect password")
 
-
 @st.dialog("Change User")
 def user_modal():
     """Renders the user selection modal using Streamlit dialog."""
-    with st.form("user_form", enter_to_submit=False):
+    with st.form("user_form", enter_to_submit=True):
         display_names = [user['display_name'] for user in users]
         
         selected_user = next((user for user in users 
@@ -84,12 +78,11 @@ def user_modal():
             else:
                 st.error("Please select a user")
 
-
 @st.dialog("Select Test")
 def test_mode_modal():
     """Renders the test mode selection modal using Streamlit dialog."""
     with st.form("test_mode_form", enter_to_submit=False):
-        test_modes = ["Tool", "Sub-agent", "Supervisor"]
+        test_modes = ["Tool", "Supervisor"]
         default_mode = st.session_state.test_mode
         
         selected_test_mode = st.segmented_control(
@@ -128,34 +121,27 @@ def test_mode_modal():
             else:
                 st.error("Please select a test mode")
 
-
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
     import uuid
-    # Set a flag in session state to trigger the clear on next rerun
     st.session_state.clear_chat = True
-
 
 def handle_clear_chat() -> None:
     """Handle clearing the chat if the clear_chat flag is set."""
     if st.session_state.get('clear_chat', False):
-        # Clear the flag
         st.session_state.clear_chat = False
-        # Reset chat-related state
         st.session_state.thread_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.session_state.intermediate_steps_history = []
 
-
 def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
-    # Apply custom CSS for layout and styling
     st.markdown(
         """
         <style>
         .stAppHeader {
-            background-color: rgba(255, 255, 255, 0.0);  /* Transparent background */
-            visibility: visible;  /* Ensure the header is visible */
+            background-color: rgba(255, 255, 255, 0.0);
+            visibility: visible;
         }
         .block-container {
             padding-top: 0rem;
@@ -168,7 +154,7 @@ def render_initial_ui() -> None:
             overflow-y: auto;
             padding: 10px;
             margin-bottom: 60px;
-            margin-top: 60px; /* Space for app bar */
+            margin-top: 60px;
         }
         .stChatInput {
             position: fixed;
@@ -247,7 +233,7 @@ def render_initial_ui() -> None:
                         chatMessages.scrollTop = chatMessages.scrollHeight;
                         window.newMessageAdded = false;
                     }
-                }, 100); // Delay to ensure DOM is updated
+                }, 100);
             }
         }
         document.addEventListener('streamlit:render', scrollToBottom);
@@ -256,7 +242,6 @@ def render_initial_ui() -> None:
         unsafe_allow_html=True,
     )
 
-    # Streamlit logo (renders in sidebar and top-left corner)
     st.logo(
         image="mgs-full-logo.svg",
         size="small",
@@ -264,9 +249,7 @@ def render_initial_ui() -> None:
         icon_image="mgs-small-logo.svg"
     )
 
-    # Render sidebar
     with st.sidebar:
-        # App title and popover button in two columns
         st.divider()
         cols = st.columns([3, 1])
         with cols[0]:
@@ -289,7 +272,6 @@ def render_initial_ui() -> None:
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
                 st.button(label="Select Test", icon=":material/build:", key="test_mode_button", help="Select test mode", on_click=test_mode_modal, use_container_width=True)
 
-    # Reserve space for chat input
     with st.empty():
         st.chat_input(
             placeholder="Setting up, please wait...",
@@ -297,9 +279,8 @@ def render_initial_ui() -> None:
             key="initial_chat_input"
         )
 
-
-def extract_message_type_and_content(content):
-    """Extract message type and content from prefixed message."""
+def parse_message_components(content, additional_kwargs=None):
+    """Extract message type, content, and additional kwargs from prefixed message."""
     prefixes = [
         '[ACTION]:', 'action',
         '[ACTION_INPUT]:', 'action_input',
@@ -310,24 +291,43 @@ def extract_message_type_and_content(content):
     
     for prefix, msg_type in zip(prefixes[::2], prefixes[1::2]):
         if content.startswith(prefix):
-            return msg_type, content[len(prefix):]
+            return msg_type, content[len(prefix):], additional_kwargs or {}
     
-    return None, content
+    return None, content, additional_kwargs or {}
 
-def render_message_content(content):
-    """Render message content."""
-    msg_type, clean_content = extract_message_type_and_content(content)
-    st.markdown(clean_content)
-
+def render_message_content(msg: AIMessage, msg_type: str, clean_content: str, additional_kwargs: dict):
+    """Render message content based on its type, handling artifacts for final and observation messages."""
+    if msg_type in ['final', 'observation']:
+        st.markdown(clean_content)
+        artifacts = additional_kwargs.get("artifacts", [])
+        if artifacts and isinstance(artifacts, list):
+            for artifact in artifacts:
+                artifact_type = artifact.get('type')
+                if artifact_type == 'Plotly object':
+                    try:
+                        fig = pio.from_json(artifact['content'])
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        logger.error(f"Failed to render Plotly figure: {str(e)}")
+                        st.error("Error rendering plot")
+                elif artifact_type == 'CSV':
+                    st.download_button(
+                        label="Download Time Series Data (CSV)",
+                        data=artifact['content'],
+                        file_name=artifact['filename'],
+                        mime='text/csv',
+                        key=f"csv_download_{artifact['artifact_id']}"
+                    )
+    else:
+        # Return content for intermediate steps to be rendered in expander
+        return clean_content
 
 def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
     if not st.session_state.setup_complete:
         return
         
-    # Handle clearing chat if needed
     handle_clear_chat()
-
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
     current_query_steps = []
@@ -344,20 +344,25 @@ def render_chat_content() -> None:
             query_index += 1
         elif isinstance(msg, AIMessage):
             with st.chat_message("assistant"):
-                render_message_content(msg.content)
+                msg_type, clean_content, additional_kwargs = parse_message_components(
+                    msg.content, msg.additional_kwargs
+                )
+                content = render_message_content(msg, msg_type, clean_content, additional_kwargs)
+                if content and msg_type != 'final':
+                    current_query_steps.append(content)
+    
     st.markdown("</div>", unsafe_allow_html=True)
 
     if question := st.chat_input(
         placeholder="Ask a query about project data:",
         key="active_chat_input"
     ):
-        user_message = HumanMessage(content=question, additional_kwargs={"type": "query", "final": False})
+        user_message = HumanMessage(content=question, additional_kwargs={"type": "query"})
         st.session_state.messages.append(user_message)
         st.session_state.new_message_added = True
         with st.chat_message("user"):
             st.markdown(question)
 
-        # Truncate history to prevent excessive memory usage
         MAX_HISTORY = 1000
         if len(st.session_state.messages) > MAX_HISTORY:
             st.session_state.messages = st.session_state.messages[-MAX_HISTORY:]
@@ -379,36 +384,48 @@ def render_chat_content() -> None:
                     thinking_container = st.empty()
                 response_container = st.empty()
 
-                thinking_text = ""
                 current_query_steps = []
 
-                for message_and_metadata in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
-                    logger.debug(f'Raw message tuple in ui.py: {message_and_metadata}')
-                    
-                    # Extract content from AIMessageChunk
-                    message = message_and_metadata[0]  # First element is always the message
-                    content = message.content if hasattr(message, 'content') else str(message)
-                    
-                    # Check if this is a final answer by looking for [FINAL]: prefix
-                    is_final = content.startswith('[FINAL]:')
-                    
-                    logger.debug(f'Extracted content: {content}')
-                    logger.debug(f'Is final: {is_final}')
+                for state_update in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
+                    logger.debug(f'Raw state update in ui.py: {state_update[:100]}')
 
-                    # Store in session state
-                    new_message = AIMessage(content=content)
-                    st.session_state.messages.append(new_message)
-
-                    # Extract message type and clean content
-                    msg_type, clean_content = extract_message_type_and_content(content)
-                    
-                    if is_final:
-                        # Show final answer in main chat area
-                        response_container.markdown(clean_content)
+                    # Handle case where state_update is a tuple
+                    if isinstance(state_update, tuple):
+                        # Assume the first element is the State dictionary or message
+                        state = state_update[0]
+                        if isinstance(state, dict):
+                            messages = state.get('messages', [])
+                        else:
+                            # If state is a message (e.g., AIMessage), wrap it in a list
+                            messages = [state]
                     else:
-                        # Add to intermediate steps
-                        current_query_steps.append(clean_content)
-                        thinking_container.markdown("\n".join(current_query_steps))
+                        # Assume state_update is a State dictionary
+                        messages = state_update.get('messages', [])
+                    
+                    for message in messages:
+                        if isinstance(message, (AIMessage, AIMessageChunk)):
+                            content = message.content
+                            msg_type, clean_content, additional_kwargs = parse_message_components(
+                                content, message.additional_kwargs
+                            )
+
+                            logger.debug(f'Extracted content: {content[:100]}')
+                            logger.debug(f'Message type: {msg_type}')
+                            
+                            new_message = AIMessage(
+                                content=content,
+                                additional_kwargs=additional_kwargs
+                            )
+                            st.session_state.messages.append(new_message)
+
+                            if msg_type == 'final':
+                                response_container.markdown(clean_content)
+                                render_message_content(new_message, msg_type, clean_content, additional_kwargs)
+                            else:
+                                current_query_steps.append(clean_content)
+                                thinking_container.markdown("\n".join(current_query_steps))
+                                if msg_type == 'observation':
+                                    render_message_content(new_message, msg_type, clean_content, additional_kwargs)
 
                 if current_query_steps:
                     st.session_state.intermediate_steps_history.append(current_query_steps)

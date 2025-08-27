@@ -804,7 +804,8 @@ or a request for more information to clarify the query.
 
 # Instructions
 
-You will need to extract data from the database to answer the user's query.
+You will need to extract data from the database to answer the user's query, unless the query requests plots only.
+This is because plotting tools will extract data themselves.
 You must understand the following database table relationships before you 
 formulate any SQL queries:
 {table_info}
@@ -818,7 +819,7 @@ If the user's query gives specific instrument IDs,
 do not filter instruments by type and subtype in your SQL query.
 Instead, you should directly query using the specific instrument IDs.
 
-If the user's query asks for instrument readings, 
+If the user's query asks for particular instrument readings, 
 always extract readings from the `mydata` table.
 Readings belong to two categories:
 1. If the database field type is `data`, 
@@ -1018,8 +1019,8 @@ An instrument-column pair consists of an instrument ID and the corresponding dat
 The tool takes the following inputs:
 - `primary_y_instruments`: A list of instrument-column pairs to plot on the primary (left) y-axis.
 - `secondary_y_instruments`: An optional list of instrument-column pairs to plot on the secondary (right) y-axis.
-- `start_time`: The start of the time range for the data to plot.
-- `end_time`: The end of the time range for the data to plot.
+- `start_time`: The start of the time range for the data to plot e.g. "1 January 2025 12:00:00 PM"
+- `end_time`: The end of the time range for the data to plot e.g. "31 May 2025 2:00:00 PM"
 - `primary_y_title`: The title for the primary (left) y-axis.
 - `primary_y_unit`: The unit for the primary (left) y-axis.
 - `secondary_y_title`: The title for the secondary (right) y-axis (if applicable).

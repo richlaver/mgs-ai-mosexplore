@@ -50,11 +50,11 @@ class TimeSeriesPlotInput(BaseModel):
     )
     start_time: datetime = Field(
         ...,
-        description="The start of the time range for the data to plot, as a datetime string in ISO 8601 format (e.g., '2025-08-01T00:00:00') or a format parseable by datetime (e.g., '2025-08-01 00:00:00'). Must be earlier than end_time and match the format of the 'date1' column in the database."
+        description="The start of the time range for the data to plot, as a datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Must be earlier than end_time and match the format of the 'date1' column in the database."
     )
     end_time: datetime = Field(
         ...,
-        description="The end of the time range for the data to plot, as a datetime string in ISO 8601 format (e.g., '2025-08-31T23:59:59') or a format parseable by datetime (e.g., '2025-08-31 23:59:59'). Must be later than start_time and match the format of the 'date1' column in the database."
+        description="The end of the time range for the data to plot, as a datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '31 May 2025 2:00:00 PM'). Must be later than start_time and match the format of the 'date1' column in the database."
     )
     primary_y_title: str = Field(
         ...,
@@ -87,13 +87,13 @@ class BaseSQLQueryTool(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
-    """Tool for plotting time series data with Plotly. Saves the figure as HTML and returns a tuple of content and artefacts."""
+    """Tool for plotting time series data with Plotly."""
     name: str = "time_series_plot"
     description: str = """
     Creates an interactive Plotly time series plot and CSV file from instrumentation data.
     Supports multiple time series with different column names, dual y-axes, review levels, and customizable gridlines.
-    Saves the plot as an HTML file in the same directory as this tool for verification and returns a tuple of (content, artefacts) with response_format='content_and_artifact'.
-    The artefacts include the Plotly JSON, CSV, and HTML file.
+    Returns a tuple of (content, artefacts) with response_format='content_and_artifact'.
+    The artefacts include the Plotly JSON and CSV file.
     """
     args_schema: Type[TimeSeriesPlotInput] = TimeSeriesPlotInput
     response_format: str = "content_and_artifact"
@@ -369,16 +369,6 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                 **layout
             )
             
-            # Save the figure as HTML in the same directory as this file
-            html_filename = f"time_series_plot_{uuid.uuid4()}.html"
-            html_path = os.path.join(os.path.dirname(__file__), html_filename)
-            try:
-                fig.write_html(html_path, include_plotlyjs='cdn')
-                html_content = fig.to_html(include_plotlyjs='cdn')
-            except Exception as e:
-                logger.warning(f"Failed to save HTML file {html_filename}: {str(e)}")
-                html_content = None
-            
             # Create CSV
             all_data = []
             for instr in primary_y_instruments + secondary_y_instruments:
@@ -414,16 +404,8 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                     'content': csv_content
                 }
             ]
-            if html_content:
-                artefacts.append({
-                    'artifact_id': str(uuid.uuid4()),
-                    'filename': html_filename,
-                    'type': 'HTML',
-                    'description': f"HTML file of time series plot for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}",
-                    'content': html_content
-                })
             
-            content = f"Generated time series plot and CSV for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}. Plot saved as HTML at {html_path} for verification."
+            content = f"Generated time series plot and CSV for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}."
             return content, artefacts
         
         except Exception as e:
@@ -438,8 +420,8 @@ class TimeSeriesPlotWrapperInput(BaseModel):
         description="""A JSON string specifying the parameters for a time series plot. The JSON must be a single object containing the following fields:
         - 'primary_y_instruments': A list of objects, each with 'instrument_id' (string, e.g., 'INST001') and 'column_name' (string, e.g., 'data1' or 'calculation1'). At least one object is required. Example: [{'instrument_id': 'INST001', 'column_name': 'data1'}].
         - 'secondary_y_instruments': An optional list of objects, each with 'instrument_id' and 'column_name', for the secondary y-axis. Example: [{'instrument_id': 'INST002', 'column_name': 'data2'}].
-        - 'start_time': A datetime string in ISO 8601 format (e.g., '2025-08-01T00:00:00') or parseable format (e.g., '2025-08-01 00:00:00') for the data start time.
-        - 'end_time': A datetime string in ISO 8601 format or parseable format for the data end time, must be later than start_time.
+        - 'start_time': A datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM') for the data start time.
+        - 'end_time': A datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '31 May 2025 2:00:00 PM') for the data end time, must be later than start_time.
         - 'primary_y_title': A string for the primary y-axis title (e.g., 'Temperature').
         - 'primary_y_unit': A string for the primary y-axis unit (e.g., '°C').
         - 'secondary_y_title': An optional string for the secondary y-axis title, required if secondary_y_instruments is non-empty (e.g., 'Pressure').
@@ -451,8 +433,8 @@ class TimeSeriesPlotWrapperInput(BaseModel):
         {
             "primary_y_instruments": [{"instrument_id": "INST001", "column_name": "data1"}, {"instrument_id": "INST002", "column_name": "calculation1"}],
             "secondary_y_instruments": [{"instrument_id": "INST003", "column_name": "data2"}],
-            "start_time": "2025-08-01T00:00:00",
-            "end_time": "2025-08-31T23:59:59",
+            "start_time": "1 August 2025 12:00:00 AM",
+            "end_time": "31 August 2025 11:59:59 PM",
             "primary_y_title": "Temperature",
             "primary_y_unit": "°C",
             "secondary_y_title": "Pressure",
@@ -468,15 +450,21 @@ class TimeSeriesPlotWrapperTool(BaseTool):
     name: str = "time_series_plot_wrapper"
     description: str = """
     Wrapper that accepts JSON string to create time series plots.
-    Saves the plot as an HTML file in the same directory as this tool for verification and returns a tuple of (content, artefacts) with response_format='content_and_artifact'.
-    Requires a TimeSeriesPlotTool instance with a valid sql_tool for database operations.
+    Saves the plot as an HTML file in the same directory as this tool for verification and returns a JSON string containing content and artefacts with response_format='content_and_artifact'.
     The artefacts include the Plotly JSON, CSV, and HTML file.
     """
     args_schema: Type[TimeSeriesPlotWrapperInput] = TimeSeriesPlotWrapperInput
     plot_tool: TimeSeriesPlotTool = Field(exclude=True)
-    response_format: str = "content_and_artifact"
+    response_format: str = "content"
 
-    def _run(self, input_json: str) -> Tuple[str, List[Dict]]:
+    def _normalize_boolean_values(self, json_str: str) -> str:
+        """Normalize Python-style boolean values to JSON-style boolean values."""
+        # Replace Python's True/False with JSON's true/false, being careful to match whole words only
+        json_str = re.sub(r':\s*True\b', ': true', json_str)
+        json_str = re.sub(r':\s*False\b', ': false', json_str)
+        return json_str
+
+    def _run(self, input_json: str) -> str:
         logger.debug(f"TimeSeriesPlotWrapperTool._run called")
         logger.debug(f"Input JSON: {input_json}")
         try:
@@ -486,6 +474,8 @@ class TimeSeriesPlotWrapperTool(BaseTool):
             input_json = input_json.replace("'", "\"")
             # Replace "None" with "null" for JSON compatibility
             input_json = re.sub(r':\s*None\b', ': null', input_json)
+            # Normalize boolean values
+            input_json = self._normalize_boolean_values(input_json)
             input_dict = json.loads(input_json)
             
             required_fields = ['primary_y_instruments', 'start_time', 'end_time', 'primary_y_title', 'primary_y_unit']
@@ -503,8 +493,8 @@ class TimeSeriesPlotWrapperTool(BaseTool):
             except ValueError as e:
                 content = f"Error processing input: {str(e)}"
                 return content, []
-            
-            return self.plot_tool._run(
+
+            plot_tool_result = self.plot_tool._run(
                 primary_y_instruments=primary_y_instruments,
                 secondary_y_instruments=secondary_y_instruments,
                 start_time=start_time,
@@ -516,6 +506,12 @@ class TimeSeriesPlotWrapperTool(BaseTool):
                 review_level_values=input_dict.get('review_level_values', []),
                 highlight_zero=input_dict.get('highlight_zero', False)
             )
+            logger.debug(f"Plot tool result: {plot_tool_result}")
+
+            content, artifacts = plot_tool_result
+            result = {'content': content, 'artifacts': artifacts}
+            return json.dumps(result)
         except Exception as e:
             content = f"Error processing input: {str(e)}"
-            return content, []
+            result = {'content': content, 'artifacts': []}
+            return json.dumps(result)
