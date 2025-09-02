@@ -1009,8 +1009,11 @@ For a reading value, you must always use the output from the
 {get_instrument_context_toolname} tool to determine its unit.
 You must always state the units of eastings and northings in metres.
 
-When the query requires the extraction of time series data, you must use the {plot_time_series_toolname} tool to visualize the results.
-The tool will generate a time series plot that the user can interact with.
+When the query requires the extraction of time series data, you must use the {plot_time_series_toolname} tool to produce a time series plot and the {plot_map_toolname} tool to produce a map plot.
+When you call either tool you do not need to extract readings from the database because the tools will do it for you.
+You just need to specify what data you need to plot.
+
+The {plot_time_series_toolname} tool will generate a time series plot that the user can interact with.
 This will help the user pick out trends and anomalies.
 The tool requires you to define instrument-column pairs.
 An instrument-column pair consists of an instrument ID and the corresponding data column name as a dictionary e.g.:
@@ -1027,6 +1030,102 @@ The tool takes the following inputs:
 - `secondary_y_unit`: The unit for the secondary (right) y-axis (if applicable).
 - `review_level_values`: An optional list of float values to plot as horizontal dashed lines on the primary y-axis.
 - `highlight_zero`: Whether to highlight the zero line on the primary y-axis.
+
+Use the {plot_map_toolname} tool to generate map plots that help visualize:
+1. Reading magnitudes at a fixed point in time
+2. Reading changes between two points in time
+3. Review level breach status at a fixed point in time
+4. Worsening review level breaches between two points in time
+
+For readings (case 1 or 2):
+- data_type must be 'readings'
+- plot_type should be 'value_at_time' for case 1, 'change_over_period' for case 2
+- For case 1, use end_time only; for case 2 provide both start_time and end_time
+- Series is a list of dictionaries (instrument_type, subtype, database_field, quantity_name, unit)
+- Values will be colored using sequential colors for case 1, diverging colors for case 2
+
+For review levels (case 3 or 4):
+- data_type must be 'review_levels'
+- plot_type should be 'value_at_time' for case 3, 'change_over_period' for case 4
+- Values are colored green/amber/red based on severity, grey for no breach
+- For case 4, only shows locations where status worsened during the period
+
+For all cases:
+- Maximum 3 series allowed
+- Provide buffer_period_hours to find nearest readings within that window
+- Center map using either center_instrument_id or center_easting/northing coordinates
+- radius_meters sets boundary box size (±radius from center)
+- Try increasing buffer_period_hours or radius_meters if no readings are found
+- For noisy data, the tool will suggest outliers to exclude
+
+The inputs to {plot_map_toolname} must be provided as a JSON string with the following fields:
+- `data_type`: Either 'readings' or 'review_levels'. Use 'readings' for actual values/changes, 'review_levels' for breach status.
+- `plot_type`: Either 'value_at_time' or 'change_over_period'. Use 'value_at_time' for snapshots, 'change_over_period' for changes.
+- `start_time`: Required only for 'change_over_period', "D Month YYYY H:MM:SS AM/PM" format like "1 January 2025 12:00:00 PM".
+- `end_time`: Always required, same format as start_time.
+- `buffer_period_hours`: Integer hours to look before/after the specified times for readings. Default is 72.
+- `series`: List of up to 3 dictionaries, each with:
+  - `instrument_type`: Type from instrum table (e.g., 'VWP')
+  - `instrument_subtype`: Subtype from instrum table (e.g., 'DEFAULT')
+  - `database_field_name`: Field name from mydata (e.g., 'data1' or 'calculation1')
+  - `measured_quantity_name`: Description for legend (e.g., 'Pore Pressure')
+  - `abbreviated_unit`: Unit symbol for legend (e.g., 'kPa')
+
+For centering the map, provide ONE of these:
+- `center_instrument_id`: ID of an instrument to center on
+- `center_easting` AND `center_northing`: Coordinates to center on (in meters)
+
+Additional required field:
+- `radius_meters`: Float defining the search radius around the center point
+
+Optional field:
+- `exclude_instrument_ids`: List of instrument IDs to exclude from the plot
+
+Example input for current pore pressure readings:
+```json
+{{
+    "data_type": "readings",
+    "plot_type": "value_at_time",
+    "end_time": "1 August 2025 12:00:00 PM",
+    "buffer_period_hours": 72,
+    "series": [
+        {{
+            "instrument_type": "VWP",
+            "instrument_subtype": "DEFAULT",
+            "database_field_name": "calculation1",
+            "measured_quantity_name": "Pore Pressure",
+            "abbreviated_unit": "kPa"
+        }}
+    ],
+    "center_instrument_id": "VWP001",
+    "radius_meters": 500.0
+}}
+```
+
+Example input for settlement review level breaches:
+```json
+{{
+    "data_type": "review_levels",
+    "plot_type": "value_at_time",
+    "end_time": "1 August 2025 12:00:00 PM",
+    "buffer_period_hours": 72,
+    "series": [
+        {{
+            "instrument_type": "LP",
+            "instrument_subtype": "MOVEMENT",
+            "database_field_name": "data1",
+            "measured_quantity_name": "Settlement",
+            "abbreviated_unit": "mm"
+        }}
+    ],
+    "center_easting": 105432.5,
+    "center_northing": 205678.9,
+    "radius_meters": 1000.0,
+    "exclude_instrument_ids": ["LP007", "LP008"]
+}}
+```
+
+Remember that "00:00:00 AM" is not a valid time; it should be "12:00:00 AM".
 
 # Examples
 

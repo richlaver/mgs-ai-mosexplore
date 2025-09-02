@@ -298,12 +298,16 @@ def parse_message_components(content, additional_kwargs=None):
 def render_message_content(msg: AIMessage, msg_type: str, clean_content: str, additional_kwargs: dict):
     """Render message content based on its type, handling artifacts for final and observation messages."""
     if msg_type in ['final', 'observation']:
+        logger.debug(f"Rendering {msg_type} message with content: {clean_content[:100]}")
         st.markdown(clean_content)
         artifacts = additional_kwargs.get("artifacts", [])
+        logger.debug(f"Retrieved artifacts for {msg_type} message: {artifacts[:100]}")
         if artifacts and isinstance(artifacts, list):
             for artifact in artifacts:
+                logger.debug(f"Processing artifact: {artifact.get('artifact_id')} with type {artifact.get('type')}")
                 artifact_type = artifact.get('type')
                 if artifact_type == 'Plotly object':
+                    logger.debug(f"Identified Plotly artifact: {artifact.get('artifact_id')}")
                     try:
                         fig = pio.from_json(artifact['content'])
                         st.plotly_chart(fig, use_container_width=True)
@@ -312,7 +316,7 @@ def render_message_content(msg: AIMessage, msg_type: str, clean_content: str, ad
                         st.error("Error rendering plot")
                 elif artifact_type == 'CSV':
                     st.download_button(
-                        label="Download Time Series Data (CSV)",
+                        label="Download Plot Data (CSV)",
                         data=artifact['content'],
                         file_name=artifact['filename'],
                         mime='text/csv',
@@ -409,7 +413,7 @@ def render_chat_content() -> None:
                                 content, message.additional_kwargs
                             )
 
-                            logger.debug(f'Extracted content: {content[:100]}')
+                            logger.debug(f'Extracted content: {content[:150]}')
                             logger.debug(f'Message type: {msg_type}')
                             
                             new_message = AIMessage(

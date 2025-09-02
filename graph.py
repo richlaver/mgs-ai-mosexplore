@@ -32,7 +32,9 @@ from tools.get_instrument_context import InstrumentContextTool
 from tools.get_trend_info_toolkit import TrendExtractorWrapperTool
 from tools.create_output_toolkit import (
     TimeSeriesPlotWrapperTool,
-    TimeSeriesPlotTool
+    TimeSeriesPlotTool,
+    MapPlotWrapperTool,
+    MapPlotTool
 )
 import json
 import logging
@@ -113,8 +115,14 @@ def build_supervisor_graph(
         plot_time_series_tool = TimeSeriesPlotTool(
             sql_tool=general_sql_query_tool
         )
-        plot_wrapper_tool = TimeSeriesPlotWrapperTool(
+        time_series_plot_wrapper = TimeSeriesPlotWrapperTool(
             plot_tool=plot_time_series_tool
+        )
+        plot_map_tool = MapPlotTool(
+            sql_tool=general_sql_query_tool
+        )
+        map_plot_wrapper = MapPlotWrapperTool(
+            plot_tool=plot_map_tool
         )
         tools = [
             general_sql_query_tool,
@@ -122,7 +130,8 @@ def build_supervisor_graph(
             datetime_shift_tool,
             get_instrument_context_tool,
             get_trend_info_tool,
-            plot_wrapper_tool
+            time_series_plot_wrapper,
+            map_plot_wrapper
         ]
         tool_names = [tool.name for tool in tools]
         with open('instrument_context.json', 'r') as instrument_context_json:
@@ -182,7 +191,8 @@ def build_supervisor_graph(
                     'get_instrument_context_toolname': 
                     get_instrument_context_tool.name,
                     'get_trend_info_toolname': get_trend_info_tool.name,
-                    'plot_time_series_toolname': plot_wrapper_tool.name,
+                    'plot_time_series_toolname': time_series_plot_wrapper.name,
+                    'plot_map_toolname': map_plot_wrapper.name,
                     'agent_scratchpad': ''
                 },
                 config=config
@@ -218,7 +228,7 @@ def build_supervisor_graph(
                     obs_content = str(observation)
                     
                     # Handle JSON string or tuple for time_series_plot and time_series_plot_wrapper
-                    if tool_name in ['time_series_plot', 'time_series_plot_wrapper']:
+                    if tool_name in ['time_series_plot', 'time_series_plot_wrapper', 'map_plot', 'map_plot_wrapper']:
                         if isinstance(observation, str):
                             try:
                                 parsed = json.loads(observation)
