@@ -1,10 +1,16 @@
 streamlit
+b2sdk
 geoalchemy2
 langchain_core
 typing_extensions
 langchain_community
 langgraph
 langchain_google_vertexai
+modal
+numpy
+plotly
+pydantic>=2
+psycopg2-binary
 sqlalchemy
 sqlparse
 mysql-connector-python

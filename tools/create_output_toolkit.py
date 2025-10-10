@@ -6,7 +6,8 @@ import re
 import uuid
 from datetime import datetime, timedelta
 import datetime as datetime_module
-from typing import Dict, List, Optional, Tuple, Type, Union
+import decimal
+from typing import Dict, List, Optional, Tuple, Type, Union, Any
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,6 @@ from pyproj.crs import CRS
 from pyproj.transformer import Transformer
 
 from .sql_security_toolkit import GeneralSQLQueryTool
-from .get_trend_info_toolkit import parse_datetime, format_datetime
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -26,6 +26,30 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+def parse_datetime(dt_str: str) -> datetime:
+    """Parse datetime string in format 'D Month YYYY H:MM:SS AM/PM'."""
+    # Try Windows format (no leading zeros)
+    try:
+        return datetime.strptime(dt_str, "%#d %B %Y %#I:%M:%S %p")
+    except ValueError:
+        pass
+        
+    # Try padded format
+    try:
+        return datetime.strptime(dt_str, "%d %B %Y %I:%M:%S %p")
+    except ValueError:
+        pass
+            
+    raise ValueError(
+        f"Invalid datetime format: {dt_str}. "
+        "Expected format: 'D Month YYYY H:MM:SS AM/PM' "
+        "e.g. '2 August 2025 2:30:00 PM' or '02 August 2025 02:30:00 PM'"
+    )
+
+def format_datetime(dt: datetime) -> str:
+    """Format datetime object to string in format 'D Month YYYY H:MM:SS AM/PM'."""
+    return dt.strftime("%d %B %Y %I:%M:%S %p").lstrip("0").replace(" 0", " ")
 
 def clean_numeric_string(val):
     if not isinstance(val, (str, int, float)):
@@ -60,15 +84,15 @@ class TimeSeriesPlotInput(BaseModel):
         ...,
         description="A list of instrument-column pairs to plot on the primary (left) y-axis. Each pair is an object with 'instrument_id' (a string, e.g., 'INST001') and 'column_name' (a string, e.g., 'data1' or 'calculation1'). At least one pair is required. The total number of pairs (primary + secondary) cannot exceed 7. Example: [{'instrument_id': 'INST001', 'column_name': 'data1'}, {'instrument_id': 'INST002', 'column_name': 'calculation1'}]."
     )
-    secondary_y_instruments: List[InstrumentColumnPair] = Field(
+    secondary_y_instruments: Optional[List[InstrumentColumnPair]] = Field(
         default_factory=list,
         description="An optional list of instrument-column pairs to plot on the secondary (right) y-axis. Each pair is an object with 'instrument_id' (a string, e.g., 'INST003') and 'column_name' (a string, e.g., 'data2' or 'calculation2'). If provided, review levels cannot be used. The total number of pairs (primary + secondary) cannot exceed 7. Example: [{'instrument_id': 'INST003', 'column_name': 'data2'}]."
     )
-    start_time: datetime = Field(
+    start_time: Union[str, datetime] = Field(
         ...,
         description="The start of the time range for the data to plot, as a datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Must be earlier than end_time and match the format of the 'date1' column in the database."
     )
-    end_time: datetime = Field(
+    end_time: Union[str, datetime] = Field(
         ...,
         description="The end of the time range for the data to plot, as a datetime string in the format 'D Month YYYY H:MM:SS AM/PM' (e.g., '31 May 2025 2:00:00 PM'). Must be later than start_time and match the format of the 'date1' column in the database."
     )
@@ -88,14 +112,40 @@ class TimeSeriesPlotInput(BaseModel):
         None,
         description="The unit for the secondary (right) y-axis, displayed in parentheses in the axis title (e.g., 'kPa'). Required if secondary_y_instruments is non-empty, otherwise optional. Example: 'kPa'."
     )
-    review_level_values: List[float] = Field(
+    review_level_values: Optional[List[float]] = Field(
         default_factory=list,
         description="An optional list of float values to plot as horizontal dashed lines on the primary y-axis, representing thresholds or review levels (e.g., [10.0, -5.0]). Maximum 3 positive and 3 negative values allowed. Cannot be used if secondary_y_instruments is non-empty. Example: [10.0, 5.0, -5.0]."
     )
-    highlight_zero: bool = Field(
+    highlight_zero: Optional[bool] = Field(
         False,
         description="Whether to highlight the zero line on the primary y-axis with a light grey line. Only applicable if secondary_y_instruments is empty. Set to true to enable, false to disable. Example: true."
     )
+
+    @validator('start_time', 'end_time', pre=True)
+    def _parse_datetime_fields(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            return parse_datetime(v)
+        return v
+
+    @validator('secondary_y_instruments', 'review_level_values', pre=True)
+    def _coerce_none_to_list(cls, v):
+        return [] if v is None else v
+
+    @validator('highlight_zero', pre=True)
+    def _coerce_none_to_bool(cls, v):
+        if v is None:
+            return False
+        if isinstance(v, str):
+            val = v.strip().lower()
+            if val in ('true', '1', 'yes'):
+                return True
+            if val in ('false', '0', 'no'):
+                return False
+        return v
 
 class BaseSQLQueryTool(BaseModel):
     """Base tool for SQL database interaction."""
@@ -104,15 +154,26 @@ class BaseSQLQueryTool(BaseModel):
 
 class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
     """Tool for plotting time series data with Plotly."""
-    name: str = "time_series_plot"
+    name: str = "time_series_plot_tool"
     description: str = """
-    Creates an interactive Plotly time series plot and CSV file from instrumentation data.
-    Supports multiple time series with different column names, dual y-axes, review levels, and customizable gridlines.
-    Returns a tuple of (content, artefacts) with response_format='content_and_artifact'.
-    The artefacts include the Plotly JSON and CSV file.
-    """
+Creates an interactive Plotly time series plot and CSV file from instrumentation data. Supports multiple time series with different column names, dual y-axes, review levels, and customizable gridlines. Returns a tuple of (content, artefacts) with response_format='content_and_artifact'. The artefacts include the Plotly JSON and CSV file.
+
+Input schema:
+- primary_y_instruments: List of objects with 'instrument_id' (str, e.g., 'INST001') and 'column_name' (str, e.g., 'data1' or 'calculation1'). At least one required. Total instruments (primary + secondary) <= 7.
+- secondary_y_instruments: Optional list of objects with 'instrument_id' and 'column_name'. If provided, review levels cannot be used.
+- start_time: Datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Required.
+- end_time: Datetime string in same format, later than start_time. Required.
+- primary_y_title: String for primary y-axis title (e.g., 'Temperature'). Required.
+- primary_y_unit: String for primary y-axis unit (e.g., '°C'). Required.
+- secondary_y_title: Optional string for secondary y-axis title, required if secondary_y_instruments non-empty.
+- secondary_y_unit: Optional string for secondary y-axis unit, required if secondary_y_instruments non-empty.
+- review_level_values: Optional list of floats for thresholds on primary y-axis (e.g., [10.0, -5.0]). Max 3 positive, 3 negative. Not allowed with secondary_y_instruments.
+- highlight_zero: Boolean to highlight zero line on primary y-axis. Only if secondary_y_instruments empty.
+
+Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": "data1"}], "start_time": "1 January 2025 12:00:00 AM", "end_time": "31 January 2025 11:59:59 PM", "primary_y_title": "Temperature", "primary_y_unit": "°C", "highlight_zero": true}
+"""
     args_schema: Type[TimeSeriesPlotInput] = TimeSeriesPlotInput
-    response_format: str = "content_and_artifact"
+    response_format: str = "content"
 
     def _get_x_grid_settings(self, start_time: datetime, end_time: datetime) -> Dict:
         """Determine x-axis grid settings and formatting."""
@@ -178,18 +239,37 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
     def _run(
         self,
         primary_y_instruments: List[InstrumentColumnPair],
-        secondary_y_instruments: List[InstrumentColumnPair],
         start_time: datetime,
         end_time: datetime,
         primary_y_title: str,
         primary_y_unit: str,
-        secondary_y_title: Optional[str],
-        secondary_y_unit: Optional[str],
-        review_level_values: List[float],
-        highlight_zero: bool
+        secondary_y_instruments: Optional[List[InstrumentColumnPair]] = None,
+        secondary_y_title: Optional[str] = None,
+        secondary_y_unit: Optional[str] = None,
+        review_level_values: Optional[List[float]] = None,
+        highlight_zero: bool = False
     ) -> Tuple[str, List[Dict]]:
-        logger.debug(f"TimeSeriesPlotTool._run called with {len(primary_y_instruments)} primary and {len(secondary_y_instruments)} secondary instruments")
+        secondary_y_instruments = secondary_y_instruments or []
+        review_level_values = review_level_values or []
+        logger.debug(
+            f"TimeSeriesPlotTool._run called with {len(primary_y_instruments)} primary and {len(secondary_y_instruments)} secondary instruments"
+        )
         try:
+            if start_time >= end_time:
+                raise ValueError("start_time must be earlier than end_time. Correct the time range.")
+            if secondary_y_instruments and (secondary_y_title is None or secondary_y_unit is None):
+                raise ValueError("secondary_y_title and secondary_y_unit are required when secondary_y_instruments is provided.")
+            if review_level_values and secondary_y_instruments:
+                raise ValueError("review_level_values cannot be used with secondary_y_instruments.")
+            pos_levels = [x for x in review_level_values if x > 0]
+            neg_levels = [x for x in review_level_values if x < 0]
+            if len(pos_levels) > 3 or len(neg_levels) > 3:
+                raise ValueError("Maximum 3 positive and 3 negative review_level_values allowed.")
+            total_instr = len(primary_y_instruments) + len(secondary_y_instruments)
+            if total_instr == 0:
+                raise ValueError("At least one instrument-column pair required in primary_y_instruments.")
+            if total_instr > 7:
+                raise ValueError("Total instrument-column pairs (primary + secondary) cannot exceed 7.")
             # Group instruments by column name for efficient querying
             column_groups = {}
             all_instrument_ids = []
@@ -254,8 +334,22 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                     return None
 
                 try:
-                    parsed_data = eval(results, {"__builtins__": {}, "datetime": datetime_module}, {})
-                    for dt, val_str, instr_id in parsed_data:
+                    parsed_data: List[dict] = eval(
+                        results,
+                        {"__builtins__": {}},
+                        {
+                            "datetime": datetime_module,
+                            "date": datetime_module.date,
+                            "time": datetime_module.time,
+                            "Decimal": decimal.Decimal,
+                            "bytes": bytes,
+                            "bytearray": bytearray
+                        }
+                    )
+                    for row in parsed_data:
+                        dt = row['timestamp']
+                        val_str = row['value']
+                        instr_id = row['instr_id']
                         if instr_id not in time_series_data:
                             continue
                         cleaned_val = clean_numeric_string(val_str)
@@ -271,13 +365,14 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                     return content, []
             
             if not any(time_series_data.values()):
-                content = "No data found: No valid data points found for given instruments"
-                return content, []
+                raise ValueError("No valid data found for any instruments in the specified time range. Check instrument IDs, column names, or expand the time range.")
             
             logger.debug(f"Processed data for instruments: {list(time_series_data.keys())}")
-            
+            logger.debug(f"Parsed data into time series data: {time_series_data}")
+
             # Create Plotly figure
             fig = go.Figure()
+            logger.debug("Plotly figure initialized")
             
             # Colors for time series
             primary_colors = ['#1f77b4', '#4b9cd3', '#87ceeb', '#add8e6']  # Blue hues
@@ -285,37 +380,52 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
             
             # Plot time series for primary y-axis
             y_min, y_max = float('inf'), float('-inf')
+            primary_colors = ['#1f77b4', '#4b9cd3', '#87ceeb', '#add8e6']
             for i, instr in enumerate(primary_y_instruments):
                 instr_id = instr.instrument_id
-                if time_series_data[instr_id]:
-                    times, values = zip(*time_series_data[instr_id])
-                    y_min = min(y_min, min(values))
-                    y_max = max(y_max, max(values))
-                    fig.add_trace(go.Scatter(
-                        x=times,
-                        y=values,
-                        mode='lines+markers',
-                        name=f"Instrument {instr_id} ({instr.column_name})",
-                        line=dict(color=primary_colors[i % len(primary_colors)])
-                    ))
-            
+                if instr_id not in time_series_data or not time_series_data[instr_id]:
+                    logger.debug(f"No data for primary instrument {instr_id}")
+                    continue
+                times, values = zip(*time_series_data[instr_id])
+                logger.debug(f"Primary instrument {instr_id}: {len(times)} data points")
+                y_min = min(y_min, min(values))
+                y_max = max(y_max, max(values))
+                if y_min == y_max:
+                    y_min -= 1
+                    y_max += 1
+                fig.add_trace(go.Scatter(
+                    x=times,
+                    y=values,
+                    mode='lines+markers',
+                    name=f"Instrument {instr_id} ({instr.column_name})",
+                    line=dict(color=primary_colors[i % len(primary_colors)])
+                ))
+                logger.debug(f"Added primary trace for {instr_id}")
+            logger.debug(f"Primary traces added | y_min={y_min}, y_max={y_max}")
+
             # Plot time series for secondary y-axis
             secondary_y_min, secondary_y_max = float('inf'), float('-inf')
+            secondary_colors = ['#ff69b4', '#ff85c0', '#ffb6c1', '#ffc1cc']
             for i, instr in enumerate(secondary_y_instruments):
                 instr_id = instr.instrument_id
-                if time_series_data[instr_id]:
-                    times, values = zip(*time_series_data[instr_id])
-                    secondary_y_min = min(secondary_y_min, min(values))
-                    secondary_y_max = max(secondary_y_max, max(values))
-                    fig.add_trace(go.Scatter(
-                        x=times,
-                        y=values,
-                        mode='lines+markers',
-                        name=f"Instrument {instr_id} ({instr.column_name})",
-                        line=dict(color=secondary_colors[i % len(secondary_colors)]),
-                        yaxis='y2'
-                    ))
-            
+                if instr_id not in time_series_data or not time_series_data[instr_id]:
+                    logger.debug(f"No data for secondary instrument {instr_id}")
+                    continue
+                times, values = zip(*time_series_data[instr_id])
+                logger.debug(f"Secondary instrument {instr_id}: {len(times)} data points")
+                secondary_y_min = min(secondary_y_min, min(values))
+                secondary_y_max = max(secondary_y_max, max(values))
+                fig.add_trace(go.Scatter(
+                    x=times,
+                    y=values,
+                    mode='lines+markers',
+                    name=f"Instrument {instr_id} ({instr.column_name})",
+                    line=dict(color=secondary_colors[i % len(secondary_colors)]),
+                    yaxis='y2'
+                ))
+                logger.debug(f"Added secondary trace for {instr_id}")
+            logger.debug(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
+
             # Plot review levels if provided
             if review_level_values:
                 pos_levels = sorted([x for x in review_level_values if x > 0], reverse=True)
@@ -332,7 +442,8 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                     )
                     y_min = min(y_min, level)
                     y_max = max(y_max, level)
-            
+                logger.debug(f"Added {len(pos_levels + neg_levels)} review level hlines")
+
             # Highlight zero line
             if highlight_zero and not secondary_y_instruments:
                 fig.add_hline(
@@ -342,10 +453,17 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                 )
                 y_min = min(y_min, 0)
                 y_max = max(y_max, 0)
-            
+                logger.debug("Added zero highlight hline")
+
             # Set axis properties
             x_grid = self._get_x_grid_settings(start_time, end_time)
+            logger.debug(f"x_grid calculated: {x_grid}")
             primary_y_grid = self._get_y_grid_settings(y_min, y_max)
+            logger.debug(f"primary_y_grid calculated: {primary_y_grid}")
+
+            if primary_y_grid['major_step'] <= 0 or primary_y_grid['minor_step'] <= 0:
+                logger.error(f"Invalid primary y-grid steps: major={primary_y_grid['major_step']}, minor={primary_y_grid['minor_step']}")
+                raise ValueError("Invalid y-axis grid steps calculated")
             
             layout = {
                 'xaxis': {
@@ -365,13 +483,18 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
             }
             
             if secondary_y_instruments:
+                secondary_y_grid = self._get_y_grid_settings(secondary_y_min, secondary_y_max)
+                logger.debug(f"secondary_y_grid calculated: {secondary_y_grid}")
+                if secondary_y_grid['major_step'] <= 0 or secondary_y_grid['minor_step'] <= 0:
+                    logger.error(f"Invalid secondary y-grid steps: major={secondary_y_grid['major_step']}, minor={secondary_y_grid['minor_step']}")
+                    raise ValueError("Invalid secondary y-axis grid steps calculated")
                 layout['yaxis2'] = {
                     'title': f"{secondary_y_title} ({secondary_y_unit})",
                     'overlaying': 'y',
                     'side': 'right',
-                    'dtick': self._get_y_grid_settings(secondary_y_min, secondary_y_max)['major_step'],
+                    'dtick': secondary_y_grid['major_step'],
                     'minor': {
-                        'dtick': self._get_y_grid_settings(secondary_y_min, secondary_y_max)['minor_step'],
+                        'dtick': secondary_y_grid['minor_step'],
                         'showgrid': True,
                         'gridcolor': 'lightgrey'
                     },
@@ -384,12 +507,20 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                 template="plotly_white",
                 **layout
             )
+            logger.debug("Figure layout updated")
+
+            if not fig.data:
+                logger.error("Plotly figure has no traces")
+                raise ValueError("No traces added to Plotly figure; check instrument data")
             
             # Create CSV
             all_data = []
             for instr in primary_y_instruments + secondary_y_instruments:
                 instr_id = instr.instrument_id
                 column_name = instr.column_name
+                if instr_id not in time_series_data or not time_series_data[instr_id]:
+                    logger.debug(f"Skipping empty data for instrument {instr_id}")
+                    continue
                 for dt, val in time_series_data[instr_id]:
                     all_data.append({
                         'Instrument ID': instr_id,
@@ -398,36 +529,52 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
                         'Value': val,
                         'Y-Axis': 'Primary' if instr in primary_y_instruments else 'Secondary'
                     })
+            logger.debug(f"all_data populated with {len(all_data)} entries")
+
+            if not all_data:
+                logger.error("No data for CSV generation")
+                raise ValueError("No data available for CSV generation")
+            
             df = pd.DataFrame(all_data)
-            csv_filename = f"time_series_{uuid.uuid4()}.csv"
+            logger.debug(f"DataFrame created with shape {df.shape}")
             csv_content = df.to_csv(index=False)
+            logger.debug(f"CSV content generated (length: {len(csv_content)})")
             
             # Prepare artefacts
             plotly_filename = f"time_series_{uuid.uuid4()}.json"
+            try:
+                plotly_json = fig.to_json()
+                logger.debug(f"Plotly JSON generated (length: {len(plotly_json)})")
+            except Exception as e:
+                logger.error(f"Failed to serialize Plotly figure: {str(e)}", exc_info=True)
+                raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
+
             artefacts = [
                 {
                     'artifact_id': str(uuid.uuid4()),
                     'filename': plotly_filename,
                     'type': 'Plotly object',
-                    'description': f"Time series plot for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}",
-                    'content': fig.to_json()
+                    'description': 'Time series plot JSON',
+                    'content': plotly_json
                 },
                 {
                     'artifact_id': str(uuid.uuid4()),
-                    'filename': csv_filename,
+                    'filename': f"time_series_{uuid.uuid4()}.csv",
                     'type': 'CSV',
-                    'description': f"CSV data for time series plot of instruments {', '.join(all_instrument_ids)}",
+                    'description': 'Time series data CSV',
                     'content': csv_content
                 }
             ]
+            logger.debug(f"Artefacts list created with {len(artefacts)} items")
             
             content = f"Generated time series plot and CSV for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}."
-            return content, artefacts
+            logger.debug(f"Returning content: {content}, artefacts count: {len(artefacts)}")
+            return {"content": content, "artefacts": artefacts}
         
+        except ValueError as e:
+            return {"content": f"Error: Invalid input - {str(e)}. Correct and retry.", "artefacts": []}
         except Exception as e:
-            logger.error(f"Error in TimeSeriesPlotTool: {str(e)}")
-            content = f"Error processing plot: {str(e)}"
-            return content, []
+            return {"content": f"Error: Unexpected failure - {str(e)}. Verify database connection, instrument existence, or numeric data in columns.", "artefacts": []}
 
 class TimeSeriesPlotWrapperInput(BaseModel):
     """Input model for the time series plotting wrapper, accepting a JSON string to create plots."""
@@ -767,16 +914,16 @@ class MapPlotInput(BaseModel):
         ...,
         description="'value_at_time' for snapshot at end_time, 'change_over_period' for delta or worsened status."
     )
-    start_time: Optional[datetime] = Field(
+    start_time: Optional[Union[str, datetime]] = Field(
         None,
         description="Start datetime for 'change_over_period'. Required for changes, ignored for 'value_at_time'."
     )
-    end_time: datetime = Field(
+    end_time: Union[str, datetime] = Field(
         ...,
         description="End datetime (or single time for 'value_at_time'). Must be after start_time if provided."
     )
-    buffer_period_hours: int = Field(
-        default=72,
+    buffer_period_hours: Optional[int] = Field(
+        72,
         description="Hours before specified times to search for nearest reading."
     )
     series: List[SeriesDict] = Field(
@@ -795,17 +942,45 @@ class MapPlotInput(BaseModel):
         None,
         description="Northing coordinate for map center."
     )
-    radius_meters: float = Field(
-        ...,
+    radius_meters: Optional[float] = Field(
+        500,
         description="Radius for spatial filter (square bounding box of side 2*radius). >0."
     )
-    exclude_instrument_ids: List[str] = Field(
+    exclude_instrument_ids: Optional[List[str]] = Field(
         default_factory=list,
         description="List of instrument IDs to exclude."
     )
 
+    @validator('start_time', 'end_time', pre=True)
+    def _parse_datetime_fields(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            return parse_datetime(v)
+        return v
+
+    @validator('buffer_period_hours', pre=True)
+    def _coerce_buffer(cls, v):
+        if v is None:
+            return 72
+        return v
+
+    @validator('radius_meters', pre=True)
+    def _coerce_radius(cls, v):
+        if v is None:
+            return 500
+        return v
+
+    @validator('exclude_instrument_ids', pre=True)
+    def _coerce_exclude(cls, v):
+        return [] if v is None else v
+
     @validator('buffer_period_hours')
     def validate_buffer(cls, v, values):
+        if v < 0:
+            raise ValueError("buffer_period_hours must be non-negative")
         if 'plot_type' in values and values['plot_type'] == 'change_over_period' and 'start_time' in values and 'end_time' in values:
             period_hours = (values['end_time'] - values['start_time']).total_seconds() / 3600
             if v > period_hours / 2:
@@ -830,23 +1005,42 @@ class MapPlotInput(BaseModel):
             raise ValueError("1-3 series required")
         return v
 
+    @validator('radius_meters')
+    def validate_radius(cls, v):
+        if v <= 0:
+            raise ValueError("radius_meters must be positive")
+        return v
+
 class BaseSQLQueryTool(BaseModel):
     sql_tool: GeneralSQLQueryTool = Field(exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class MapPlotTool(BaseTool, BaseSQLQueryTool):
     """Tool for plotting instrument readings or review status on a map with Plotly."""
-    name: str = "map_plot"
+    name: str = "map_plot_tool"
     description: str = """
-    Creates an interactive Plotly map plot and CSV file from instrumentation data.
-    Supports readings or review status, for a single time or change over a period, within a geographic radius.
-    Returns a tuple of (content, artefacts) with response_format='content_and_artifact'.
-    The artefacts include the Plotly JSON, CSV, and HTML file.
-    """
+Creates an interactive Plotly map plot and CSV file from instrumentation data. Supports readings (instrument values) or reviews (review status), plotted as value at a specific time or change over a period. Returns a dictionary with 'content' and 'artefacts'. The artefacts include the Plotly JSON and CSV file.
+
+Input schema:
+- data_type: String, either 'readings' or 'reviews'.
+- plot_type: String, either 'value_at_time' or 'change_over_period'.
+- start_time: Optional datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 August 2025 12:00:00 AM'), required for 'change_over_period'.
+- end_time: Datetime string in same format (e.g., '31 August 2025 11:59:59 PM'). Required.
+- buffer_period_hours: Optional integer, buffer period in hours (default 72).
+- series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa').
+- center_instrument_id: Optional string, instrument ID to center the map.
+- center_easting: Optional float, easting coordinate to center the map if center_instrument_id not provided.
+- center_northing: Optional float, northing coordinate to center the map if center_instrument_id not provided.
+- radius_meters: Optional float, radius in meters for map extent (default 500).
+- exclude_instrument_ids: Optional list of strings, instrument IDs to exclude.
+
+Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31 August 2025 11:59:59 PM", "buffer_period_hours": 72, "series": [{"instrument_type": "sensor", "instrument_subtype": "pressure", "database_field_name": "data1", "measured_quantity_name": "Pressure", "abbreviated_unit": "kPa"}], "radius_meters": 1000.0}
+"""
     args_schema: Type[MapPlotInput] = MapPlotInput
-    response_format: str = "content_and_artifact"
+    response_format: str = "content"
 
     def _get_center_coords(self, center_instrument_id: Optional[str], center_easting: Optional[float], center_northing: Optional[float]) -> Tuple[float, float]:
+        logger.debug(f"Fetching center coordinates for instrument_id={center_instrument_id}, easting={center_easting}, northing={center_northing}")
         if center_instrument_id:
             query = f"""
             SELECT l.easting, l.northing
@@ -854,41 +1048,138 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             JOIN location l ON i.location_id = l.id
             WHERE i.instr_id = '{center_instrument_id}';
             """
+            logger.debug(f"Executing SQL query for center: {query}")
             result = self.sql_tool._run(query)
+            logger.debug(f"Query result: {result}")
             if result == "No data was found in the database matching the specified search criteria.":
                 raise ValueError(f"No location found for instrument ID {center_instrument_id}")
             try:
-                data = eval(result, {"__builtins__": {}, "datetime": datetime_module}, {})
-                easting, northing = data[0]
-                easting_clean = clean_numeric_string(easting)
-                northing_clean = clean_numeric_string(northing)
+                # Attempt JSON load first, fallback to eval
+                if isinstance(result, str):
+                    try:
+                        parsed = json.loads(result)
+                    except Exception:
+                        parsed = eval(result, {"__builtins__": {}}, {
+                            "datetime": datetime_module,
+                            "date": datetime_module.date,
+                            "time": datetime_module.time,
+                            "Decimal": decimal.Decimal,
+                            "bytes": bytes,
+                            "bytearray": bytearray
+                        })
+                else:
+                    parsed = result
+                if not isinstance(parsed, list) or not parsed:
+                    raise ValueError(f"No location found for instrument ID {center_instrument_id}")
+                first = parsed[0]
+                if isinstance(first, dict):
+                    easting_val = first.get('easting') or first.get('l.easting') or first.get('EASTING')
+                    northing_val = first.get('northing') or first.get('l.northing') or first.get('NORTHING')
+                elif isinstance(first, (list, tuple)) and len(first) >= 2:
+                    easting_val, northing_val = first[0], first[1]
+                else:
+                    raise ValueError("Unrecognized row structure for location query")
+                easting_clean = clean_numeric_string(easting_val)
+                northing_clean = clean_numeric_string(northing_val)
                 if None in (easting_clean, northing_clean):
                     raise ValueError(f"Invalid easting or northing for instrument ID {center_instrument_id}")
-                return float(easting_clean), float(northing_clean)
+                e_f, n_f = float(easting_clean), float(northing_clean)
+                logger.debug(f"Center coords from instrument: easting={e_f}, northing={n_f}")
+                return e_f, n_f
             except Exception as e:
+                logger.error(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
                 raise ValueError(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
         elif center_easting is not None and center_northing is not None:
+            logger.debug(f"Using provided center coords: easting={center_easting}, northing={center_northing}")
             return center_easting, center_northing
         else:
             raise ValueError("Either center_instrument_id or both center_easting and center_northing must be provided")
 
     def _get_bounds(self, center_e: float, center_n: float, radius_m: float) -> Tuple[float, float, float, float]:
+        logger.debug(f"Calculating bounds with center_e={center_e}, center_n={center_n}, radius_m={radius_m}")
         min_e = center_e - radius_m
         max_e = center_e + radius_m
         min_n = center_n - radius_m
         max_n = center_n + radius_m
+        logger.debug(f"Bounds: min_e={min_e}, max_e={max_e}, min_n={min_n}, max_n={max_n}")
         return min_e, max_e, min_n, max_n
 
     def _get_review_config(self, field: str) -> Dict:
+        logger.debug(f"Getting review config for field={field}")
         pos_values = [100, 50, 20]
         neg_values = [-20, -50, -100]
         severity_map = {100: 3, 50: 2, 20: 1, -20: 1, -50: 2, -100: 3}
         color_map = {100: 'red', 50: 'orange', 20: 'yellow', -20: 'yellow', -50: 'orange', -100: 'red'}
-        return {'pos_values': pos_values, 'neg_values': neg_values, 'severity_map': severity_map, 'color_map': color_map}
+        config = {'pos_values': pos_values, 'neg_values': neg_values, 'severity_map': severity_map, 'color_map': color_map}
+        logger.debug(f"Review config: {config}")
+        return config
+
+    def _extract_numeric(self, v: Any) -> Optional[str]:
+        """Return a cleaned numeric string from various DB-returned value forms.
+
+        Handles:
+        - None / empty -> None
+        - Strings wrapped in extra quotes produced by JSON_EXTRACT (e.g. '"-6.67"')
+        - Numeric types -> str(n)
+        - Already clean numeric strings
+        """
+        if v is None:
+            return None
+        if isinstance(v, (int, float, decimal.Decimal)):
+            return str(v)
+        if isinstance(v, (bytes, bytearray)):
+            try:
+                v = v.decode('utf-8')  # type: ignore
+            except Exception:
+                return None
+        if isinstance(v, str):
+            s = v.strip()
+            # Remove enclosing quotes from JSON_EXTRACT on MySQL / SQLite behavior
+            if len(s) >= 2 and ((s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'"))):
+                s = s[1:-1]
+            # Empty after stripping
+            if s == '':
+                return None
+            # Basic numeric validation (allow leading - and decimal point)
+            if any(c.isdigit() for c in s):
+                return s
+            return None
+        return None
+
+    def _extract_row_reading(self, row: Any) -> Optional[Tuple[str, Any, Any, Any]]:
+        """Normalize a single row from SQL result for readings queries.
+
+        Supports rows as tuples (instr_id, easting, northing, value) or dicts with keys.
+        Returns (instr_id, easting, northing, value_raw) or None if unusable.
+        """
+        if isinstance(row, dict):
+            instr_id = row.get('instr_id') or row.get('id')
+            e = row.get('easting') or row.get('east')
+            n = row.get('northing') or row.get('north')
+            v = row.get('value') or row.get('val') or row.get('value_end') or row.get('value_start')
+            if instr_id is None:
+                return None
+            return instr_id, e, n, v
+        if isinstance(row, (list, tuple)) and len(row) == 4:
+            return row[0], row[1], row[2], row[3]
+        return None
+
+    def _extract_row_change(self, row: Any, value_key: str) -> Optional[Tuple[str, Any]]:
+        """Normalize change_over_period rows expecting (instr_id, value_key)."""
+        if isinstance(row, dict):
+            instr_id = row.get('instr_id') or row.get('id')
+            v = row.get(value_key)
+            if instr_id is None:
+                return None
+            return instr_id, v
+        if isinstance(row, (list, tuple)) and len(row) == 2:
+            return row[0], row[1]
+        return None
 
     def _get_readings(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
-                  start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
+                      start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
         field = s.database_field_name
+        logger.debug(f"Getting readings for field={field}")
         is_data = field.startswith('data')
         
         # Define value extraction logic
@@ -900,11 +1191,18 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             field_path = f'$.{field}'
             value_extract = f"CASE WHEN m.custom_fields IS NOT NULL AND LENGTH(m.custom_fields) > 0 AND JSON_VALID(m.custom_fields) THEN JSON_EXTRACT(m.custom_fields, '{field_path}') ELSE NULL END"
             extra_conditions = f"AND m.custom_fields IS NOT NULL AND LENGTH(m.custom_fields) > 0 AND JSON_VALID(m.custom_fields) " \
-                            f"AND {value_extract} IS NOT NULL " \
-                            f"AND {value_extract} != 'null' " \
-                            f"AND {value_extract} != ''"
+                               f"AND {value_extract} IS NOT NULL " \
+                               f"AND {value_extract} != 'null' " \
+                               f"AND {value_extract} != ''"
         
-        safe_eval = lambda s: eval(s, {"__builtins__": {}}, {}) if s != "No data was found in the database matching the specified search criteria." else []
+        safe_eval = lambda s: eval(s, {"__builtins__": {}}, {
+            "datetime": datetime_module,
+            "date": datetime_module.date,
+            "time": datetime_module.time,
+            "Decimal": decimal.Decimal,
+            "bytes": bytes,
+            "bytearray": bytearray
+        }) if s != "No data was found in the database matching the specified search criteria." else []
 
         if inputs.plot_type == 'value_at_time':
             query = f"""
@@ -919,7 +1217,7 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             {extra_conditions};
             """
-            logger.debug(f"Executing readings query: {query}")
+            logger.debug(f"Executing readings query for value_at_time: {query}")
             raw_result = self.sql_tool._run(query)
             logger.debug(f"Raw SQL result: {raw_result!r}")
             raw_data = safe_eval(raw_result)
@@ -928,25 +1226,27 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                 logger.warning(f"No data returned for series {s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}")
                 return []
             data = []
-            for item in raw_data:
-                logger.debug(f"Processing item: {item}")
-                if len(item) != 4:
-                    logger.warning(f"Skipping item with incorrect length: {item}")
+            for row in raw_data:
+                logger.debug(f"Processing row: {row}")
+                norm = self._extract_row_reading(row)
+                if not norm:
+                    logger.warning(f"Skipping unrecognized row format: {row}")
                     continue
-                id_, e, n, v = item
-                logger.debug(f"Raw values: id={id_!r}, easting={e!r}, northing={n!r}, value={v!r}")
-                e_clean = clean_numeric_string(e)
-                n_clean = clean_numeric_string(n)
-                v_clean = clean_numeric_string(v)
+                id_, e, n, v = norm
+                logger.debug(f"Raw extracted values: id={id_!r}, easting={e!r}, northing={n!r}, value={v!r}")
+                e_clean = self._extract_numeric(e)
+                n_clean = self._extract_numeric(n)
+                v_clean = self._extract_numeric(v)
                 logger.debug(f"Cleaned values: easting={e_clean!r}, northing={n_clean!r}, value={v_clean!r}")
                 if None in (e_clean, n_clean, v_clean):
-                    logger.warning(f"Invalid cleaned values: easting={e!r}, northing={n!r}, value={v!r}")
+                    logger.warning(f"Invalid cleaned values after normalization: easting={e!r}, northing={n!r}, value={v!r}")
                     continue
                 try:
-                    data.append((id_, float(e_clean), float(n_clean), float(v_clean)))
-                    logger.debug(f"Appended valid data point: {id_}, {e_clean}, {n_clean}, {v_clean}")
-                except ValueError as e:
-                    logger.warning(f"ValueError converting values: {e}, item: {item}")
+                    fe = float(e_clean); fn = float(n_clean); fv = float(v_clean)
+                    data.append((id_, fe, fn, fv))
+                    logger.debug(f"Appended valid data point: {id_}, {fe}, {fn}, {fv}")
+                except ValueError as conv_err:
+                    logger.warning(f"ValueError converting numeric strings: {conv_err}, row: {row}")
                     continue
             logger.debug(f"Collected {len(data)} valid data points")
             return data
@@ -960,14 +1260,15 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             {extra_conditions};
             """
-            logger.debug(f'End readings SQL extraction result: {self.sql_tool._run(query_end)}')
+            logger.debug(f"Executing end readings query for change_over_period: {query_end}")
             raw_end = safe_eval(self.sql_tool._run(query_end))
             result_end = []
-            for item in raw_end:
-                if len(item) != 2:
+            for row in raw_end:
+                norm = self._extract_row_change(row, 'value_end')
+                if not norm:
                     continue
-                instr_id, val_end = item
-                val_end_clean = clean_numeric_string(val_end)
+                instr_id, val_end = norm
+                val_end_clean = self._extract_numeric(val_end)
                 if val_end_clean is None:
                     continue
                 try:
@@ -984,13 +1285,15 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_start}' AND '{start_time_str}')
             {extra_conditions};
             """
+            logger.debug(f"Executing start readings query for change_over_period: {query_start}")
             raw_start = safe_eval(self.sql_tool._run(query_start))
             result_start = []
-            for item in raw_start:
-                if len(item) != 2:
+            for row in raw_start:
+                norm = self._extract_row_change(row, 'value_start')
+                if not norm:
                     continue
-                instr_id, val_start = item
-                val_start_clean = clean_numeric_string(val_start)
+                instr_id, val_start = norm
+                val_start_clean = self._extract_numeric(val_start)
                 if val_start_clean is None:
                     continue
                 try:
@@ -1004,6 +1307,7 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                 if val_start is not None:
                     changes[instr_id] = val_end - val_start
             if not changes:
+                logger.debug("No changes found")
                 return []
             instr_ids_str = ','.join(f"'{id_}'" for id_ in changes)
             loc_query = f"""
@@ -1011,24 +1315,32 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             FROM instrum i JOIN location l ON i.location_id = l.id
             WHERE i.instr_id IN ({instr_ids_str});
             """
-            logger.debug(f'Location query results: {self.sql_tool._run(loc_query)}')
+            logger.debug(f"Executing location query: {loc_query}")
             raw_locs = safe_eval(self.sql_tool._run(loc_query))
             loc_dict = {}
-            for item in raw_locs:
-                if len(item) != 3:
+            for row in raw_locs:
+                if isinstance(row, dict):
+                    id_ = row.get('instr_id') or row.get('id')
+                    e = row.get('easting') or row.get('east')
+                    n = row.get('northing') or row.get('north')
+                elif isinstance(row, (list, tuple)) and len(row) == 3:
+                    id_, e, n = row
+                else:
                     continue
-                id_, e, n = item
-                e_clean = clean_numeric_string(e)
-                n_clean = clean_numeric_string(n)
-                if None in (e_clean, n_clean):
+                e_clean = self._extract_numeric(e)
+                n_clean = self._extract_numeric(n)
+                if None in (e_clean, n_clean) or id_ is None:
                     continue
                 try:
                     loc_dict[id_] = (float(e_clean), float(n_clean))
                 except ValueError:
                     continue
-            return [(id_, loc_dict[id_][0], loc_dict[id_][1], changes[id_]) for id_ in changes if id_ in loc_dict]
+            data = [(id_, loc_dict[id_][0], loc_dict[id_][1], changes[id_]) for id_ in changes if id_ in loc_dict]
+            logger.debug(f"Collected {len(data)} change data points")
+            return data
 
     def _get_review_status(self, value: float, review_config: Dict) -> Tuple[int, str]:
+        logger.debug(f"Getting review status for value={value}")
         pos = review_config['pos_values']
         neg = review_config['neg_values']
         abs_thresh = 0
@@ -1042,16 +1354,25 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                     abs_thresh = max(abs_thresh, abs(t))
         severity = review_config['severity_map'].get(abs_thresh, 0)
         color = review_config['color_map'].get(abs_thresh, 'grey')
+        logger.debug(f"Status: severity={severity}, color={color}")
         return severity, color
 
     def _get_reviews(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
                      start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
         review_config = self._get_review_config(s.database_field_name)
         field = s.database_field_name
+        logger.debug(f"Getting reviews for field={field}")
         is_data = field.startswith('data')
-        field_extract = field if is_data else f"JSON_EXTRACT(m.custom_fields, '$.{field}')"  # AMENDED: Added m. to custom_fields
-        extra_conditions = f"AND {field_extract} != ''" if is_data else f"AND m.custom_fields IS NOT NULL AND JSON_VALID(m.custom_fields) AND {field_extract} IS NOT NULL AND {field_extract} != 'null' AND {field_extract} != ''"  # AMENDED: Added m. to custom_fields
-        safe_eval = lambda s: eval(s, {"__builtins__": {}}, {}) if s != "No data was found in the database matching the specified search criteria." else []
+        field_extract = field if is_data else f"JSON_EXTRACT(m.custom_fields, '$.{field}')"
+        extra_conditions = f"AND {field_extract} != ''" if is_data else f"AND m.custom_fields IS NOT NULL AND JSON_VALID(m.custom_fields) AND {field_extract} IS NOT NULL AND {field_extract} != 'null' AND {field_extract} != ''"
+        safe_eval = lambda s: eval(s, {"__builtins__": {}}, {
+            "datetime": datetime_module,
+            "date": datetime_module.date,
+            "time": datetime_module.time,
+            "Decimal": decimal.Decimal,
+            "bytes": bytes,
+            "bytearray": bytearray
+        }) if s != "No data was found in the database matching the specified search criteria." else []
 
         if inputs.plot_type == 'value_at_time':
             query = f"""
@@ -1068,16 +1389,18 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
+            logger.debug(f"Executing reviews query for value_at_time: {query}")
             raw_result = self.sql_tool._run(query)
             raw_data = safe_eval(raw_result)
             data = []
-            for item in raw_data:
-                if len(item) != 4:
+            for row in raw_data:
+                norm = self._extract_row_reading(row)
+                if not norm:
                     continue
-                id_, e, n, v = item
-                e_clean = clean_numeric_string(e)
-                n_clean = clean_numeric_string(n)
-                v_clean = clean_numeric_string(v)
+                id_, e, n, v = norm
+                e_clean = self._extract_numeric(e)
+                n_clean = self._extract_numeric(n)
+                v_clean = self._extract_numeric(v)
                 if None in (e_clean, n_clean, v_clean):
                     continue
                 try:
@@ -1085,6 +1408,7 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                     data.append((id_, float(e_clean), float(n_clean), self._get_review_status(v_float, review_config)[1]))
                 except ValueError:
                     continue
+            logger.debug(f"Collected {len(data)} review data points")
             return data
         else:
             query_end = f"""
@@ -1098,13 +1422,15 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
+            logger.debug(f"Executing end reviews query for change_over_period: {query_end}")
             raw_end = safe_eval(self.sql_tool._run(query_end))
             result_end = []
-            for item in raw_end:
-                if len(item) != 2:
+            for row in raw_end:
+                norm = self._extract_row_change(row, 'value_end')
+                if not norm:
                     continue
-                instr_id, val_end = item
-                val_end_clean = clean_numeric_string(val_end)
+                instr_id, val_end = norm
+                val_end_clean = self._extract_numeric(val_end)
                 if val_end_clean is None:
                     continue
                 try:
@@ -1123,13 +1449,15 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_start}' AND '{start_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
+            logger.debug(f"Executing start reviews query for change_over_period: {query_start}")
             raw_start = safe_eval(self.sql_tool._run(query_start))
             result_start = []
-            for item in raw_start:
-                if len(item) != 2:
+            for row in raw_start:
+                norm = self._extract_row_change(row, 'value_start')
+                if not norm:
                     continue
-                instr_id, val_start = item
-                val_start_clean = clean_numeric_string(val_start)
+                instr_id, val_start = norm
+                val_start_clean = self._extract_numeric(val_start)
                 if val_start_clean is None:
                     continue
                 try:
@@ -1148,6 +1476,7 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                     else:
                         statuses[instr_id] = 'grey'
             if not statuses:
+                logger.debug("No statuses found")
                 return []
             instr_ids_str = ','.join(f"'{id_}'" for id_ in statuses)
             loc_query = f"""
@@ -1155,63 +1484,89 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
             FROM instrum i JOIN location l ON i.location_id = l.id
             WHERE i.instr_id IN ({instr_ids_str});
             """
+            logger.debug(f"Executing location query for reviews: {loc_query}")
             raw_locs = safe_eval(self.sql_tool._run(loc_query))
             loc_dict = {}
-            for item in raw_locs:
-                if len(item) != 3:
+            for row in raw_locs:
+                if isinstance(row, dict):
+                    id_ = row.get('instr_id') or row.get('id')
+                    e = row.get('easting') or row.get('east')
+                    n = row.get('northing') or row.get('north')
+                elif isinstance(row, (list, tuple)) and len(row) == 3:
+                    id_, e, n = row
+                else:
                     continue
-                id_, e, n = item
-                e_clean = clean_numeric_string(e)
-                n_clean = clean_numeric_string(n)
-                if None in (e_clean, n_clean):
+                e_clean = self._extract_numeric(e)
+                n_clean = self._extract_numeric(n)
+                if None in (e_clean, n_clean) or id_ is None:
                     continue
                 try:
                     loc_dict[id_] = (float(e_clean), float(n_clean))
                 except ValueError:
                     continue
-            return [(id_, loc_dict.get(id_, (0,0))[0], loc_dict.get(id_, (0,0))[1], statuses[id_]) for id_ in statuses if id_ in loc_dict]
+            data = [(id_, loc_dict.get(id_, (0,0))[0], loc_dict.get(id_, (0,0))[1], statuses[id_]) for id_ in statuses if id_ in loc_dict]
+            logger.debug(f"Collected {len(data)} review change data points")
+            return data
 
     def _run(
-    self,
-    data_type: str,
-    plot_type: str,
-    start_time: Optional[datetime],
-    end_time: datetime,
-    buffer_period_hours: int,
-    series: List[SeriesDict],
-    center_instrument_id: Optional[str],
-    center_easting: Optional[float],
-    center_northing: Optional[float],
-    radius_meters: float,
-    exclude_instrument_ids: List[str]
-) -> Tuple[str, List[Dict]]:
-        logger.debug(f"Starting MapPlotTool._run with inputs: data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}")
-        inputs = MapPlotInput(
-            data_type=data_type,
-            plot_type=plot_type,
-            start_time=start_time,
-            end_time=end_time,
-            buffer_period_hours=buffer_period_hours,
-            series=series,
-            center_instrument_id=center_instrument_id,
-            center_easting=center_easting,
-            center_northing=center_northing,
-            radius_meters=radius_meters,
-            exclude_instrument_ids=exclude_instrument_ids
-        )
+        self,
+        data_type: str,
+        plot_type: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        buffer_period_hours: Optional[int] = None,
+        series: Optional[List[SeriesDict]] = None,
+        center_instrument_id: Optional[str] = None,
+        center_easting: Optional[float] = None,
+        center_northing: Optional[float] = None,
+        radius_meters: Optional[float] = None,
+        exclude_instrument_ids: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        logger.debug(f"MapPlotTool._run called with data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}, buffer_period_hours={buffer_period_hours}, series_count={len(series) if series else 0}, center_instrument_id={center_instrument_id}, center_easting={center_easting}, center_northing={center_northing}, radius_meters={radius_meters}, exclude_instrument_ids={exclude_instrument_ids}")
         try:
-            logger.debug("Fetching center coordinates")
+            if buffer_period_hours is None:
+                buffer_period_hours = 72
+            if radius_meters is None:
+                radius_meters = 500.0
+            if exclude_instrument_ids is None:
+                exclude_instrument_ids = []
+            if end_time is None:
+                raise ValueError("end_time is required")
+            if series is None:
+                raise ValueError("series is required and must be a non-empty list")
+
+            inputs = MapPlotInput(
+                data_type=data_type,
+                plot_type=plot_type,
+                start_time=start_time,
+                end_time=end_time,
+                buffer_period_hours=buffer_period_hours,
+                series=series,
+                center_instrument_id=center_instrument_id,
+                center_easting=center_easting,
+                center_northing=center_northing,
+                radius_meters=radius_meters,
+                exclude_instrument_ids=exclude_instrument_ids
+            )
+            logger.debug(f"Validated inputs: {inputs}")
+
+            if inputs.plot_type == 'change_over_period' and inputs.start_time is None:
+                raise ValueError("start_time is required for 'change_over_period'")
+            if inputs.start_time is not None and inputs.end_time <= inputs.start_time:
+                raise ValueError("end_time must be later than start_time")
+            if not inputs.series:
+                raise ValueError("At least one series is required")
+
             center_e, center_n = self._get_center_coords(inputs.center_instrument_id, inputs.center_easting, inputs.center_northing)
-            logger.debug(f"Center coords: easting={center_e}, northing={center_n}")
             min_e, max_e, min_n, max_n = self._get_bounds(center_e, center_n, inputs.radius_meters)
-            logger.debug(f"Bounds: min_e={min_e}, max_e={max_e}, min_n={min_n}, max_n={max_n}")
             exclude_str = ','.join(f"'{id}'" for id in inputs.exclude_instrument_ids)
             exclude_clause = f"AND i.instr_id NOT IN ({exclude_str})" if exclude_str else ""
+            logger.debug(f"Exclude clause: {exclude_clause}")
             start_time_str = inputs.start_time.strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
             end_time_str = inputs.end_time.strftime("%Y-%m-%d %H:%M:%S")
             buffer_end = (inputs.end_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S")
             buffer_start = (inputs.start_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
-            logger.debug(f"Time strings: start_time={start_time_str}, end_time={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
+            logger.debug(f"Time strings: start_time_str={start_time_str}, end_time_str={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
 
             data = {}
             suggestions = []
@@ -1219,7 +1574,6 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                 key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
                 logger.debug(f"Processing series: {key}")
                 if inputs.data_type == 'readings':
-                    logger.debug("Fetching readings")
                     points = self._get_readings(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
                     if points:
                         vals = [v for _, _, _, v in points]
@@ -1230,7 +1584,6 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                         logger.debug(f"Outliers detected: {outliers}")
                         suggestions.extend(outliers)
                 else:
-                    logger.debug("Fetching reviews")
                     points = self._get_reviews(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
                 data[key] = []
                 for p in points:
@@ -1246,17 +1599,21 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
 
             if not any(data.values()):
                 logger.warning("No data found for any series")
-                return "No data found", []
+                return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
 
             center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
+            logger.debug(f"Center lat/lon: {center_lat}, {center_lon}")
             fig = go.Figure()
+            logger.debug("Plotly figure initialized")
             for i, s in enumerate(inputs.series):
                 key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
                 points = data.get(key, [])
                 if not points:
+                    logger.debug(f"No points for series {key}")
                     continue
                 instr_ids, lats, lons, vals = zip(*points)
                 if inputs.data_type == 'readings':
+                    logger.debug(f"Adding readings trace for series {key}")
                     max_abs = max(abs(max(vals)), abs(min(vals))) if vals else 1
                     if inputs.plot_type == 'change_over_period':
                         cmap = pc.diverging.PiYG
@@ -1285,10 +1642,10 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                             showscale=True,
                             colorbar=dict(
                                 title=colorbar_title,
-                                x=1 + 0.15 * i,  # Position colorbars side by side
+                                x=1 + 0.15 * i,  
                                 xanchor="left",
                                 len=0.3,
-                                y=0.5 - 0.15 * i,  # Stagger vertically to avoid overlap
+                                y=0.5 - 0.15 * i,
                                 yanchor="middle",
                                 tickvals=tickvals,
                                 ticktext=ticktext
@@ -1297,7 +1654,9 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                         text=text,
                         name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
                     ))
+                    logger.debug(f"Added readings trace")
                 else:
+                    logger.debug(f"Adding reviews trace for series {key}")
                     colors = vals
                     text = [f"{id}: {v}" for id, v in zip(instr_ids, vals)]
                     unique_colors = list(set(vals))
@@ -1326,15 +1685,18 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                         text=text,
                         name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
                     ))
+                    logger.debug(f"Added reviews trace")
 
             time_str = f"at {format_datetime(inputs.end_time)}" if inputs.plot_type == 'value_at_time' else f"change from {format_datetime(inputs.start_time)} to {format_datetime(inputs.end_time)}"
+            logger.debug(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
             fig.update_layout(
                 title=f"{inputs.data_type.capitalize()} {time_str}",
                 mapbox_style="open-street-map",
                 mapbox_center={"lat": center_lat, "lon": center_lon},
                 mapbox_zoom=15,
-                showlegend=False  # Disable legend
+                showlegend=False  
             )
+            logger.debug("Figure layout updated")
 
             all_data = []
             for s in inputs.series:
@@ -1348,23 +1710,30 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                         'Series': s.measured_quantity_name,
                         'Unit': s.abbreviated_unit
                     })
+            logger.debug(f"all_data populated with {len(all_data)} entries")
+            if not all_data:
+                logger.error("No data for CSV generation")
+                raise ValueError("No data available for CSV generation")
             df = pd.DataFrame(all_data)
+            logger.debug(f"DataFrame created with shape {df.shape}")
             csv_content = df.to_csv(index=False)
+            logger.debug(f"CSV content generated (length: {len(csv_content)})")
 
-            html_filename = f"map_plot_{uuid.uuid4()}.html"
-            html_content = fig.to_html(full_html=True, include_plotlyjs='cdn')
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            html_filepath = os.path.join(script_dir, html_filename)
-            with open(html_filepath, 'w', encoding='utf-8') as f:
-                f.write(html_content)
+            plotly_filename = f"map_plot_{uuid.uuid4()}.json"
+            try:
+                plotly_json = fig.to_json()
+                logger.debug(f"Plotly JSON generated (length: {len(plotly_json)})")
+            except Exception as e:
+                logger.error(f"Failed to serialize Plotly figure: {str(e)}")
+                raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
 
             artefacts = [
                 {
                     'artifact_id': str(uuid.uuid4()),
-                    'filename': f"map_plot_{uuid.uuid4()}.json",
+                    'filename': plotly_filename,
                     'type': 'Plotly object',
                     'description': 'Map plot JSON',
-                    'content': fig.to_json()
+                    'content': plotly_json
                 },
                 {
                     'artifact_id': str(uuid.uuid4()),
@@ -1374,14 +1743,18 @@ class MapPlotTool(BaseTool, BaseSQLQueryTool):
                     'content': csv_content
                 }
             ]
+            logger.debug(f"Artefacts list created with {len(artefacts)} items")
 
-            logger.debug("Plotly figure and CSV generated successfully")
-            content = f"Generated map plot." + (f" Suggested outliers to exclude: {', '.join(suggestions)}" if suggestions and inputs.data_type == 'readings' else "")
-            logger.debug(f"Returning content: {content}, artifacts count: {len(artefacts)}")
-            return content, artefacts
+            content = f"Generated map plot and CSV for {inputs.data_type} {time_str}." + (f" Suggested outliers to exclude: {', '.join(set(suggestions))}" if suggestions and inputs.data_type == 'readings' else "")
+            logger.debug(f"Returning content: {content}, artefacts count: {len(artefacts)}")
+            return {"content": content, "artefacts": artefacts}
+        
+        except ValueError as e:
+            logger.error(f"ValueError in MapPlotTool._run: {str(e)}")
+            return {"content": f"Error: Invalid input - {str(e)}. Correct and retry.", "artefacts": []}
         except Exception as e:
-            logger.error(f"Error in MapPlotTool._run: {str(e)}", exc_info=True)
-            return f"Error generating map: {str(e)}", []
+            logger.error(f"Unexpected error in MapPlotTool._run: {str(e)}", exc_info=True)
+            return {"content": f"Error: Unexpected failure - {str(e)}. Verify database connection, instrument existence, or numeric data in columns.", "artefacts": []}
 
 class MapPlotWrapperInput(BaseModel):
     """Input for wrapper: JSON string of MapPlotInput fields.

@@ -1,3 +1,30 @@
+from langchain_core.messages import AIMessage
+progress_messages = {
+    'planner_coder_node': AIMessage(
+        name="PlannerCoder",
+        content="Thinking up a strategy to answer your query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "planner_coder"
+        }
+    ),
+    'code_executor_node': AIMessage(
+        name="CodeExecutor",
+        content="Actioning my strategy...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "code_executor"
+        }
+    ),
+    'reporter_node': AIMessage(
+        name="Reporter",
+        content="Drafting my response to your query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "reporter"
+        }
+    )
+}
 users = [
     {
         'id': 1,

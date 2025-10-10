@@ -1,12 +1,14 @@
 import streamlit as st
+import plotly.io as pio
+from langchain_core.messages import AIMessage, HumanMessage, AIMessageChunk
+
 import json
 import uuid
-from langchain_core.messages import AIMessage, HumanMessage, AIMessageChunk
+import logging
+
 from parameters import users
 import setup
-import graph
-import logging
-import plotly.io as pio
+from tools.artefact_toolkit import ReadArtefactsTool
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -14,6 +16,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+blob_db = setup.get_blob_db()
+metadata_db = setup.get_metadata_db()
+llm = setup.get_llm()
 
 @st.dialog("Login")
 def login_modal():
@@ -57,69 +63,9 @@ def user_modal():
                                    if user['display_name'] == selected_display_name)
                 st.session_state.selected_user_id = selected_user['id']
                 st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access()
-                match st.session_state.test_mode:
-                    case 'Tool':
-                        st.session_state.graph = graph.build_tool_graph(
-                            llm=st.session_state.llm,
-                            db=st.session_state.db,
-                            table_relationship_graph=st.session_state.table_relationship_graph,
-                            user_id=st.session_state.selected_user_id,
-                            global_hierarchy_access=st.session_state.global_hierarchy_access
-                        )
-                    case 'Supervisor':
-                        st.session_state.graph = graph.build_supervisor_graph(
-                            llm=st.session_state.llm,
-                            db=st.session_state.db,
-                            table_relationship_graph=st.session_state.table_relationship_graph,
-                            user_id=st.session_state.selected_user_id,
-                            global_hierarchy_access=st.session_state.global_hierarchy_access
-                        )
                 st.rerun()
             else:
                 st.error("Please select a user")
-
-@st.dialog("Select Test")
-def test_mode_modal():
-    """Renders the test mode selection modal using Streamlit dialog."""
-    with st.form("test_mode_form", enter_to_submit=False):
-        test_modes = ["Tool", "Supervisor"]
-        default_mode = st.session_state.test_mode
-        
-        selected_test_mode = st.segmented_control(
-            label="Select Test Mode",
-            options=test_modes,
-            selection_mode="single",
-            default=default_mode,
-            key="test_mode_select",
-            label_visibility="visible",
-            help="Choose the component to test: Tool, Sub-agent, or Supervisor."
-        )
-        
-        if st.form_submit_button("Select"):
-            if selected_test_mode:
-                if selected_test_mode != st.session_state.test_mode:
-                    match selected_test_mode:
-                        case "Tool":
-                            st.session_state.graph = graph.build_tool_graph(
-                                llm=st.session_state.llm,
-                                db=st.session_state.db,
-                                table_relationship_graph=st.session_state.table_relationship_graph,
-                                user_id=st.session_state.selected_user_id,
-                                global_hierarchy_access=st.session_state.global_hierarchy_access
-                            )
-                        case "Supervisor":
-                            st.session_state.graph = graph.build_supervisor_graph(
-                                llm=st.session_state.llm,
-                                db=st.session_state.db,
-                                table_relationship_graph=st.session_state.table_relationship_graph,
-                                user_id=st.session_state.selected_user_id,
-                                global_hierarchy_access=st.session_state.global_hierarchy_access
-                            )
-                st.session_state.test_mode = selected_test_mode
-                st.toast(f"Test mode set to {selected_test_mode}", icon=":material/check_circle:")
-                st.rerun()
-            else:
-                st.error("Please select a test mode")
 
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
@@ -270,7 +216,7 @@ def render_initial_ui() -> None:
                 use_container_width=False
             ):
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
-                st.button(label="Select Test", icon=":material/build:", key="test_mode_button", help="Select test mode", on_click=test_mode_modal, use_container_width=True)
+                st.toggle(label="Show LLM Responses", key="show_llm_responses", help="Toggle to show or hide raw LLM responses")
 
     with st.empty():
         st.chat_input(
@@ -279,81 +225,144 @@ def render_initial_ui() -> None:
             key="initial_chat_input"
         )
 
-def parse_message_components(content, additional_kwargs=None):
-    """Extract message type, content, and additional kwargs from prefixed message."""
-    prefixes = [
-        '[ACTION]:', 'action',
-        '[ACTION_INPUT]:', 'action_input',
-        '[OBSERVATION]:', 'observation',
-        '[THOUGHT]:', 'thought',
-        '[FINAL]:', 'final'
-    ]
-    
-    for prefix, msg_type in zip(prefixes[::2], prefixes[1::2]):
-        if content.startswith(prefix):
-            return msg_type, content[len(prefix):], additional_kwargs or {}
-    
-    return None, content, additional_kwargs or {}
+def prepend_message_icon(message):
+    process_icon_map = {
+        'query_enricher': 'search',
+        'router': 'shuffle',
+        'planner_coder': 'lightbulb',
+        'code_checker': 'policy',
+        'code_executor': 'terminal',
+        'error_summariser': 'bug_report',
+        'reporter': 'edit_square'
+    }
 
-def render_message_content(msg: AIMessage, msg_type: str, clean_content: str, additional_kwargs: dict):
+    process = message.additional_kwargs.get('process')
+    stage = message.additional_kwargs.get('stage')
+
+    if process and (stage != 'final'):
+        if stage == 'execution_output':
+            icon_name = 'sprint'
+        else:
+            icon_name = process_icon_map.get(process)
+        if icon_name:
+            stripped = message.content.lstrip()
+            if not stripped.startswith(':material/'):
+                message.content = f":material/{icon_name}: " + stripped
+
+    return message
+
+def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
+    """Determine if a message should be visible based on its type and additional_kwargs."""
+    additional_kwargs = message.additional_kwargs or {}
+
+    stage = additional_kwargs.get('stage', 'unknown')
+    process = additional_kwargs.get('process', 'unknown')
+    if is_final:
+        if stage == 'final':
+            return True
+    else:
+        if isinstance(message, AIMessageChunk) and st.session_state.get('show_llm_responses', False):
+            return True
+        if stage == 'node' or (stage == 'execution_output' and process in ['progress', 'error']):
+            return True
+    return False
+
+def render_message_content(message: AIMessage):
     """Render message content based on its type, handling artifacts for final and observation messages."""
-    if msg_type in ['final', 'observation']:
-        logger.debug(f"Rendering {msg_type} message with content: {clean_content[:100]}")
-        st.markdown(clean_content)
-        artifacts = additional_kwargs.get("artifacts", [])
-        logger.debug(f"Retrieved artifacts for {msg_type} message: {artifacts[:100]}")
-        if artifacts and isinstance(artifacts, list):
-            for artifact in artifacts:
-                logger.debug(f"Processing artifact: {artifact.get('artifact_id')} with type {artifact.get('type')}")
-                artifact_type = artifact.get('type')
-                if artifact_type == 'Plotly object':
-                    logger.debug(f"Identified Plotly artifact: {artifact.get('artifact_id')}")
+    content = message.content
+    additional_kwargs = message.additional_kwargs or {}
+    process = additional_kwargs.get('process')
+    if is_message_visible(message=message, is_final=True):
+        if process == 'response':
+            st.markdown(content)
+        elif process == 'plot':
+            artefact_id = additional_kwargs.get('artefact_id')
+            if artefact_id:
+                read_tool = ReadArtefactsTool(blob_db=blob_db, metadata_db=metadata_db)
+                result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+                if result['success'] and result['artefacts']:
+                    artefact = result['artefacts'][0]
+                    blob = artefact['blob']
                     try:
-                        fig = pio.from_json(artifact['content'])
-                        st.plotly_chart(fig, use_container_width=True)
+                        fig_json = json.loads(blob.decode('utf-8'))
+                        fig = pio.from_json(json.dumps(fig_json))
+                        with st.container():
+                            st.plotly_chart(fig, use_container_width=True)
                     except Exception as e:
                         logger.error(f"Failed to render Plotly figure: {str(e)}")
                         st.error("Error rendering plot")
-                elif artifact_type == 'CSV':
-                    st.download_button(
-                        label="Download Plot Data (CSV)",
-                        data=artifact['content'],
-                        file_name=artifact['filename'],
-                        mime='text/csv',
-                        key=f"csv_download_{artifact['artifact_id']}"
-                    )
-    else:
-        # Return content for intermediate steps to be rendered in expander
-        return clean_content
+        elif process == 'csv':
+            artefact_id = additional_kwargs.get('artefact_id')
+            if artefact_id:
+                read_tool = ReadArtefactsTool(blob_db=blob_db, metadata_db=metadata_db)
+                result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+                if result['success'] and result['artefacts']:
+                    artefact = result['artefacts'][0]
+                    blob = artefact['blob'].decode('utf-8')
+                    desc = artefact['metadata']['description_text']
+                    prompt = f"Generate a short, descriptive filename for this CSV based on the description: {desc}. Do not include the .csv extension."
+                    filename_response = llm.invoke(prompt)
+                    filename = filename_response.content.strip() + '.csv'
+                    with st.container():
+                        st.download_button(
+                            label=f"Download {filename}",
+                            data=blob,
+                            file_name=filename,
+                            mime='text/csv',
+                            key=f"csv_download_{artefact_id}"
+                        )
+    elif is_message_visible(message=message, is_final=False):
+        return content
 
 def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
     if not st.session_state.setup_complete:
         return
+    
+    logger.info(f"Show LLM Responses: {st.session_state.show_llm_responses}")
         
     handle_clear_chat()
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
     current_query_steps = []
     query_index = 0
+    previous_message_type = None
 
-    for msg in st.session_state.get('messages', []):
-        if isinstance(msg, HumanMessage):
+    for message in st.session_state.get('messages', []):
+        if isinstance(message, HumanMessage):
             with st.chat_message("user"):
-                st.markdown(msg.content)
+                st.markdown(message.content)
             if query_index < len(st.session_state.intermediate_steps_history):
                 with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):
+                    rendered_content = ""
                     for step in st.session_state.intermediate_steps_history[query_index]:
-                        st.markdown(step, unsafe_allow_html=True)
+                        rendered_content += step
+                    st.markdown(rendered_content)
             query_index += 1
-        elif isinstance(msg, AIMessage):
-            with st.chat_message("assistant"):
-                msg_type, clean_content, additional_kwargs = parse_message_components(
-                    msg.content, msg.additional_kwargs
-                )
-                content = render_message_content(msg, msg_type, clean_content, additional_kwargs)
-                if content and msg_type != 'final':
-                    current_query_steps.append(content)
+            previous_message_type = HumanMessage
+        elif isinstance(message, (AIMessage, AIMessageChunk)):
+            message = prepend_message_icon(message)
+            if is_message_visible(message=message, is_final=True):
+                with st.chat_message("assistant"):
+                    render_message_content(message)
+            elif is_message_visible(message=message, is_final=False):
+                separator = "" if previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
+                current_query_steps.append(separator + (message.content or ""))
+                with st.chat_message("assistant"):
+                    rendered_content = ""
+                    prev_type = None
+                    for step in current_query_steps:
+                        if step.startswith("\n\n"):
+                            if prev_type is AIMessageChunk:
+                                rendered_content += step[2:]
+                                step = step[2:]
+                            else:
+                                rendered_content += step
+                        else:
+                            rendered_content += step
+                        prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
+                    st.markdown(rendered_content)
+            previous_message_type = type(message)
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -386,50 +395,46 @@ def render_chat_content() -> None:
             with st.chat_message("assistant"):
                 with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=True):
                     thinking_container = st.empty()
-                response_container = st.empty()
 
                 current_query_steps = []
+                previous_message_type = None
 
                 for state_update in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
                     logger.debug(f'Raw state update in ui.py: {state_update[:100]}')
 
-                    # Handle case where state_update is a tuple
                     if isinstance(state_update, tuple):
-                        # Assume the first element is the State dictionary or message
                         state = state_update[0]
                         if isinstance(state, dict):
                             messages = state.get('messages', [])
                         else:
-                            # If state is a message (e.g., AIMessage), wrap it in a list
                             messages = [state]
                     else:
-                        # Assume state_update is a State dictionary
                         messages = state_update.get('messages', [])
                     
                     for message in messages:
+                        logger.info(f'Streamed message: {message}')
                         if isinstance(message, (AIMessage, AIMessageChunk)):
-                            content = message.content
-                            msg_type, clean_content, additional_kwargs = parse_message_components(
-                                content, message.additional_kwargs
-                            )
-
-                            logger.debug(f'Extracted content: {content[:150]}')
-                            logger.debug(f'Message type: {msg_type}')
-                            
-                            new_message = AIMessage(
-                                content=content,
-                                additional_kwargs=additional_kwargs
-                            )
-                            st.session_state.messages.append(new_message)
-
-                            if msg_type == 'final':
-                                response_container.markdown(clean_content)
-                                render_message_content(new_message, msg_type, clean_content, additional_kwargs)
-                            else:
-                                current_query_steps.append(clean_content)
-                                thinking_container.markdown("\n".join(current_query_steps))
-                                if msg_type == 'observation':
-                                    render_message_content(new_message, msg_type, clean_content, additional_kwargs)
+                            message = prepend_message_icon(message)
+                            if is_message_visible(message=message, is_final=True):
+                                st.session_state.messages.append(message)
+                                render_message_content(message)
+                            elif is_message_visible(message=message, is_final=False):
+                                separator = "" if previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
+                                current_query_steps.append(separator + (message.content or ""))
+                                rendered_content = ""
+                                prev_type = None
+                                for step in current_query_steps:
+                                    if step.startswith("\n\n"):
+                                        if prev_type is AIMessageChunk:
+                                            rendered_content += step[2:]
+                                            step = step[2:]
+                                        else:
+                                            rendered_content += step
+                                    else:
+                                        rendered_content += step
+                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
+                                thinking_container.markdown(rendered_content)
+                            previous_message_type = type(message)
 
                 if current_query_steps:
                     st.session_state.intermediate_steps_history.append(current_query_steps)

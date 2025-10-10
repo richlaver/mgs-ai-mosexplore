@@ -424,11 +424,11 @@ Only the first statement will be executed. Discarded statements:
         try:
             if self.global_hierarchy_access:
                 print("User has global hierarchy access, using original query.")
-                results = self.db.run_no_throw(query)
+                results = self.db.run_no_throw(query, include_columns=True)
             else:
                 extended_query = extend_query(query=query)
-                results = self.db.run_no_throw(extended_query)
-            
+                results = self.db.run_no_throw(extended_query, include_columns=True)
+
             return process_results(results)
         except Exception as e:
             logging.error(f"Error executing query: {str(e)}")

@@ -1,103 +1,144 @@
-[
-    {
-        "LP-0": [
+{
+    "LP_MOVEMENT": {
+        "type": "LP",
+        "subtype": "MOVEMENT",
+        "name": ["Levelling Points", "Settlement Monitoring Points", "LP"],
+        "form": "Physical measurement points installed at ground level",
+        "raw_instrument_output": ["Elevation measurements", "Position readings"],
+        "derived_measurands": ["Settlement calculations", "Displacement values"],
+        "purpose": ["Monitor ground settlement", "Track vertical displacement", "Structural monitoring"],
+        "data_interpretation_guidelines": "Settlement values indicate ground movement relative to baseline measurements. Positive values typically indicate uplift, negative values indicate settlement.",
+        "typical_plots": ["Time series plots", "Settlement vs location maps"],
+        "fields": [
             {
-                "query_words": "settlement",
-                "database_sources": [
-                    {
-                        "instrument_type": "LP",
-                        "instrument_subtype": "MOVEMENT",
-                        "data_fields": [
-                            {
-                                "field_name": "calculation1",
-                                "field_type": "calc",
-                                "field_units": "mm"
-                            }
-                        ]
-                    }
-                ]
+                "database_field_name": "calculation1",
+                "database_field_type": "calc",
+                "common_names": ["Settlement", "Displacement"],
+                "description": "Calculated settlement value in millimeters",
+                "unit": "mm"
+            },
+            {
+                "database_field_name": "data1",
+                "database_field_type": "data",
+                "common_names": ["Raw elevation", "Level reading"],
+                "description": "Raw elevation measurement",
+                "unit": "m"
+            },
+            {
+                "database_field_name": "data2",
+                "database_field_type": "data",
+                "common_names": ["Temperature"],
+                "description": "Temperature at time of measurement",
+                "unit": "°C"
             }
         ]
     },
-    {
-        "CASA-0": [
+    "OT_MOVEMENT": {
+        "type": "OT",
+        "subtype": "MOVEMENT",
+        "name": ["Optical Targets", "Survey Targets", "OT"],
+        "form": "Optical prisms or targets for surveying measurements",
+        "raw_instrument_output": ["Survey coordinates", "Elevation readings"],
+        "derived_measurands": ["Movement calculations", "Displacement vectors"],
+        "purpose": ["Precise movement monitoring", "Structural displacement tracking"],
+        "data_interpretation_guidelines": "Movement data shows displacement from baseline position. Check both horizontal and vertical components.",
+        "typical_plots": ["Displacement time series", "Movement vector plots"],
+        "fields": [
             {
-                "query_words": "groundwater level",
-                "database_sources": [
-                    {
-                        "instrument_type": "CASA",
-                        "instrument_subtype": "DEFAULT",
-                        "data_fields": [
-                            {
-                                "field_name": "calculation1",
-                                "field_type": "calc",
-                                "field_units": "m"
-                            }
-                        ]
-                    }
-                ]
+                "database_field_name": "data1",
+                "database_field_type": "data",
+                "common_names": ["Movement", "Displacement"],
+                "description": "Measured displacement value",
+                "unit": "mm"
             }
         ]
     },
-    {
-        "LP-OT-0": [
+    "CASA_DEFAULT": {
+        "type": "CASA",
+        "subtype": "DEFAULT",
+        "name": ["Casagrande Piezometers", "Groundwater Monitoring", "CASA"],
+        "form": "Groundwater monitoring wells with pressure transducers",
+        "raw_instrument_output": ["Water pressure readings", "Water level measurements"],
+        "derived_measurands": ["Groundwater level", "Hydraulic head"],
+        "purpose": ["Monitor groundwater levels", "Track water table changes", "Assess hydrostatic pressure"],
+        "data_interpretation_guidelines": "Groundwater levels indicate water table elevation. Rising levels may indicate increased pressure or recharge.",
+        "typical_plots": ["Groundwater level time series", "Water table contour maps"],
+        "fields": [
             {
-                "query_words": "settlement",
-                "database_sources": [
-                    {
-                        "instrument_type": "LP",
-                        "instrument_subtype": "MOVEMENT",
-                        "data_fields": [
-                            {
-                                "field_name": "calculation1",
-                                "field_type": "calc",
-                                "field_units": "mm"
-                            }
-                        ]
-                    },
-                    {
-                        "instrument_type": "OT",
-                        "instrument_subtype": "MOVEMENT",
-                        "data_fields": [
-                            {
-                                "field_name": "data1",
-                                "field_type": "data",
-                                "field_units": "mm"
-                            }
-                        ]
-                    }
-                ]
+                "database_field_name": "calculation1",
+                "database_field_type": "calc",
+                "common_names": ["Groundwater level", "Water level"],
+                "description": "Calculated groundwater level elevation",
+                "unit": "m"
             }
         ]
     },
-    {
-        "VIBR-0": [
+    "VIBR_GSS": {
+        "type": "VIBR",
+        "subtype": "GSS",
+        "name": ["Vibration Monitors", "Geophone Stations", "VIBR"],
+        "form": "Triaxial geophones measuring ground vibration",
+        "raw_instrument_output": ["Velocity measurements in 3 axes", "Acceleration data"],
+        "derived_measurands": ["Peak particle velocity", "Vibration levels"],
+        "purpose": ["Monitor construction vibrations", "Assess structural impacts", "Environmental compliance"],
+        "data_interpretation_guidelines": "Vibration levels should be compared to structural damage thresholds. Peak values indicate maximum impact.",
+        "typical_plots": ["Vibration time series", "Frequency analysis", "Vibration level maps"],
+        "fields": [
             {
-                "query_words": "vibration",
-                "database_sources": [
-                    {
-                        "instrument_type": "VIBR",
-                        "instrument_subtype": "GSS",
-                        "data_fields": [
-                            {
-                                "field_name": "data4",
-                                "field_type": "data",
-                                "field_units": "mm/s"
-                            },
-                            {
-                                "field_name": "data5",
-                                "field_type": "data",
-                                "field_units": "mm/s"
-                            },
-                            {
-                                "field_name": "data6",
-                                "field_type": "data",
-                                "field_units": "mm/s"
-                            }
-                        ]
-                    }
-                ]
+                "database_field_name": "data4",
+                "database_field_type": "data",
+                "common_names": ["X-axis velocity", "Transverse velocity"],
+                "description": "Peak particle velocity in X direction",
+                "unit": "mm/s"
+            },
+            {
+                "database_field_name": "data5",
+                "database_field_type": "data",
+                "common_names": ["Y-axis velocity", "Longitudinal velocity"],
+                "description": "Peak particle velocity in Y direction",
+                "unit": "mm/s"
+            },
+            {
+                "database_field_name": "data6",
+                "database_field_type": "data",
+                "common_names": ["Z-axis velocity", "Vertical velocity"],
+                "description": "Peak particle velocity in Z direction",
+                "unit": "mm/s"
+            }
+        ]
+    },
+    "LC_DEFAULT": {
+        "type": "LC",
+        "subtype": "DEFAULT",
+        "name": ["Load Cells", "Force Monitors", "LC"],
+        "form": "Electronic load measurement devices",
+        "raw_instrument_output": ["Force readings", "Load measurements"],
+        "derived_measurands": ["Applied loads", "Force distributions"],
+        "purpose": ["Monitor structural loads", "Track applied forces", "Load distribution analysis"],
+        "data_interpretation_guidelines": "Load values indicate applied forces on structural elements. Monitor for trends and threshold exceedances.",
+        "typical_plots": ["Load time series", "Force distribution plots"],
+        "fields": [
+            {
+                "database_field_name": "data1",
+                "database_field_type": "data",
+                "common_names": ["Load reading 1", "Primary force"],
+                "description": "Primary load measurement",
+                "unit": "kN"
+            },
+            {
+                "database_field_name": "data2",
+                "database_field_type": "data",
+                "common_names": ["Load reading 2", "Secondary force"],
+                "description": "Secondary load measurement",
+                "unit": "kN"
+            },
+            {
+                "database_field_name": "calculation1",
+                "database_field_type": "calc",
+                "common_names": ["Total load", "Combined force"],
+                "description": "Calculated total load",
+                "unit": "kN"
             }
         ]
     }
-]
+}

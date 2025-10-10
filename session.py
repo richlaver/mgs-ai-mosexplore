@@ -15,10 +15,14 @@ def setup_session() -> None:
         st.session_state.llm = False
     if "db" not in st.session_state:
         st.session_state.db = False
+    if "metadata_db" not in st.session_state:
+        st.session_state.metadata_db = False
+    if "blob_db" not in st.session_state:
+        st.session_state.blob_db = False
+    if "modal_secrets" not in st.session_state:
+        st.session_state.modal_secrets = False
     if "graph" not in st.session_state:
         st.session_state.graph = False
-    if "setup_complete" not in st.session_state:
-        st.session_state.setup_complete = False
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
     if "user_id" not in st.session_state:
@@ -32,14 +36,15 @@ def setup_session() -> None:
         st.session_state.admin_logged_in = True
     if "intermediate_steps_history" not in st.session_state:
         st.session_state.intermediate_steps_history = []
-    if "selected_user_id" not in st.session_state:
-        st.session_state.selected_user_id = 1 # Default to Super Admin user
     # if "user_permissions" not in st.session_state:
     #     st.session_state.user_permissions = None
+    if "selected_user_id" not in st.session_state:
+        st.session_state.selected_user_id = 1 # Default to Super Admin user
     if "global_hierarchy_access" not in st.session_state:
         st.session_state.global_hierarchy_access = False
     if "table_relationship_graph" not in st.session_state:
         st.session_state.table_relationship_graph = None
-    if "test_mode" not in st.session_state:
-        st.session_state.test_mode = "Supervisor"
-        # st.session_state.test_mode = "Tool"
+    if "show_llm_responses" not in st.session_state:
+        st.session_state.show_llm_responses = True
+    if "setup_complete" not in st.session_state:
+        st.session_state.setup_complete = False

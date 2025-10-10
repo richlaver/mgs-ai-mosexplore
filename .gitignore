@@ -2,7 +2,12 @@
 **/*.log
 /__pycache__/
 google_credentials.json
-chunk_output.py
-test-type-inference.py
 /tools/__pycache__/
 .DS_Store
+test_coder_node.py
+test_graph.py
+test_planner_coder_node.py
+run_extraction_sandbox_test.py
+run_map_plot_sandbox_test.py
+run_sandbox_test.py
+run_timeseries_plot_sandbox_test.py
