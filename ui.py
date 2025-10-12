@@ -274,7 +274,7 @@ def render_message_content(message: AIMessage):
         elif process == 'plot':
             artefact_id = additional_kwargs.get('artefact_id')
             if artefact_id:
-                read_tool = ReadArtefactsTool(blob_db=blob_db, metadata_db=metadata_db)
+                read_tool = ReadArtefactsTool(blob_db=st.session_state.blob_db, metadata_db=st.session_state.metadata_db)
                 result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
                 if result['success'] and result['artefacts']:
                     artefact = result['artefacts'][0]
@@ -290,14 +290,14 @@ def render_message_content(message: AIMessage):
         elif process == 'csv':
             artefact_id = additional_kwargs.get('artefact_id')
             if artefact_id:
-                read_tool = ReadArtefactsTool(blob_db=blob_db, metadata_db=metadata_db)
+                read_tool = ReadArtefactsTool(blob_db=st.session_state.blob_db, metadata_db=st.session_state.metadata_db)
                 result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
                 if result['success'] and result['artefacts']:
                     artefact = result['artefacts'][0]
                     blob = artefact['blob'].decode('utf-8')
                     desc = artefact['metadata']['description_text']
                     prompt = f"Generate a short, descriptive filename for this CSV based on the description: {desc}. Do not include the .csv extension."
-                    filename_response = llm.invoke(prompt)
+                    filename_response = st.session_state.llm.invoke(prompt)
                     filename = filename_response.content.strip() + '.csv'
                     with st.container():
                         st.download_button(
