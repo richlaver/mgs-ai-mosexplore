@@ -17,10 +17,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-blob_db = setup.get_blob_db()
-metadata_db = setup.get_metadata_db()
-llm = setup.get_llm()
-
 @st.dialog("Login")
 def login_modal():
     """Renders the login modal using Streamlit dialog."""
