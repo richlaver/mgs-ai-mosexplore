@@ -11,6 +11,7 @@ from parameters import table_info
 
 def perform_setup():
     import setup
+    setup.set_modal_credentials()
     setup.set_google_credentials()
     setup.enable_tracing()
     setup.set_blob_db_env()

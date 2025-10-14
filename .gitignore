@@ -1,8 +1,9 @@
 /.streamlit/secrets.toml
 **/*.log
-**/__pycache__/
+/__pycache__/
 google_credentials.json
 /tools/__pycache__/
+/agents/__pycache__/
 .DS_Store
 test_coder_node.py
 test_graph.py

@@ -27,6 +27,14 @@ logging.basicConfig(
 
 logger = logging.getLogger("setup")
 
+
+def set_modal_credentials():
+    """Set Modal credentials from Streamlit secrets."""
+    st.toast("Setting Modal credentials...", icon=":material/key:")
+    os.environ["MODAL_TOKEN_ID"] = st.secrets["modal"]["token_id"]
+    os.environ["MODAL_TOKEN_SECRET"] = st.secrets["modal"]["token_secret"]
+    logger.info("Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET environment variables")
+
 def build_modal_secrets():
     """Build Modal secrets.
 
