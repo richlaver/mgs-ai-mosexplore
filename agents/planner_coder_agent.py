@@ -69,6 +69,7 @@ Code Generation Constraints:
 - Acquire inputs via tools in scope: call tool.invoke(input).
 - extraction_sandbox_agent.invoke(prompt_str) expects str prompt, returns pandas.DataFrame or None.
 - timeseries_plot_sandbox_agent.invoke(prompt_str) and map_plot_sandbox_agent.invoke(prompt_str) expect a str natural language prompt describing the plot, returns artefact ID to access plot in file system or None.
+- Read tool descriptions and write prompts to include ALL required details.
 - In scope: llm (BaseLanguageModel), db (SQLDatabase), extraction_sandbox_agent, timeseries_plot_sandbox_agent, map_plot_sandbox_agent, datetime module.
 - Import standard libraries inside the function (e.g., from datetime import datetime, timezone; import pandas as pd; import json).
 - No network calls or file I/O.

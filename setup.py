@@ -213,7 +213,7 @@ def get_db() -> SQLDatabase:
         )
         logging.debug(f"Available tables: {db.get_usable_table_names()}")
 
-        st.toast("Connected to the MissionOS CP03 database", icon=":material/check_circle:")
+        st.toast("Connected to the MissionOS CP03 database", icon=":material/plug_connect:")
         return db
 
     except Exception as e:

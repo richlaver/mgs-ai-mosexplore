@@ -9,6 +9,7 @@ import logging
 from parameters import users
 import setup
 from tools.artefact_toolkit import ReadArtefactsTool
+from modal_management import deploy_app, warm_up_container, stop_app, is_app_deployed, is_container_warm
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -16,6 +17,13 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+if "app_deployed" not in st.session_state:
+    st.session_state.app_deployed = is_app_deployed()
+    logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
+if "container_warm" not in st.session_state:
+    st.session_state.container_warm = is_container_warm()
+    logger.info(f"container_warm after setting session state variable: {st.session_state.container_warm}")
 
 @st.dialog("Login")
 def login_modal():
@@ -29,7 +37,7 @@ def login_modal():
         if st.form_submit_button("Login"):
             if password == st.secrets.admin_password:
                 st.session_state.admin_logged_in = True
-                st.toast("Logged in as admin", icon=":material/check_circle:")
+                st.toast("Logged in as admin", icon=":material/login:")
                 st.success("Logged in as admin")
                 st.rerun()
             else:
@@ -62,6 +70,28 @@ def user_modal():
                 st.rerun()
             else:
                 st.error("Please select a user")
+
+@st.dialog("Sandbox")
+def sandbox_modal():
+    st.write(f"App Deployed: {'Yes' if st.session_state.app_deployed else 'No'}")
+    st.write(f"Container Warm: {'Yes' if st.session_state.container_warm else 'No'}")
+    st.info("Note: Keeping a container warm costs ~$55/month. Stop when not in use to save costs.")
+
+    spin_up_disabled = st.session_state.app_deployed and st.session_state.container_warm
+    kill_disabled = not (st.session_state.app_deployed and st.session_state.container_warm)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Spin-up", disabled=spin_up_disabled, key="spin_up", icon=":material/rocket_launch:"):
+            if not st.session_state.app_deployed:
+                deploy_app()
+            if st.session_state.app_deployed and not st.session_state.container_warm:
+                warm_up_container()
+            st.rerun()
+    with col2:
+        if st.button("Kill", disabled=kill_disabled, key="kill", icon=":material/block:"):
+            stop_app()
+            st.rerun()
 
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
@@ -213,6 +243,14 @@ def render_initial_ui() -> None:
             ):
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
                 st.toggle(label="Show LLM Responses", key="show_llm_responses", help="Toggle to show or hide raw LLM responses")
+                st.button(
+                    label="Sandbox",
+                    icon=":material/developer_board:",
+                    key="sandbox_button",
+                    help="Manage Sandbox app and containers",
+                    on_click=sandbox_modal,
+                    use_container_width=True
+                )
 
     with st.empty():
         st.chat_input(

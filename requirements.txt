@@ -9,6 +9,8 @@ langchain_google_vertexai
 modal
 numpy
 plotly
+pyproj
+pandas
 pydantic>=2
 psycopg2-binary
 sqlalchemy

@@ -19,7 +19,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from typing_extensions import TypedDict, Annotated
+from typing_extensions import TypedDict
 
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 

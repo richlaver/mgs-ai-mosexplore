@@ -2,7 +2,7 @@ from datetime import datetime
 import json
 import logging
 import time
-from typing import Dict, List, Optional, TypedDict, Any
+from typing import Dict, List, Optional, TypedDict
 
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage
@@ -240,7 +240,7 @@ class TimeSeriesPlotSandboxAgentTool(BaseTool):
     name: str = "timeseries_plot_sandbox_agent"
     description: str = """
     Agent to generate a time series plot safely and store its Plotly JSON as an artefact. 
-    Input: Natural language prompt including:
+    Input: Natural language prompt which MUST include ALL of:
     - Instruments and database field names (e.g., 'plot data1 from INST001 and calculation1 from INST002 on primary axis').
     - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
     - Axis titles/units (e.g., 'primary: Temperature in °C; secondary: Pressure in kPa').

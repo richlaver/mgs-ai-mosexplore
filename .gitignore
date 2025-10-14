@@ -1,6 +1,6 @@
 /.streamlit/secrets.toml
 **/*.log
-/__pycache__/
+**/__pycache__/
 google_credentials.json
 /tools/__pycache__/
 .DS_Store

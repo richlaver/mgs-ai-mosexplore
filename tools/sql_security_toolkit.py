@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Sequence, Type, Union, List, Tuple
+from typing import Any, Dict, Optional, Sequence, Union, List, Tuple
 
 from sqlalchemy.engine import Result
 
@@ -9,8 +9,6 @@ from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.tools import BaseTool
 import sqlparse
 from collections import deque
-import json
-import re
 import logging
 
 

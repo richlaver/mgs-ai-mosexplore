@@ -2,7 +2,7 @@ from datetime import datetime
 import json
 import logging
 import time
-from typing import Dict, List, Optional, TypedDict, Any
+from typing import Dict, List, Optional, TypedDict
 
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage
@@ -26,7 +26,7 @@ Natural language description of the map plot including:
 - Data type ('readings' or 'review_levels').
 - Plot type ('value_at_time' or 'change_over_period').
 - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
-- Series details (instrument types, subtypes, fields, names, units).
+- Series details (MUST include instrument types, subtypes, fields, names, units).
 - Center (instrument ID or easting/northing) and radius.
 - Optional: Excludes, buffer hours.
                         """)
@@ -242,7 +242,7 @@ class MapPlotSandboxAgentTool(BaseTool):
     name: str = "map_plot_sandbox_agent"
     description: str = """
     Agent to generate a map plot safely and store its Plotly JSON as an artefact. 
-    Input: Natural language prompt including:
+    Input: Natural language prompt which MUST include ALL of:
     - Data type ('readings' or 'review_levels').
     - Plot type ('value_at_time' or 'change_over_period').
     - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').

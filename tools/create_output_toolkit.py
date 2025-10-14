@@ -1,7 +1,5 @@
 import json
 import logging
-import math
-import os
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -847,7 +845,6 @@ from pydantic import BaseModel, Field
 from pyproj import Proj, transform
 
 from .sql_security_toolkit import GeneralSQLQueryTool
-from .get_trend_info_toolkit import format_datetime
 
 logging.basicConfig(
     level=logging.DEBUG,
