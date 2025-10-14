@@ -288,7 +288,6 @@ def run_with_live_logs(
     global_hierarchy_access: bool,
 ) -> Generator[dict, None, None]:
     with modal.enable_output():
-        # executor = SandboxExecutor()
         executor_class = modal.Cls.from_name("mgs-code-sandbox", "SandboxExecutor")
         executor = executor_class()
         outputs = executor.run_sandboxed_code.remote_gen(

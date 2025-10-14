@@ -15,7 +15,7 @@ planner_coder_prompt = PromptTemplate(
         "current_date",
         "retrospective_query",
         "verified_instrument_ids",
-    "verified_instrument_info_json",
+        "verified_instrument_info_json",
         "word_context_json",
         "tools_str",
         "previous_attempts_summary",

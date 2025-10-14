@@ -43,30 +43,6 @@ class Context(BaseModel):
     word_context: List[QueryWords] = Field(description="How query words relate to where to get data and background info to answer")
     edge_case: bool = Field(description="Indicates whether the user query is an edge case", default=False)
 
-class Extraction(BaseModel):
-    """Inputs and outputs for requests to extract data from database."""
-    id: int = Field(description="ID for extraction request")
-    description: str = Field(description="Description of request")
-    prompt: str = Field(description="Prompt for LLM to generate SQL query to extract data")
-    result_descr: str = Field(description="Description of extraction results")
-    result_data: str = Field(description="Extracted data")
-
-class Calculation(BaseModel):
-    """Inputs and outputs for requests to perform calculations."""
-    id: int = Field(description="ID for calculation request")
-    description: str = Field(description="Description of request")
-    prompt: str = Field(description="Prompt for LLM to perform calculation")
-    result_descr: str = Field(description="Description of calculation results")
-    result_data: str = Field(description="Calculation results")
-
-class Plot(BaseModel):
-    """Plots generated to support response."""
-    id: int = Field(description="Plot ID, unique identifier for the plot instance")
-    tool_name: str = Field(description="Name of the plotting tool to use: 'time_series_plot' or 'map_plot'")
-    description: str = Field(description="Description of what plot shows")
-    output_json: Optional[str] = Field(description="Plot data in JSON format", default=None)
-    output_csv: Optional[str] = Field(description="Plot data in CSV format", default=None)
-
 class Suggestion(BaseModel):
     """Follow-on queries suggested to user."""
     id: int = Field(description="ID for follow-on query")

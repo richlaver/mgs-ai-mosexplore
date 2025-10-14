@@ -18,13 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-if "app_deployed" not in st.session_state:
-    st.session_state.app_deployed = is_app_deployed()
-    logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
-if "container_warm" not in st.session_state:
-    st.session_state.container_warm = is_container_warm()
-    logger.info(f"container_warm after setting session state variable: {st.session_state.container_warm}")
-
 @st.dialog("Login")
 def login_modal():
     """Renders the login modal using Streamlit dialog."""
@@ -108,6 +101,13 @@ def handle_clear_chat() -> None:
 
 def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
+    if "app_deployed" not in st.session_state:
+        st.session_state.app_deployed = is_app_deployed()
+        logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
+    if "container_warm" not in st.session_state:
+        st.session_state.container_warm = is_container_warm()
+        logger.info(f"container_warm after setting session state variable: {st.session_state.container_warm}")
+        
     st.markdown(
         """
         <style>
