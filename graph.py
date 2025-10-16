@@ -15,7 +15,8 @@ import streamlit as st
 from typing import List, Dict
 import logging
 
-from modal_sandbox import run_sandboxed_code_with_local_logs, run_with_live_logs
+from modal_sandbox_remote import execute_remote_sandbox
+from modal_sandbox_local import execute_local_sandbox
 from parameters import progress_messages
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,12 @@ def build_codeact_graph(
     db: SQLDatabase,
     table_info: List[Dict],
     table_relationship_graph: Dict[str, List[tuple]],
-    thread_id: int,
+    thread_id: str,
     user_id: int,
-    global_hierarchy_access: bool
+    global_hierarchy_access: bool,
+    remote_sandbox: bool,
 ) -> StateGraph:
-    REMOTE_SANDBOX = True
+    REMOTE_SANDBOX = remote_sandbox
     st.toast("Building CodeAct graph...", icon=":material/account_tree:")
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
@@ -93,7 +95,7 @@ def build_codeact_graph(
         local_errors = []
         try:
             if REMOTE_SANDBOX:
-                gen = run_with_live_logs(
+                gen = execute_remote_sandbox(
                     code=code,
                     table_info=table_info,
                     table_relationship_graph=table_relationship_graph,
@@ -102,7 +104,7 @@ def build_codeact_graph(
                     global_hierarchy_access=global_hierarchy_access,
                 )
             else:
-                gen = run_sandboxed_code_with_local_logs(
+                gen = execute_local_sandbox(
                     code=code,
                     table_info=table_info,
                     table_relationship_graph=table_relationship_graph,

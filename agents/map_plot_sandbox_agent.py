@@ -17,7 +17,6 @@ from tools.create_output_toolkit import MapPlotTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.artefact_toolkit import WriteArtefactTool
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class MapPlotSandboxAgentInput(BaseModel):

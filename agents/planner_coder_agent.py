@@ -20,7 +20,7 @@ planner_coder_prompt = PromptTemplate(
         "tools_str",
         "previous_attempts_summary",
     ],
-    template="""You are an expert in creating robust execution plans and implementing them in Python code for helping to answer complex database queries using monitoring instrumentation data.
+    template="""You are an expert in creating robust execution plans and implementing them in Python code for helping to answer complex database queries using instrumentation monitoring data.
 
 Current date: {current_date}
 
@@ -43,16 +43,17 @@ Summary of previous failed attempts:
 {previous_attempts_summary}
 
 Thought processes (DO NOT include in output):
-1. Deduce the user's underlying intention or need based on the query and context.
-2. Brainstorm 3 alternative high-level strategies to answer the query using provided instrument context, data availability, and calculation feasibility.
+1. Review and understand the query.
+2. Deduce the user's underlying intention or need based on the query and context.
+3. Brainstorm 3 alternative high-level strategies to answer the query using provided instrument context, data availability, and calculation feasibility.
    - For each: numbered high-level steps, pros, cons, probability of success (high/medium/low).
    - Explicitly state how each alternative avoids failure modes from previous attempts.
-3. Evaluate the three alternatives comparatively (success probability, latency, completeness, robustness, simplicity).
-4. Select the best alternative with justification.
-5. Based on the deduced intention, brainstorm 3 possible helpful query extensions that add value. Each must be executable with the available database, tools, and coding abilities. Keep to one simple helpful addition.
-6. DO NOT output the above in any code comments. This is important to save tokens.
-7. Select the one extension most likely to contribute value in relation to the original query, with justification.
-8. Think up a detailed execution plan as a numbered list (1., 2., 3., ...). Incorporate the selected extension as optional last steps. Each step must be action-oriented:
+4. Evaluate the three alternatives comparatively (success probability, latency, completeness, robustness, simplicity).
+5. Select the best alternative with justification.
+6. Based on the deduced intention, brainstorm 3 possible helpful query extensions that add value. Each must be executable with the available database, tools, and coding abilities. Keep to one simple helpful addition.
+7. DO NOT output the above in any code comments. This is important to save tokens.
+8. Select the one extension most likely to contribute value in relation to the original query, with justification.
+9. Think up a detailed execution plan as a numbered list (1., 2., 3., ...). Incorporate the selected extension as optional last steps. Each step must be action-oriented:
    - Specify instrument type/subtype & database field names to extract.
    - Explicit filters (date ranges, instrument IDs) or how to derive them.
    - When to call extraction_sandbox_agent (describe the prompt for SQL generation).
@@ -63,7 +64,7 @@ Thought processes (DO NOT include in output):
    - Do not extract data for plotting tools — the tools will extract data themselves.
 
 Task for output:
-9. Generate the Python code implementing the plan.
+10. Generate the Python code implementing the plan.
 
 Code Generation Constraints:
 - Acquire inputs via tools in scope: call tool.invoke(input).
@@ -99,7 +100,11 @@ Code Structure:
 - Wrap risky parts in try/except; yield error and continue/return as appropriate.
 - If critical failure, yield error and return.
 
-Think step by step following requirements 1-9 above. Output ONLY the code.
+Think step by step following requirements 1-10 above. Output ONLY the code.
+
+Check your code for the following:
+- No superfluous data extraction steps before calling plotting tools.
+- Tool inputs contain all details required in tool descriptions.
 """
 )
 

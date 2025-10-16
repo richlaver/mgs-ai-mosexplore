@@ -18,11 +18,6 @@ from pyproj.transformer import Transformer
 
 from .sql_security_toolkit import GeneralSQLQueryTool
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
 
 def parse_datetime(dt_str: str) -> datetime:

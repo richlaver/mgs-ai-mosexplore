@@ -6,16 +6,12 @@ import json
 import uuid
 import logging
 
-from parameters import users
+from parameters import users, table_info
+from graph import build_codeact_graph
 import setup
 from tools.artefact_toolkit import ReadArtefactsTool
 from modal_management import deploy_app, warm_up_container, stop_app, is_app_deployed, is_container_warm
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
 
 @st.dialog("Login")
@@ -66,8 +62,8 @@ def user_modal():
 
 @st.dialog("Sandbox")
 def sandbox_modal():
-    st.write(f"App Deployed: {'Yes' if st.session_state.app_deployed else 'No'}")
-    st.write(f"Container Warm: {'Yes' if st.session_state.container_warm else 'No'}")
+    st.markdown(f"App Deployed: **{'Yes' if st.session_state.app_deployed else 'No'}**")
+    st.markdown(f"Container Warm: **{'Yes' if st.session_state.container_warm else 'No'}**")
     st.info("Note: Keeping a container warm costs ~$55/month. Stop when not in use to save costs.")
 
     spin_up_disabled = st.session_state.app_deployed and st.session_state.container_warm
@@ -103,6 +99,8 @@ def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
     if "app_deployed" not in st.session_state:
         st.session_state.app_deployed = is_app_deployed()
+        if not st.session_state.app_deployed:
+            st.session_state.sandbox_mode = "Local"
         logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
     if "container_warm" not in st.session_state:
         st.session_state.container_warm = is_container_warm()
@@ -241,10 +239,28 @@ def render_initial_ui() -> None:
                 icon=":material/menu:",
                 use_container_width=False
             ):
-                st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
                 st.toggle(label="Show LLM Responses", key="show_llm_responses", help="Toggle to show or hide raw LLM responses")
+                st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
+                st.divider()
+                st.markdown(f"Sandbox Execution Mode: **{st.session_state.get('sandbox_mode', 'Unreadable')}**")
+                st.segmented_control(
+                    label="Sandbox Execution Mode",
+                    options=["Local", "Remote"],
+                    key="sandbox_mode",
+                    selection_mode="single",
+                    disabled=not st.session_state.get("app_deployed", False),
+                    on_change=lambda: st.session_state.update({'graph': build_codeact_graph(
+                        llm=st.session_state.llm,
+                        db=st.session_state.db,
+                        table_info=table_info,
+                        table_relationship_graph=st.session_state.table_relationship_graph, 
+                        thread_id=st.session_state.thread_id,
+                        user_id=st.session_state.selected_user_id,
+                        global_hierarchy_access=st.session_state.global_hierarchy_access,
+                        remote_sandbox=st.session_state.sandbox_mode == "Remote",)})
+                )
                 st.button(
-                    label="Sandbox",
+                    label="Sandbox App",
                     icon=":material/developer_board:",
                     key="sandbox_button",
                     help="Manage Sandbox app and containers",
@@ -352,9 +368,7 @@ def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
     if not st.session_state.setup_complete:
         return
-    
-    logger.info(f"Show LLM Responses: {st.session_state.show_llm_responses}")
-        
+
     handle_clear_chat()
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)

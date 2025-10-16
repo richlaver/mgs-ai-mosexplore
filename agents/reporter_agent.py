@@ -5,11 +5,6 @@ from typing import List, Dict
 import json
 import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 def reporter_agent(
@@ -60,6 +55,7 @@ def reporter_agent(
         if output_type in ["progress", "error", "final"]:
             execution_progress += content + "\n"
         elif output_type == "plot":
+            logger.info("[reporter_agent] Processing plot output: %s", content)
             try:
                 plot_data = json.loads(content)
                 plot_artefacts.append({
@@ -91,7 +87,8 @@ You are a helpful assistant generating a concise, polite, and coherent response 
 - **CSV Files**: If CSV files are provided, reference them by description, noting they are available for download/viewing below in the UI.
 
 **Instructions:**
-- Keep the response concise, polite, and helpful.
+- Keep the response polite, and helpful.
+- Keep the response concise but include ALL relevant execution results even if they are large.
 - Do not explicitly state the absence of plots or CSVs, as they are only generated when warranted.
 - If plots or CSVs are included, integrate them naturally into the response.
 - Do not include suggestions for follow-on queries.

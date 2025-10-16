@@ -2,6 +2,7 @@ import datetime
 import json
 import uuid
 import numpy as np
+import logging
 
 import psycopg2
 from b2sdk.v1 import DownloadDestBytes
@@ -11,6 +12,8 @@ TABLE_NAME = "mgs-explore-specificquery-artefacts"
 VECTOR_DIM = 768
 SIMILARITY_THRESHOLD = 0.7
 COSINE_DISTANCE_THRESHOLD = 1 - SIMILARITY_THRESHOLD
+
+logger = logging.getLogger(__name__)
 
 def _get_embeddings():
     """

@@ -23,7 +23,6 @@ from typing_extensions import TypedDict
 
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ExtractionSandboxAgentState(TypedDict):
@@ -356,7 +355,8 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
         try:
             result = general_sql_tool._run(sql_query)
-            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:500])
+            # logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:500])
+            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result))
             messages.append(AIMessage(
                 name="ExtractionSandboxAgent",
                 content="SQL query executed successfully.",
@@ -559,14 +559,18 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             df = df[expected_columns]
             logger.debug("[parse_results] Columns reordered to: %s", list(df.columns))
 
-        # Parse quoted numeric strings (e.g., '"-7.37"') to floats
+        # Parse quoted numeric strings (e.g., '"-7.37"') to floats, handling scientific notation
+        def safe_float(val):
+            if isinstance(val, str) and val.startswith('"') and val.endswith('"'):
+                try:
+                    return float(val.strip('"'))
+                except ValueError:
+                    return val
+            return val
+
         for col in df.columns:
             if df[col].dtype == 'object':
-                try:
-                    # Check if values are quoted numerics
-                    df[col] = df[col].apply(lambda x: float(x.strip('"')) if isinstance(x, str) and x.startswith('"') and x.endswith('"') and x.strip('"').replace('.', '', 1).replace('-', '', 1).isdigit() else x)
-                except (ValueError, AttributeError):
-                    pass
+                df[col] = df[col].apply(safe_float)
 
         # Robustly convert string numerics to float/int where possible (skip datetimes)
         for col in df.columns:

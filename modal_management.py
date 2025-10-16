@@ -3,13 +3,16 @@ import modal
 import subprocess
 import time
 import logging
-import modal_sandbox
+
+import modal_sandbox_remote
+from graph import build_codeact_graph
+from parameters import table_info
 
 logger = logging.getLogger(__name__)
 
 MOCK_TABLE_INFO = []
 MOCK_TABLE_REL_GRAPH = {}
-MOCK_THREAD_ID = 1
+MOCK_THREAD_ID = "1"
 MOCK_USER_ID = 1
 MOCK_GLOBAL_ACCESS = False
 MOCK_CODE = """
@@ -17,7 +20,21 @@ def execute_strategy():
     yield {"type": "warmup", "content": "Container warmed"}
 """
 
-app_ref = modal_sandbox.app
+app_ref = modal_sandbox_remote.app
+
+def make_local_sandbox_mode():
+    current_sandbox_mode = st.session_state.get("sandbox_mode")
+    if current_sandbox_mode != "Local":
+        st.session_state.sandbox_mode = "Local"
+        st.session_state.update({'graph': build_codeact_graph(
+            llm=st.session_state.llm,
+            db=st.session_state.db,
+            table_info=table_info,
+            table_relationship_graph=st.session_state.table_relationship_graph, 
+            thread_id=st.session_state.thread_id,
+            user_id=st.session_state.selected_user_id,
+            global_hierarchy_access=st.session_state.global_hierarchy_access,
+            remote_sandbox=False,)})
 
 # Check if app is deployed using Modal API
 def is_app_deployed():
@@ -29,9 +46,12 @@ def is_app_deployed():
         logger.info(f"App Description: {app.description}")
         return app is not None
     except modal.exception.ExecutionError:
+        make_local_sandbox_mode()
         return False
     except Exception as e:
-        st.error(f"Failed to check app status: {str(e)}")
+        make_local_sandbox_mode()
+        # Comment the line below to fail silently when running Streamlit locally
+        # st.error(f"Failed to check app status: {str(e)}")
         return False
 
 # Check if container is warm (response time < 3s)
@@ -42,7 +62,7 @@ def is_container_warm():
         return False
     start_time = time.time()
     try:
-        for output in modal_sandbox.run_with_live_logs(
+        for output in modal_sandbox_remote.execute_remote_sandbox(
             code=MOCK_CODE,
             table_info=MOCK_TABLE_INFO,
             table_relationship_graph=MOCK_TABLE_REL_GRAPH,
@@ -81,7 +101,7 @@ def warm_up_container():
         return
     with st.spinner("Warming up container..."):
         try:
-            for output in modal_sandbox.run_with_live_logs(
+            for output in modal_sandbox_remote.execute_remote_sandbox(
                 code=MOCK_CODE,
                 table_info=MOCK_TABLE_INFO,
                 table_relationship_graph=MOCK_TABLE_REL_GRAPH,
@@ -110,6 +130,7 @@ def stop_app():
             st.session_state.app_deployed = False
             st.session_state.container_warm = False
             st.session_state.app_id = None
+            make_local_sandbox_mode()
             st.toast("App and containers stopped successfully.", icon=":material/block:")
         except Exception as e:
             st.toast(f"Stop failed: {str(e)}. Use CLI: modal app stop {app_id}", icon=":material/error:")

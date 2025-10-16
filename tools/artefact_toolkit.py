@@ -4,8 +4,10 @@ import b2sdk.v1 as b2
 import psycopg2.extensions
 import artefact_management
 import datetime
+import logging
 from langchain_core.tools import BaseTool
 
+logger = logging.getLogger(__name__)
 class WriteArtefactInput(BaseModel):
     blob: bytes | str = Field(
         description="The artefact itself (as bytes or string; strings will be encoded to UTF-8 bytes)."

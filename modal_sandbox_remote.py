@@ -2,7 +2,6 @@ import sys
 import modal
 import logging
 import json
-from typing import Generator, List, Dict
 import os
 import psycopg2
 from psycopg2 import OperationalError
@@ -11,18 +10,12 @@ from langchain_google_vertexai import ChatVertexAI
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
+from typing import Generator, List, Dict
 from parameters import include_tables
-
 from setup import build_modal_secrets
 
 app = modal.App("mgs-code-sandbox")
-logger = logging.getLogger("modal_sandbox")
-root = logging.getLogger()
-if not root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+logger = logging.getLogger(__name__)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -70,6 +63,7 @@ class SandboxExecutor:
     def enter(self):
         logger.info("Running container enter hook")
 
+        # Set up Google credentials
         credentials_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
         logger.info("Found GOOGLE_CREDENTIALS_JSON in environment (len=%s)", len(credentials_json))
         temp_credentials_path = "google_credentials.json"
@@ -83,6 +77,7 @@ class SandboxExecutor:
             raise ValueError("project_id not found in GOOGLE_CREDENTIALS_JSON")
         logger.info("Parsed project_id: %s", self.project_id)
 
+        # Set up metadata_db (PostgreSQL RDS)
         required_rds_env = ["ARTEFACT_METADATA_RDS_HOST", "ARTEFACT_METADATA_RDS_USER", "ARTEFACT_METADATA_RDS_PASS", "ARTEFACT_METADATA_RDS_DATABASE"]
         missing_rds_env = [k for k in required_rds_env if k not in os.environ or not os.environ.get(k)]
         rds_port = os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432")
@@ -99,6 +94,7 @@ class SandboxExecutor:
         )
         logger.info("Connected to PostgreSQL RDS metadata_db")
 
+        # Set up blob_db (Backblaze B2)
         required_b2_env = ["ARTEFACT_BLOB_B2_KEY_ID", "ARTEFACT_BLOB_B2_KEY", "ARTEFACT_BLOB_B2_BUCKET"]
         missing_b2_env = [k for k in required_b2_env if k not in os.environ or not os.environ.get(k)]
         if missing_b2_env:
@@ -111,14 +107,16 @@ class SandboxExecutor:
         self.blob_db = b2_api.get_bucket_by_name(os.environ["ARTEFACT_BLOB_B2_BUCKET"])
         logger.info("Authorized and got B2 bucket: %s", os.environ["ARTEFACT_BLOB_B2_BUCKET"])
 
+        # Initialize LLM
         self.llm = ChatVertexAI(model="gemini-2.0-flash-001", temperature=0.1)
         logger.info("Initialized ChatVertexAI model=%s", "gemini-2.0-flash-001")
 
+        # Set up SQL database (MySQL)
         required_env = ["DB_HOST", "DB_USER", "DB_PASS", "DB_NAME"]
         missing_env = [k for k in required_env if k not in os.environ or not os.environ.get(k)]
         db_port = os.environ.get("DB_PORT", "3306")
         if missing_env:
-            logger.error("Missing DB env vars: %s | Present: %s", missing_env, [k for k in required_env if k in os.environ])
+            logger.error("Missing DB env vars: %s", missing_env)
             raise KeyError("Missing required DB environment variables: " + ", ".join(missing_env))
 
         db_host = os.environ["DB_HOST"]
@@ -160,13 +158,10 @@ class SandboxExecutor:
         code: str,
         table_info: List[Dict],
         table_relationship_graph: Dict[str, List[tuple]],
-        thread_id: int,
+        thread_id: str,
         user_id: int,
         global_hierarchy_access: bool,
     ) -> Generator[dict, None, None]:
-        """
-        Executes the provided Python code string in a secure, remote Modal sandbox.
-        """
         from tools.artefact_toolkit import WriteArtefactTool
         run_logger = logging.getLogger("modal_sandbox.run")
         run_logger.info("Starting sandbox execution | user_id=%s global_access=%s code_len=%s table_info=%s rel_graph_keys=%s",
@@ -179,6 +174,7 @@ class SandboxExecutor:
         from tools.sql_security_toolkit import GeneralSQLQueryTool
 
         try:
+            # Verify PostgreSQL connection
             try:
                 if self.metadata_db.closed != 0:
                     run_logger.info("PostgreSQL connection closed; reconnecting")
@@ -199,6 +195,7 @@ class SandboxExecutor:
                 )
                 run_logger.info("Reconnected to PostgreSQL RDS metadata_db")
 
+            # Initialize tools
             extraction_tool = extraction_sandbox_agent(
                 llm=self.llm,
                 db=self.db,
@@ -234,6 +231,7 @@ class SandboxExecutor:
             )
             run_logger.info("Initialized plotting tools")
 
+            # Prepare and execute code
             if not code.strip().startswith("from __future__ import annotations"):
                 code = "from __future__ import annotations\n" + code
 
@@ -279,11 +277,11 @@ class SandboxExecutor:
             run_logger.exception("Sandbox execution failed: %s", e)
             yield {"type": "error", "content": error_message}
 
-def run_with_live_logs(
+def execute_remote_sandbox(
     code: str,
     table_info: List[Dict],
     table_relationship_graph: Dict[str, List[tuple]],
-    thread_id: int,
+    thread_id: str,
     user_id: int,
     global_hierarchy_access: bool,
 ) -> Generator[dict, None, None]:
@@ -300,33 +298,3 @@ def run_with_live_logs(
         )
         for output in outputs:
             yield output
-
-def run_sandboxed_code_with_local_logs(
-    code: str,
-    table_info: List[Dict],
-    table_relationship_graph: Dict[str, List[tuple]],
-    thread_id: int,
-    user_id: int,
-    global_hierarchy_access: bool,
-) -> Generator[dict, None, None]:
-    local_logger = logging.getLogger("modal_sandbox.local")
-    if not local_logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        local_logger.addHandler(handler)
-        local_logger.setLevel(logging.INFO)
-
-    local_logger.info("Starting local sandbox execution | user_id=%s global_access=%s", user_id, global_hierarchy_access)
-
-    executor = SandboxExecutor()
-    for output in executor.run_sandboxed_code.local_gen(
-        code=code,
-        table_info=table_info,
-        table_relationship_graph=table_relationship_graph,
-        thread_id=thread_id,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    ):
-        yield output
-
-    local_logger.info("Local sandbox execution completed")

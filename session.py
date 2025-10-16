@@ -46,5 +46,9 @@ def setup_session() -> None:
         st.session_state.table_relationship_graph = None
     if "show_llm_responses" not in st.session_state:
         st.session_state.show_llm_responses = True
+    if "sandbox_mode" not in st.session_state:
+        st.session_state.sandbox_mode = "Remote"
     if "setup_complete" not in st.session_state:
         st.session_state.setup_complete = False
+    if "need_rebuild_graph" not in st.session_state:
+        st.session_state.need_rebuild_graph = False

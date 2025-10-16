@@ -19,14 +19,7 @@ from typing import List, Tuple
 import modal
 import logging
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
-
-logger = logging.getLogger("setup")
-
+logger = logging.getLogger(__name__)
 
 def set_modal_credentials():
     """Set Modal credentials from Streamlit secrets."""

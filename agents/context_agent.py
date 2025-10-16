@@ -15,11 +15,6 @@ import logging
 import os
 import ast
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
 
 def extract_instruments_with_llm(llm: BaseLanguageModel, query: str) -> Dict:
@@ -287,6 +282,7 @@ def validate_instruments_in_database(db: Any, instrument_ids: List[str]) -> Dict
         """
         try:
             result = db.run_no_throw(query)
+            logger.info(f"Validation query result for {instrument_id}: {result}")
             if result and isinstance(result, str) and result.strip():
                 parsed_result = ast.literal_eval(result)
                 if parsed_result and len(parsed_result) > 0:

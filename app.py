@@ -1,3 +1,4 @@
+import sys
 import streamlit as st
 st.set_page_config(
     page_title="MissionOS Explore",
@@ -8,8 +9,20 @@ st.set_page_config(
 
 import session
 from parameters import table_info
+import logging
+
+def setup_logging():
+    if not logging.getLogger().handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(handler)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("hpack").setLevel(logging.CRITICAL)
+
+logger = logging.getLogger(__name__)
 
 def perform_setup():
+    setup_logging()
     import setup
     setup.set_modal_credentials()
     setup.set_google_credentials()
@@ -34,7 +47,8 @@ def perform_setup():
         table_relationship_graph=st.session_state.table_relationship_graph,
         thread_id=st.session_state.thread_id,
         user_id=st.session_state.selected_user_id,
-        global_hierarchy_access=st.session_state.global_hierarchy_access
+        global_hierarchy_access=st.session_state.global_hierarchy_access,
+        remote_sandbox=st.session_state.sandbox_mode == "Remote",
     )
 
 def main() -> None:

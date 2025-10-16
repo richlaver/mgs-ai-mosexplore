@@ -5,6 +5,7 @@ google_credentials.json
 /tools/__pycache__/
 /agents/__pycache__/
 .DS_Store
+table_info.py
 test_coder_node.py
 test_graph.py
 test_planner_coder_node.py
