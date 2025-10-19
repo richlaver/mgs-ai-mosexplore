@@ -15,4 +15,5 @@ pydantic>=2
 psycopg2-binary
 sqlalchemy
 sqlparse
+sqlglot
 mysql-connector-python

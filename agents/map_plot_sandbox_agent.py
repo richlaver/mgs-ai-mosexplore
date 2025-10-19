@@ -24,10 +24,10 @@ class MapPlotSandboxAgentInput(BaseModel):
 Natural language description of the map plot including:
 - Data type ('readings' or 'review_levels').
 - Plot type ('value_at_time' or 'change_over_period').
-- Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
-- Series details (MUST include instrument types, subtypes, fields, names, units).
-- Center (instrument ID or easting/northing) and radius.
-- Optional: Excludes, buffer hours.
+- Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM') if 'change_over_period' or time to plot if 'value_at_time'.
+- Instrument types, subtypes, fields, names, units to plot e.g. 'plot calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series.'.
+- Centre (instrument ID or easting/northing) and radius.
+- Optional: instruments to exclude, number of hours within which to search for readings.
                         """)
 
 class MapPlotSandboxAgentState(TypedDict):
@@ -240,14 +240,14 @@ def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQ
 class MapPlotSandboxAgentTool(BaseTool):
     name: str = "map_plot_sandbox_agent"
     description: str = """
-    Agent to generate a map plot safely and store its Plotly JSON as an artefact. 
+    Agent to generate a map plot and store its Plotly JSON as an artefact.
     Input: Natural language prompt which MUST include ALL of:
     - Data type ('readings' or 'review_levels').
     - Plot type ('value_at_time' or 'change_over_period').
-    - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
-    - Series details (instrument types, subtypes, fields, names, units).
-    - Center (instrument ID or easting/northing) and radius.
-    - Optional: Excludes, buffer hours.
+    - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM') if 'change_over_period' or time to plot if 'value_at_time'.
+    - Instrument types, subtypes, fields, names, units to plot e.g. 'plot calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series.'
+    - Centre (instrument ID or easting/northing) and radius.
+    - Optional: instruments to exclude, number of hours within which to search for readings.
     Returns: String artefact_id of the stored Plotly JSON or None if failed.
     """
     args_schema: type[BaseModel] = MapPlotSandboxAgentInput

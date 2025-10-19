@@ -62,6 +62,9 @@ Thought processes (DO NOT include in output):
    - Prefer minimal extractions; combine fields in one if possible.
    - If visualizations enhance the response, invoke plotting tools (timeseries_plot_sandbox_agent or map_plot_sandbox_agent) and yield their results as specified below.
    - Do not extract data for plotting tools — the tools will extract data themselves.
+   - If no data is found on the exact time specified in the query, use the extraction_sandbox_agent tool to find data which is closest to the time. This technique is particularly useful for defining the buffer period of map plots.
+   - If the query requires extraction of data but does not specify a time or requires most recent data, use the extraction_sandbox_agent tool with a date range from 1 January 1900 00:00:00 to the current date to find the most recent data available.
+   - DO NOT attempt to extract data from the future. All data is recorded in the past.
 
 Task for output:
 10. Generate the Python code implementing the plan.
@@ -70,7 +73,7 @@ Code Generation Constraints:
 - Acquire inputs via tools in scope: call tool.invoke(input).
 - extraction_sandbox_agent.invoke(prompt_str) expects str prompt, returns pandas.DataFrame or None.
 - timeseries_plot_sandbox_agent.invoke(prompt_str) and map_plot_sandbox_agent.invoke(prompt_str) expect a str natural language prompt describing the plot, returns artefact ID to access plot in file system or None.
-- Read tool descriptions and write prompts to include ALL required details.
+- Write tool inputs to include ALL details in tool descriptions.
 - In scope: llm (BaseLanguageModel), db (SQLDatabase), extraction_sandbox_agent, timeseries_plot_sandbox_agent, map_plot_sandbox_agent, datetime module.
 - Import standard libraries inside the function (e.g., from datetime import datetime, timezone; import pandas as pd; import json).
 - No network calls or file I/O.
@@ -103,8 +106,13 @@ Code Structure:
 Think step by step following requirements 1-10 above. Output ONLY the code.
 
 Check your code for the following:
+- Calling the right tool for the job according to the tool description: extraction_sandbox_agent for data extraction, timeseries_plot_sandbox_agent for time series plotting and map_plot_sandbox_agent for map plotting.
 - No superfluous data extraction steps before calling plotting tools.
 - Tool inputs contain all details required in tool descriptions.
+
+Tool Prompt Example for map_plot_sandbox_agent:
+- "Plot change_over_period readings for calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series between 1 January 2025 12:00:00 PM and 31 January 2025 11:59:59 PM centred on instrument ID INST123 with a radius of 500 metres using a buffer of 72 hours to find readings. Exclude instruments INST456 and INST789."
+Note: Inclusion of plot type (`change_over_period`), data type (`readings`), instrument types ("LP", "VWP"), subtypes ("MOVEMENT", "DEFAULT"), database field names (`calculation1`, `data2`), measured quantity names ("settlement", "groundwater level"), abbreviated units ("mm", "mPD"), start and end times (from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM), center instrument ID (on INST123), radius (500 metres), excluded instruments (INST456, INST789), and buffer period (72 hours).
 """
 )
 

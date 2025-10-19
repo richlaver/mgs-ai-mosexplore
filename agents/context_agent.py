@@ -323,7 +323,7 @@ def get_fields_from_json(instrument_data: Dict[str, Any], instr_type: str, instr
             db_fields.append(DbField(
                 db_name=field.get('database_field_name', ''),
                 db_type=field.get('database_field_type', 'data'),
-                labels=[field.get('database_field_name', '')],
+                labels=field.get('common_names', ''),
                 description=field.get('description', ''),
                 units=field.get('unit', field.get('units', ''))
             ))

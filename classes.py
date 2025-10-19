@@ -34,6 +34,19 @@ class QueryWords(BaseModel):
     query_words: str = Field(description="Words extracted from query")
     data_sources: List[DbSource] = Field(description="Data sources and background info relevant to words extracted from query")
 
+class RelevantTimeRange(BaseModel):
+    """Time range relevant to user query."""
+    description: str = Field(description="Description of what in the query the time range refers to and how it should be used")
+    start_time: str = Field(description="Start time in ISO 8601 format")
+    end_time: str = Field(description="End time in ISO 8601 format")
+
+class RelevantPlaceCoordinates(BaseModel):
+    """Geographical coordinates relevant to user query."""
+    description: str = Field(description="Description of what in the query the place coordinates refer to and how they should be used")
+    easting: float = Field(description="Easting coordinate in decimal degrees")
+    northing: float = Field(description="Northing coordinate in decimal degrees")
+    radius_metres: float = Field(description="Radius around coordinates in metres")
+
 class Context(BaseModel):
     """Contextual info to interpret query semantics."""
     retrospective_query: str = Field(description="Query rephrased from current query to incorporate chat history")
@@ -42,6 +55,10 @@ class Context(BaseModel):
     unverif_IDs: List[str] = Field(description="Instrument IDs in query not found in database")
     word_context: List[QueryWords] = Field(description="How query words relate to where to get data and background info to answer")
     edge_case: bool = Field(description="Indicates whether the user query is an edge case", default=False)
+    relevant_time_range: Optional[RelevantTimeRange] = Field(description="Time range relevant to user query", default=None)
+    review_level_context: Optional[str] = Field(description="Context on anything to do with review levels mentioned in query", default=None)
+    relevant_place_coordinates: Optional[RelevantPlaceCoordinates] = Field(description="Geographical coordinates relevant to user query", default=None)
+    web_info: Optional[str] = Field(description="Additional relevant information from web search", default=None)
 
 class Suggestion(BaseModel):
     """Follow-on queries suggested to user."""

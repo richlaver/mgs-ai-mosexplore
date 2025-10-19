@@ -37,6 +37,7 @@ image = (
         "b2sdk",
         "psycopg2-binary",
         "requests",
+        "sqlglot",
         "streamlit"
     )
     .add_local_file("classes.py", remote_path="/root/classes.py")

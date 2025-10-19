@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Type
 import pandas as pd
 from pydantic import BaseModel, Field
 import sqlparse
+from sqlglot import parse_one, exp
 from langchain_community.tools.sql_database.tool import QuerySQLCheckerTool
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.language_models import BaseLanguageModel
@@ -80,8 +81,9 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
     7. Use meaningful AS aliases for all selected columns that give full meaning to extracted results (e.g., SELECT value AS settlement_mm).
     8. Ensure the query is read-only (no writes).
     9. Always qualify column names with table aliases in joins to avoid ambiguity.
-    10. If the prompt specifies 'Output columns: [col1, col2, ...]', use these exact names as aliases in the SELECT clause. Enclose all aliases in backticks, e.g., AS `settlement_(mm)`.
+    10. If the prompt specifies 'Output columns: [col1, col2, ...]', use these exact names as aliases in the SELECT clause. Enclose all aliases in backticks, e.g., AS `settlement_(mm)`. Do not add extra columns.
     11. Fields named 'calculation1', 'calculation2'... etc. are accessible from the JSON stored in the 'custom_fields' column of the 'mydata' table.
+    12. When extracting on a specific date, NEVER filter using a single date. Instead use a date range to ensure data is found. For example, for '2023-10-15', use "timestamp >= '2023-10-15 00:00:00' AND timestamp < '2023-10-16 00:00:00'".
 
     Think step-by-step in your reasoning.
     Finally, output ONLY the selected SQL query (no explanations or extra text).
@@ -195,74 +197,43 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             expected_columns = [col.strip() for col in columns_str.split(',') if col.strip()]
             logger.debug("[check_sql] Expected columns from prompt: %s", expected_columns)
 
-        # Parse SQL query to extract aliases
-        alias_match = False
+        # Parse SQL query to extract aliases using sqlglot
         try:
-            parsed = sqlparse.parse(sql_query)[0]
-            select_tokens = next((stmt for stmt in parsed.tokens if isinstance(stmt, sqlparse.sql.IdentifierList)), None)
-            if select_tokens:
-                aliases = []
-                for token in select_tokens.get_identifiers():
-                    # Token is an Identifier (e.g., 'md.instr_id AS instrument_id' or 'MAX(...) AS alias')
-                    alias = None
-                    # Try get_alias() first
-                    alias = token.get_alias()
-                    if alias:
-                        alias = str(alias).strip('`')
-                        aliases.append(alias)
+            ast = parse_one(sql_query, dialect='mysql')  # Use 'mysql' dialect for JSON_EXTRACT support
+            select = ast.find(exp.Select)
+            if not select:
+                raise ValueError("No SELECT clause found in query")
+            
+            aliases = []
+            for expression in select.expressions:
+                alias = expression.alias
+                if not alias:
+                    # Fallback to the expression's name or unaliased column name
+                    alias = expression.alias_or_name or str(expression.this or '').strip('`')
+                    if not alias:
+                        logger.warning("[check_sql] No alias or name for expression: %s", str(expression))
                         continue
-                    
-                    tokens = list(token.tokens)
-                    as_index = None
-                    for i, t in enumerate(tokens):
-                        if t.match(sqlparse.tokens.Keyword, 'AS'):
-                            as_index = i
-                            break
-                    if as_index is not None and as_index + 1 < len(tokens):
-                        alias_token = tokens[as_index + 1]
-                        if isinstance(alias_token, (sqlparse.sql.Identifier, sqlparse.sql.Token)):
-                            alias = str(alias_token).strip('`')
-                            aliases.append(alias)
-                        else:
-                            logger.warning("[check_sql] Unexpected alias token type for token %s: %s", str(token), type(alias_token))
-                            continue
-                    else:
-                        # Fallback to column name for simple columns
-                        name = token.get_name()
-                        if name:
-                            aliases.append(name)
-                            logger.debug("[check_sql] Using column name as alias: %s", name)
-                        else:
-                            logger.warning("[check_sql] No alias or name for token: %s", str(token).strip())
-                            continue
-                logger.debug("[check_sql] Extracted aliases: %s", aliases)
+                aliases.append(alias.strip('`'))
+            
+            logger.debug("[check_sql] Extracted aliases: %s", aliases)
 
-                # Compare aliases with expected columns
-                if expected_columns and aliases != expected_columns:
-                    error_msg = f"Error: SQL query aliases {aliases} do not match expected columns {expected_columns}."
-                    previous_errors.append(f"SQL: {sql_query}\n{error_msg}")
-                    messages.append(AIMessage(
-                        name="ExtractionSandboxAgent",
-                        content=error_msg,
-                        additional_kwargs={"stage": "intermediate", "process": "observation"}
-                    ))
-                    logger.error("[check_sql] %s", error_msg)
-                    logger.debug("[check_sql] end (alias mismatch) | duration=%.3fs", time.perf_counter() - t0)
-                    return {
-                        "query_error": error_msg,
-                        "previous_errors": previous_errors,
-                        "sql_query": None,
-                        "messages": messages
-                    }
-                else:
-                    alias_match = True
-            else:
-                logger.warning("[check_sql] No IdentifierList found in SELECT clause")
+            # Compare aliases with expected columns
+            if expected_columns and sorted(aliases) != sorted(expected_columns):  # Sort to ignore order
+                error_msg = f"Error: SQL query aliases {aliases} do not match expected columns {expected_columns}."
+                previous_errors.append(f"SQL: {sql_query}\n{error_msg}")
                 messages.append(AIMessage(
                     name="ExtractionSandboxAgent",
-                    content="No columns found in SELECT clause. Proceeding to query validation.",
+                    content=error_msg,
                     additional_kwargs={"stage": "intermediate", "process": "observation"}
                 ))
+                logger.error("[check_sql] %s", error_msg)
+                logger.debug("[check_sql] end (alias mismatch) | duration=%.3fs", time.perf_counter() - t0)
+                return {
+                    "query_error": error_msg,
+                    "previous_errors": previous_errors,
+                    "sql_query": None,
+                    "messages": messages
+                }
         except Exception as e:
             error_msg = f"Error: Failed to parse SQL for alias check: {str(e)}."
             previous_errors.append(f"SQL: {sql_query}\n{error_msg}")
@@ -281,48 +252,44 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             }
 
         # Proceed with existing query validation only if alias check passed
-        if alias_match:
-            try:
-                check_result = checker_tool.invoke({"query": sql_query})
-                logger.debug("[check_sql] raw check result (len=%d): %s", len(str(check_result)), str(check_result)[:500])
-                corrected_query = re.sub(r'^```sql\n|```$', '', check_result).strip()
-                if corrected_query != sql_query:
-                    correction_msg = f"Query was corrected to: {corrected_query}"
-                    previous_errors.append(f"SQL: {sql_query}\nCorrection: {correction_msg}")
-                    messages.append(AIMessage(
-                        name="ExtractionSandboxAgent",
-                        content=f"SQL query corrected: {correction_msg}",
-                        additional_kwargs={"stage": "intermediate", "process": "observation"}
-                    ))
-                    logger.debug("[check_sql] query corrected")
-                    sql_query = corrected_query
-                else:
-                    messages.append(AIMessage(
-                        name="ExtractionSandboxAgent",
-                        content="SQL query validation passed.",
-                        additional_kwargs={"stage": "intermediate", "process": "observation"}
-                    ))
-                logger.debug("[check_sql] end | duration=%.3fs", time.perf_counter() - t0)
-                return {"sql_query": sql_query, "query_error": None, "messages": messages}
-            except Exception as e:
-                error_msg = f"Error: Check failed: {str(e)}"
-                previous_errors.append(f"SQL: {sql_query}\n{error_msg}")
+        try:
+            check_result = checker_tool.invoke({"query": sql_query})
+            logger.debug("[check_sql] raw check result (len=%d): %s", len(str(check_result)), str(check_result)[:500])
+            corrected_query = re.sub(r'^```sql\n|```$', '', check_result).strip()
+            if corrected_query != sql_query:
+                correction_msg = f"Query was corrected to: {corrected_query}"
+                previous_errors.append(f"SQL: {sql_query}\nCorrection: {correction_msg}")
                 messages.append(AIMessage(
                     name="ExtractionSandboxAgent",
-                    content=f"{error_msg}",
+                    content=f"SQL query corrected: {correction_msg}",
                     additional_kwargs={"stage": "intermediate", "process": "observation"}
                 ))
-                logger.error("[check_sql] %s", error_msg)
-                logger.debug("[check_sql] end (check error) | duration=%.3fs", time.perf_counter() - t0)
-                return {
-                    "query_error": error_msg,
-                    "previous_errors": previous_errors,
-                    "sql_query": None,
-                    "messages": messages
-                }
-        else:
-            # If alias check failed, already returned above
-            pass
+                logger.debug("[check_sql] query corrected")
+                sql_query = corrected_query
+            else:
+                messages.append(AIMessage(
+                    name="ExtractionSandboxAgent",
+                    content="SQL query validation passed.",
+                    additional_kwargs={"stage": "intermediate", "process": "observation"}
+                ))
+            logger.debug("[check_sql] end | duration=%.3fs", time.perf_counter() - t0)
+            return {"sql_query": sql_query, "query_error": None, "messages": messages}
+        except Exception as e:
+            error_msg = f"Error: Check failed: {str(e)}"
+            previous_errors.append(f"SQL: {sql_query}\n{error_msg}")
+            messages.append(AIMessage(
+                name="ExtractionSandboxAgent",
+                content=f"{error_msg}",
+                additional_kwargs={"stage": "intermediate", "process": "observation"}
+            ))
+            logger.error("[check_sql] %s", error_msg)
+            logger.debug("[check_sql] end (check error) | duration=%.3fs", time.perf_counter() - t0)
+            return {
+                "query_error": error_msg,
+                "previous_errors": previous_errors,
+                "sql_query": None,
+                "messages": messages
+            }
 
     def execute_sql(state: ExtractionSandboxAgentState) -> ExtractionSandboxAgentState:
         t0 = time.perf_counter()
@@ -412,9 +379,11 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             should_retry = True
             retry_reason = query_error
         elif execution_result and isinstance(execution_result, str):
-            if execution_result.startswith("Error:") or no_data_msg in execution_result:
+            retry_reason = execution_result
+            if execution_result.startswith("Error:"):
                 should_retry = True
-                retry_reason = execution_result
+            elif no_data_msg in execution_result:
+                should_retry = False
 
         if should_retry:
             new_attempt_count = attempt_count + 1
