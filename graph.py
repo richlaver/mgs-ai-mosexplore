@@ -1,8 +1,10 @@
+from agents.history_summariser_agent import history_summariser
 from agents.planner_coder_agent import planner_coder_agent
 from agents.reporter_agent import reporter_agent
 from classes import AgentState
 from agents.context_agent import context_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
+from agents.context_orchestrator import get_context_graph
 
 from langgraph.graph import StateGraph, END
 
@@ -39,6 +41,39 @@ def build_codeact_graph(
         if progress_msg:
             return {"messages": [progress_msg]}
         return {"messages": []}
+    
+    def history_summariser_node(state: AgentState) -> dict:
+        retrospective_query = history_summariser(
+            messages=state.messages,
+            llm=llm
+        )
+        new_context = state.context.model_copy(update={"retrospective_query": retrospective_query})
+        return {"context": new_context}
+
+    def context_orchestrator_node(state: AgentState):
+        sub_input = {
+            "messages": state.messages,
+            "context": state.context,
+            "clarification_request": ""
+        }
+
+        sub_graph = get_context_graph(llm, db)
+        accumulated_context = state.context  # Track final context
+        for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
+            logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')
+            # Extract messages and any context updates from sub-chunk
+            new_messages = []
+            for node, update in sub_chunk.items():
+                if update:
+                    new_messages.extend(update.get("messages", []))
+                logger.info(f'Context Orchestrator update from node {node}: {update}')
+
+            # Yield progress messages in real-time
+            logger.info(f'Yielding new messages from Context Orchestrator: {new_messages}')
+            yield {"messages": new_messages}
+
+        # Final yield for complete state (e.g., final context)
+        # yield {"context": accumulated_context}
 
     def query_enricher_node(state: AgentState) -> dict:
         return context_agent(llm=llm, chat_history=state.messages, db=db)
@@ -186,6 +221,10 @@ def build_codeact_graph(
 
     logger.debug("Building CodeAct graph with tables=%d relationship_nodes=%d user_id=%s", len(table_info), len(table_relationship_graph or {}), user_id)
     graph = StateGraph(AgentState)
+    graph.add_node("history_summariser_messenger_node", lambda state: progress_messenger_node(state, "history_summariser_node"))
+    graph.add_node("history_summariser_node", history_summariser_node)
+    graph.add_node("context_orchestrator_messenger_node", lambda state: progress_messenger_node(state, "context_orchestrator_node"))
+    graph.add_node("context_orchestrator_node", context_orchestrator_node)
     graph.add_node("query_enricher_node", query_enricher_node)
     graph.add_node("planner_coder_messenger_node", lambda state: progress_messenger_node(state, "planner_coder_node"))
     graph.add_node("planner_coder_node", planner_coder_node)
@@ -194,9 +233,12 @@ def build_codeact_graph(
     graph.add_node("reporter_messenger_node", lambda state: progress_messenger_node(state, "reporter_node"))
     graph.add_node("reporter_node", reporter_node)
 
-    graph.set_entry_point("query_enricher_node")    
+    graph.set_entry_point("history_summariser_messenger_node")
+    graph.add_edge("history_summariser_messenger_node", "history_summariser_node")
+    graph.add_edge("history_summariser_node", "context_orchestrator_messenger_node")
+    graph.add_edge("context_orchestrator_messenger_node", "context_orchestrator_node")
     graph.add_conditional_edges(
-        "query_enricher_node",
+        "context_orchestrator_node",
         router_after_context,
         {
             "continue_execution": "planner_coder_messenger_node",

@@ -6,6 +6,7 @@ import json
 import uuid
 import logging
 
+from classes import Context
 from parameters import users, table_info
 from graph import build_codeact_graph
 import setup
@@ -277,7 +278,8 @@ def render_initial_ui() -> None:
 
 def prepend_message_icon(message):
     process_icon_map = {
-        'query_enricher': 'search',
+        'history_summariser': 'summarize',
+        'context_orchestrator': 'search',
         'router': 'shuffle',
         'planner_coder': 'lightbulb',
         'code_checker': 'policy',
@@ -436,7 +438,9 @@ def render_chat_content() -> None:
         }
         initial_state = {
             "messages": st.session_state.messages,
-            "timings": []
+            "context": Context(
+                retrospective_query=""
+            )
         }
 
         with st.spinner("Generating..."):

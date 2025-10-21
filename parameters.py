@@ -1,5 +1,21 @@
 from langchain_core.messages import AIMessage
 progress_messages = {
+    'context_orchestrator_node': AIMessage(
+        name="ContextOrchestrator",
+        content="Gathering context on query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "context_orchestrator"
+        }
+    ),
+    'history_summariser_node': AIMessage(
+        name="HistorySummariser",
+        content="Summarising the chat history...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "history_summariser"
+        }
+    ),
     'planner_coder_node': AIMessage(
         name="PlannerCoder",
         content="Thinking up a strategy to answer your query...",

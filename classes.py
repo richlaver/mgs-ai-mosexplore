@@ -50,11 +50,11 @@ class RelevantPlaceCoordinates(BaseModel):
 class Context(BaseModel):
     """Contextual info to interpret query semantics."""
     retrospective_query: str = Field(description="Query rephrased from current query to incorporate chat history")
-    ignore_IDs: List[str] = Field(description="Query words user has flagged as not instrument IDs")
-    verif_ID_info: Dict[str, Dict[str, str]] = Field(description="Mapping of verified instrument IDs to type/subtype info, e.g. {'0003-L-2': {'type': 'LP', 'subtype': 'MOVEMENT'}}", default_factory=dict)
-    unverif_IDs: List[str] = Field(description="Instrument IDs in query not found in database")
-    word_context: List[QueryWords] = Field(description="How query words relate to where to get data and background info to answer")
-    edge_case: bool = Field(description="Indicates whether the user query is an edge case", default=False)
+    ignore_IDs: Optional[List[str]] = Field(description="Query words user has flagged as not instrument IDs", default=None)
+    verif_ID_info: Optional[Dict[str, Dict[str, str]]] = Field(description="Mapping of verified instrument IDs to type/subtype info, e.g. {'0003-L-2': {'type': 'LP', 'subtype': 'MOVEMENT'}}", default=None)
+    unverif_IDs: Optional[List[str]] = Field(description="Instrument IDs in query not found in database", default=None)
+    word_context: Optional[List[QueryWords]] = Field(description="How query words relate to where to get data and background info to answer", default=None)
+    edge_case: Optional[bool] = Field(description="Indicates whether the user query is an edge case", default=None)
     relevant_time_range: Optional[RelevantTimeRange] = Field(description="Time range relevant to user query", default=None)
     review_level_context: Optional[str] = Field(description="Context on anything to do with review levels mentioned in query", default=None)
     relevant_place_coordinates: Optional[RelevantPlaceCoordinates] = Field(description="Geographical coordinates relevant to user query", default=None)
@@ -78,7 +78,7 @@ class AgentState(BaseModel):
     messages: Annotated[List[BaseMessage], operator.add] = Field(description="Conversation and tool messages", default_factory=list)
     context: Optional[Context] = Field(description="Info giving context to query", default=None)
     coding_attempts: List[CodingAttempt] = Field(description="History of coding attempts", default_factory=list)
-    suggestion: Annotated[List[Suggestion], operator.add] = Field(description="Follow-on queries suggested to user", default_factory=list)
+    suggestions: Annotated[List[Suggestion], operator.add] = Field(description="Follow-on queries suggested to user", default_factory=list)
     
     def get_current_coding_attempt(self) -> Optional[CodingAttempt]:
         """
