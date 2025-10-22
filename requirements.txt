@@ -3,6 +3,7 @@ b2sdk
 geoalchemy2
 langchain_core
 typing_extensions
+langchain
 langchain_community
 langgraph
 langchain_google_vertexai
