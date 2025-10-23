@@ -21,104 +21,185 @@ planner_coder_prompt = PromptTemplate(
         "tools_str",
         "previous_attempts_summary",
     ],
-    template="""You are an expert in creating robust execution plans and implementing them in Python code for helping to answer complex database queries using instrumentation monitoring data.
+    template="""
+# Role
+You are an expert in creating robust execution plans and implementing them in Python code to answer queries on instrumentation monitoring data in a database.
 
-Current date: {current_date}
-
-User query rephrased to incorporate chat history context:
+# Task
+Generate code to answer the following user query plus an optional extension that adds value:
 {retrospective_query}
 
-Verified instrument IDs in query:
-{verified_instrument_ids}
-
-Verified instrument ID details (JSON mapping of ID -> {{type, subtype}}):
+# Context
+- Current date:
+{current_date}
+- Instrument IDs in query with their type and subtype:
 {verified_instrument_info_json}
-
-Structured instrument & field context (JSON format):
+- Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data):
 {word_context_json}
-
-Relevant date ranges and explanations (JSON list of {{explanation, start_datetime, end_datetime}}):
+- Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
-
-Available tools (name and description):
+- Tools available to your code:
 {tools_str}
-
-Summary of previous failed attempts:
+- Summary of previous failed coding attempts:
 {previous_attempts_summary}
 
-Thought processes (DO NOT include in output):
-1. Review and understand the query.
-2. Deduce the user's underlying intention or need based on the query and context.
-3. Brainstorm 3 alternative high-level strategies to answer the query using provided instrument context, data availability, and calculation feasibility.
-   - For each: numbered high-level steps, pros, cons, probability of success (high/medium/low).
-   - Explicitly state how each alternative avoids failure modes from previous attempts.
-4. Evaluate the three alternatives comparatively (success probability, latency, completeness, robustness, simplicity).
-5. Select the best alternative with justification.
-6. Based on the deduced intention, brainstorm 3 possible helpful query extensions that add value. Each must be executable with the available database, tools, and coding abilities. Keep to one simple helpful addition.
-7. DO NOT output the above in any code comments. This is important to save tokens.
-8. Select the one extension most likely to contribute value in relation to the original query, with justification.
-9. Think up a detailed execution plan as a numbered list (1., 2., 3., ...). Incorporate the selected extension as optional last steps. Each step must be action-oriented:
-   - Specify instrument type/subtype & database field names to extract.
-    - Explicit filters (date ranges, instrument IDs) or how to derive them, using relevant_date_ranges_json and following each range's explanation on how to apply (e.g., take latest reading within range, take all readings, or use two ranges for change-over-period).
-   - When to call extraction_sandbox_agent (describe the prompt for SQL generation).
-   - When to perform calculations (describe formula/aggregation).
-   - Ensure logic: gather data -> validate -> calculate -> optional extension -> finalize.
-   - Prefer minimal extractions; combine fields in one if possible.
-   - If visualizations enhance the response, invoke plotting tools (timeseries_plot_sandbox_agent or map_plot_sandbox_agent) and yield their results as specified below.
-   - Do not extract data for plotting tools — the tools will extract data themselves.
-   - If no data is found on the exact time specified in the query, use the extraction_sandbox_agent tool to find data which is closest to the time. This technique is particularly useful for defining the buffer period of map plots.
-   - If the query requires extraction of data but does not specify a time or requires most recent data, use the extraction_sandbox_agent tool with a date range from 1 January 1900 00:00:00 to the current date to find the most recent data available.
-   - DO NOT attempt to extract data from the future. All data is recorded in the past.
+# Constraints on Your Generated Code
+## Structure
+- Write a single function named `execute_strategy` that takes no parameters and returns a generator yielding dictionaries defined as:
+`def execute_strategy() -> Generator[dict, None, None]:`
+- Omit docstrings.
+- Dynamically respond to extracted data and errors for robustness.
+- Use `try`-`except` blocks to handle exceptions but continuing where possible.
+- Already in environment (DO NOT import):
+  * `extraction_sandbox_agent`
+  * `timeseries_plot_sandbox_agent`
+  * `map_plot_sandbox_agent`
+  * `datetime` module (NOT class)
+- Available for import:
+  * `numpy`
+  * `pandas`
 
-Task for output:
-10. Generate the Python code implementing the plan.
+## Yielded Output
+- Yield dictionaries as:
+{{
+    "content": str,
+    "metadata":
+        {{
+            "timestamp": `datetime.datetime.now(timezone.utc).isoformat()`,
+            "step": step number in execution plan (int),
+            "type": "progress"|"error"|"final"|"plot"
+        }}
+}}
+- When to yield different types:
+  * "progress": at start of each step
+  * "error": on exceptions, with error message
+  * "final": after all steps with result summary for query and optional extension, self-explanatory and comprehensive for downstream interpretation
+  * "plot": when calling a plotting tool
+- ALWAYS yield a "final" output.
+- For "plot" yields write content as:
+{{
+    "tool_name": "timeseries_plot_sandbox_agent"|"map_plot_sandbox_agent",
+    "description": detailed description of plot,
+    "artefact_id": artefact ID of plot
+}}
 
-Code Generation Constraints:
-- Acquire inputs via tools in scope: call tool.invoke(input).
-- extraction_sandbox_agent.invoke(prompt_str) expects str prompt, returns pandas.DataFrame or None.
-- timeseries_plot_sandbox_agent.invoke(prompt_str) and map_plot_sandbox_agent.invoke(prompt_str) expect a str natural language prompt describing the plot, returns artefact ID to access plot in file system or None.
-- Write tool inputs to include ALL details in tool descriptions.
-- Use relevant_date_ranges_json as the authoritative source for date filtering and follow each range's explanation and start/end datetimes to choose the correct selection rule (e.g., select latest reading within range, use both start/end ranges for change over period, include all readings when explicitly requested).
-- When composing natural-language prompts for plotting tools, convert ISO 8601 timestamps from relevant_date_ranges_json into the human-readable form shown in examples (e.g., "1 January 2025 12:00:00 PM").
-- In scope: llm (BaseLanguageModel), db (SQLDatabase), extraction_sandbox_agent, timeseries_plot_sandbox_agent, map_plot_sandbox_agent, datetime module.
-- Import standard libraries inside the function (e.g., from datetime import datetime, timezone; import pandas as pd; import json).
-- No network calls or file I/O.
-- Function signature: def execute_strategy() -> Generator[dict, None, None]: (NO parameters).
-- Only insert comments explaining each step, no other comments
-- Comments must be directly relevant to step they precede
+## Commenting
+- Divide into code blocks, each corresponding to a step in the execution plan.
+- Precede each code block with comments explaining block:
+  * Step number and summary
+  * Rationale: why step is needed
+  * Implementation: how step is implemented
+- No other comments apart from block explanations to save tokens.
 
-Yielded Outputs:
-- Yield dicts: {{ "content": str, "metadata": {{ "timestamp": str ISO8601 UTC, "step": int, "node": str, "type": "progress"|"error"|"final"|"plot" }} }}
-- timestamp: datetime.now(timezone.utc).isoformat()
-- step: the plan step number (int).
-- node: "execute_strategy" for all yields.
-- type "progress": yield at start ("Starting step N: short summary") and end ("Completed step N: brief status") of each step.
-- type "error": on exceptions, with error message; continue if possible (especially for extension).
-- type "final": one at end with self-explanatory summarizing result (answer query + optional extension; comprehensive for downstream interpretation).
-- type "plot": content is json.dumps({{ "tool_name": "timeseries_plot_sandbox_agent" or "map_plot_sandbox_agent", "description": detailed_description, "artefact_id": artefact_id }}).
-- If extension fails, still yield final answering main query.
-- Dynamically indicate success of steps.
+# Tools
+## `extraction_sandbox_agent`
+### How to Use
+- Use to extract data from database with `extraction_sandbox_agent.invoke(prompt_str)`.
+- Prompt is natural language description of data to extract.
+- Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
+- Always include `Output columns` in prompt to specify DataFrame column names.
+- Returns `pandas.DataFrame` or `None`.
+- Combine data extraction steps when possible to reduce latency.
+### Example Prompt
+"Extract readings:
+- Database field name: calculation1
+- Database field type: calc
+- Label: Settlement
+- Unit: mm
+- Instrument IDs: 0003-L-1, 0003-L-2
+- Instrument type: LP
+- Instrument subtype: MOVEMENT
+- Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM
+- Order: by settlement ascending
+- Filter: settlement < -10 mm
+- Output columns: [Timestamp, Settlement (mm)]"
 
-Code Structure:
-- def execute_strategy() -> Generator[dict, None, None]:
-- For each step N:
-  # Step N: <summary>
-  # Rationale: <why>
-  # Implementation: <how>
-  <code for step N, including yields>
-- Wrap risky parts in try/except; yield error and continue/return as appropriate.
-- If critical failure, yield error and return.
+## `timeseries_plot_sandbox_agent`
+### How to Use
+- Use to display change of data with time for one or more series with `timeseries_plot_sandbox_agent.invoke(prompt_str)`.
+- Prompt is natural language description of plot which MUST include:
+  * Instrument IDs for each series
+  * Database field names for extracting data
+  * Time range
+  * Axis label (get from background to query)
+  * Axis unit (get from background to query)
+- You can also specify:
+  * Secondary y-axis with title and unit
+  * Review levels to overlay
+  * Whether to highlight y-axis zero line
+- Returns artefact ID to access plot in file system or `None`.
+- DO NOT use `extraction_sandbox_agent` to extract data for plotting because `timeseries_plot_sandbox_agent` extracts the data it needs.
+### Example Prompt
+"Plot temperature with time for instrument 0001-L-1 along with settlement with time for instruments 0003-L-1 and 0003-L-2:
+- Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM
+- Series 1 on primary axis:
+  * Instrument ID: 0001-L-1
+  * Database field name: data1
+  * Database field type: data
+  * Axis label: Temperature
+  * Axis unit: °C
+- Series 2 on secondary axis:
+  * Instrument IDs: 0003-L-1, 0003-L-2
+  * Database field name: calculation1
+  * Database field type: calc
+  * Axis label: Settlement
+  * Axis unit: (mm)
+  * Review levels: -10, -5, -2, 2, 5, 10"
 
-Think step by step following requirements 1-10 above. Output ONLY the code.
+## `map_plot_sandbox_agent`
+### How to Use
+- Use to display spatial distribution of readings or review status with `map_plot_sandbox_agent.invoke(prompt_str)`.
+- Readings or review status can be plotted as at single time or as change over period.
+- Can plot multiple series with different instrument types, subtypes and database fields.
+- Prompt is natural language description of plot which MUST include:
+  * Whether plotting readings or review status
+  * Whether plotting at single time or change over period
+  * Time if single time or time range if change over period
+  * Buffer period to look for missing readings (get from date ranges relevant to query)
+  * For each series:
+    + Instrument type
+    + Instrument subtype
+    + Database field name
+    + Label (get from background to query)
+    + Unit (get from background to query)
+  * Centre of plot either as instrument ID or easting and northing
+  * Extent of plot as radius in metres
+  * Any specific instrument IDs to exclude from plot e.g. if large values would distort colour scale
+- Returns artefact ID to access plot in file system or `None`.
+- DO NOT use `extraction_sandbox_agent` to extract data for plotting because `map_plot_sandbox_agent` extracts the data it needs.
 
-Check your code for the following:
-- Calling the right tool for the job according to the tool description: extraction_sandbox_agent for data extraction, timeseries_plot_sandbox_agent for time series plotting and map_plot_sandbox_agent for map plotting.
-- No superfluous data extraction steps before calling plotting tools.
-- Tool inputs contain all details required in tool descriptions.
+### Example Prompt
+"Plot change of readings over period as a map:
+- Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM
+- Buffer for missing readings: 3 days
+- Plot centred on instrument ID 0002-P-1
+- Plot extent: 200 metres radius
+- Series 1:
+  * Instrument type: LP
+  * Instrument subtype: MOVEMENT
+  * Database field name: calculation1
+  * Label: Settlement
+  * Unit: mm
+- Series 2:
+  * Instrument type: VWP
+  * Instrument subtype: DEFAULT
+  * Database field name: data2
+  * Label: Groundwater level
+  * Unit: mPD
+- Instrument IDs to exclude: 0003-L-2"
 
-Tool Prompt Example for map_plot_sandbox_agent:
-- "Plot change_over_period readings for calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series between 1 January 2025 12:00:00 PM and 31 January 2025 11:59:59 PM centred on instrument ID INST123 with a radius of 500 metres using a buffer of 72 hours to find readings. Exclude instruments INST456 and INST789."
-Note: Inclusion of plot type (`change_over_period`), data type (`readings`), instrument types ("LP", "VWP"), subtypes ("MOVEMENT", "DEFAULT"), database field names (`calculation1`, `data2`), measured quantity names ("settlement", "groundwater level"), abbreviated units ("mm", "mPD"), start and end times (from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM), center instrument ID (on INST123), radius (500 metres), excluded instruments (INST456, INST789), and buffer period (72 hours).
+# Sequential Instructions
+1. Analyse the user query to understand what is being asked.
+2. Deduce the user's underlying need.
+3. Think up an optional extension to the query that adds value to the user's need.
+4. Produce a step-by-step execution plan to answer the query and optional extension. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
+5. Write the code to implement the execution plan.
+6. Check code for:
+  - Logic to answer query
+  - Adheres to constraints
+  - Calls tools correctly with necessary inputs
+  - Yielded outputs formed correctly
+7. Output only the code.
 """
 )
 
@@ -165,9 +246,7 @@ def planner_coder_agent(
     """
     retrospective_query = context.retrospective_query if context else ""
     word_context_json = json.dumps([qw.model_dump() for qw in context.word_context] if context and context.word_context else [], indent=2)
-    verified_instrument_ids = ", ".join((context.verif_ID_info or {}).keys()) if context else "None"
     verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
-    logger.debug(f"Word context JSON: {word_context_json}")
     relevant_date_ranges_json = json.dumps([
         r.model_dump() for r in (context.relevant_date_ranges or [])
     ], indent=2) if context else "[]"
@@ -193,7 +272,6 @@ def planner_coder_agent(
         response = chain.invoke({
             "current_date": current_date,
             "retrospective_query": retrospective_query,
-            "verified_instrument_ids": verified_instrument_ids,
             "verified_instrument_info_json": verified_instrument_info_json,
             "word_context_json": word_context_json,
             "relevant_date_ranges_json": relevant_date_ranges_json,

@@ -63,69 +63,6 @@ users = [
         'display_name': 'Not-Existent User' 
     },
 ]
-context1 = {
-    'instrument_types': [
-        {'settlement marker': """
-            A point on the ground or a structure whose level or elevation is surveyed to ascertain vertical movement. 
-            Typical types include ground, utility, building and track settlement markers.
-            It measures vertical displacement of a location.
-            Typical fields include:
-            - settlement: vertical displacement measured positive downwards (common units: millimetre, mm)
-            - level: surveyed level or elevation of settlement marker (common units: mRL, mPD)
-        """},
-        {'piezometer': """
-            A piezometer installed in the ground to measure hydraulic head.
-            It measures hydraulic head at a location.
-            Common alternative names include standpipe, vibrating wire piezometer, observation well.
-        """}
-    ]
-}
-context = {
-    'instrument_types': [
-        {
-            'settlement marker': {
-                'alternative_names': [],
-                'context_for_type_config_normalized': {
-                    'regex_for_type': ['[A-Z]*SM'],
-                    'keywords_for_user_field_name': ['settlement'],
-                    'keywords_for_user_label': ['settlement'],
-                    'keywords_for_user_description': ['settlement'],
-                },
-                'regex_for_common_abbreviations': ['[A-Z]*SM'],
-                'function': 'measures vertical displacement of a location',
-                'description': 'A point on the ground or a structure whose level or elevation is surveyed to ascertain \
-                    vertical movement. Typical types include ground, utility, building and track settlement markers.',
-                'fields': [
-                    {
-                        'names': ['settlement'],
-                        'keywords': ['settlement'],
-                        'description': 'vertical displacement measured positive downwards',
-                        'common_units': ['millimetre', 'mm']
-                    },
-                    {
-                        'names': ['level'],
-                        'keywords': ['survey', 'elevation'],
-                        'description': 'surveyed level or elevation of settlement marker',
-                        'common_units': ['mRL', 'mPD']
-                    }
-                ]
-            }
-        },
-        {
-            'piezometer': {
-                'alternative_names': ['standpipe', 'vibrating wire piezometer', 'observation well'],
-                'context_for_type_config_normalized': {
-                    'regex_for_type': ['VWP', 'SP', 'OW'],
-                    'keywords_for_user_field_name': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
-                    'keywords_for_user_label': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
-                    'keywords_for_user_description': ['water', 'groundwater', 'piezometric', 'head', 'pressure', 'level', 'pore pressure'],
-                },
-                'regex_for_common_abbreviations': ['VWP', 'SP', 'OW'],
-                'function': 'measures hydraulic head at a location',
-                'description': 'A piezometer installed in the ground to measure hydraulic head.'
-            }
-        }    ]
-}
 table_info = [
     {
         'name': 'geo_12_users',
@@ -267,9 +204,7 @@ table_info = [
     },
     {
         'name': 'instrum',
-        'description': 'Table listing instruments. Use the object_ID column to reference table type_config_normalized for \
-            context on instrument fields and hence the instrument type. DO NOT rely on the type1 and subtype1 columns as these are \
-            labels for system categorisation only.',
+        'description': 'Table listing instruments.',
         'columns': [
             {'name': 'id', 'description': 'unique identifier for instrument'},
             {'name': 'object_ID', 'description': 'composite identifier for type1 and subtype1 columns'},
@@ -316,9 +251,7 @@ table_info = [
         'name': 'mydata',
         'description': 'Table listing approved uploaded time-series readings from instruments. \
          Calculated fields are processed values calculated from uploaded readings. \
-         Calculated fields are named sequentially calculation1, calculation2 etc. \
-         ALWAYS reference table type_config_normalized to get the context for system field names data1, data2, ... data12. \
-         Table type_config_normalized can be referenced via table instrum using instr_id and object_ID columns.',
+         Calculated fields are named sequentially calculation1, calculation2 etc.',
         'columns': [
             {'name': 'instr_id', 'description': 'id of instrument where reading was taken. References column instr_id of table instrum'},
             {'name': 'date1', 'description': 'timestamp of reading'},
@@ -411,44 +344,6 @@ table_info = [
         'relationships': []
     },
     {
-        'name': 'type_config_normalized',
-        'description': 'Table giving information on instrument fields including naming, formulae and units',
-        'columns': [
-            {'name': 'config_id', 'description': 'unique identifier for an instrument field'},
-            {'name': 'object_ID', 'description': 'composite identifier for type and subtype columns. References column object_ID of table instrum'},
-            {'name': 'type', 'description': 'instrument type. Type is a way to categorise instruments. References column type1 of table instrum'},
-            {'name': 'subtype', 'description': 'instrument subtype. Subtype is a subcategory of type. References column subtype1 of table instrum'},
-            {'name': 'field_name', 'description': 'system field name for field: \
-             taken_on for timestamp of reading, \
-             data1, data2, data3, ... for uploaded time-series readings, \
-             cali1, cali2, cali3, ... for calculated calibration data calculated from uploaded calibration data, \
-             cal_cali1, calc_cali2, calc_cali3, ... for uploaded calibration data, \
-             calculation1, calculation2, calculation3, ... for time-series metrics calculated from uploaded readings and calibration data, \
-             remarks for uploaded comments on reading'},
-            {'name': 'field_type', 'description': 'type of field: \
-             data: uploaded time-series readings, \
-             cali: uploaded or calculated calibration data defining instrument set-up, \
-             calc: time-series metrics calculated from uploaded readings and calibration data'},
-            {'name': 'user_field_name', 'description': 'user-defined name for field'},
-            {'name': 'user_label', 'description': 'user-defined label for field e.g. for graph axis labelling'},
-            {'name': 'user_description', 'description': 'user-defined description for field'},
-            {'name': 'db_formula', 'description': 'formula for field with field names mapped to database columns. \
-             Fields are stated as <table_name>.<column_name> format. \
-             Table name "rd" is synonymous with "mydata".'},
-            {'name': 'user_formula', 'description': 'formula for field with field names as system field names'},
-            {'name': 'units', 'description': 'units of measurement for field'},
-            {'name': 'precision_value', 'description': 'number of decimal places to store field value'},
-            {'name': 'calibration_label', 'description': 'user-defined label for fields of type "cali" e.g. for graph axis labelling'},
-            {'name': 'calibration_desc', 'description': 'user-defined description for fields of type "cali"'},
-            {'name': 'calibration_field_name', 'description': 'user-defined name for fields of type "cali"'},
-            {'name': 'display_order', 'description': ' \
-             for fields of type "calc": order of calculation of field, \
-             for other field types: order of display of fields e.g. in uploaded tables'},
-            {'name': 'created_on', 'description': 'timestamp when field was created'},
-            {'name': 'updated_on', 'description': 'timestamp when field was updated'}
-        ]
-    },
-    {
         'name': 'types',
         'description': 'Table listing instrument types their descriptions. \
          Use this table to understand the context of instrument types.',
@@ -469,23 +364,17 @@ table_info = [
             {'name': 'id', 'description': 'unique identifier for a graph'},
             {'name': 'graph_name', 'description': 'name of graph in graph collection'},
             {'name': 'type', 'description': 'type of instrument whose fields are plotted in the graph. \
-             If this instrument is compound, the type will be that of the parent instrument. \
-             References column type of table type_config_normalized and column type1 of table instrum'},
+             If this instrument is compound, the type will be that of the parent instrument.'},
             {'name': 'subtype', 'description': 'subtype of instrument whose fields are plotted in the graph. \
-             If this instrument is compound, the subtype will be that of the parent instrument. \
-             References column subtype of table type_config_normalized and column subtype1 of table instrum'},
+             If this instrument is compound, the subtype will be that of the parent instrument.'},
             {'name': 'child_type', 'description': 'type of child instrument whose fields are plotted in the graph. \
-             Only relevant to compound instruments. \
-             References column type of table type_config_normalized and column type1 of table instrum'},
+             Only relevant to compound instruments.'},
             {'name': 'child_sub_type', 'description': 'subtype of child instrument whose fields are plotted in the graph. \
-             Only relevant to compound instruments. \
-             References column subtype of table type_config_normalized and column subtype1 of table instrum'},
+             Only relevant to compound instruments.'},
             {'name': 'Graph_title1', 'description': 'title of graph. \
              Use this to understand the context of instrument fields plotted in the graph'},
-            {'name': 'x', 'description': 'system field name for field plotted on x-axis of graph. \
-             References column field_name of table type_config_normalized'},
-            {'name': 'y', 'description': 'system field name for field plotted on y-axis of graph. \
-             References column field_name of table type_config_normalized'},
+            {'name': 'x', 'description': 'system field name for field plotted on x-axis of graph.'},
+            {'name': 'y', 'description': 'system field name for field plotted on y-axis of graph.'},
             {'name': 'x_caption', 'description': 'x-axis label for graph. \
              Use this to understand the context of instrument field plotted on x-axis of graph'},
             {'name': 'y_caption', 'description': 'y-axis label for graph. \

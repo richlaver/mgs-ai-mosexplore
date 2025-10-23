@@ -31,6 +31,16 @@ def reporter_agent(
     # Initialize the messages list to append to
     updated_messages = messages.copy() if messages else []
 
+    def _coerce_to_dict(content):
+        if isinstance(content, dict):
+            return content
+        if isinstance(content, str):
+            try:
+                return json.loads(content)
+            except Exception:
+                return None
+        return None
+
     # Get the retrospective query and edge case status
     retrospective_query = context.retrospective_query if context else "Unable to process query"
     is_edge_case = context.edge_case if context else False
@@ -53,27 +63,27 @@ def reporter_agent(
         content = output.get("content", "")
 
         if output_type in ["progress", "error", "final"]:
-            execution_progress += content + "\n"
+            execution_progress += str(content) + "\n"
         elif output_type == "plot":
             logger.info("[reporter_agent] Processing plot output: %s", content)
-            try:
-                plot_data = json.loads(content)
+            plot_data = _coerce_to_dict(content)
+            if isinstance(plot_data, dict):
                 plot_artefacts.append({
                     "tool_name": plot_data.get("tool_name"),
                     "description": plot_data.get("description"),
                     "artefact_id": plot_data.get("artefact_id")
                 })
-            except json.JSONDecodeError:
-                logger.error("Failed to parse plot output: %s", content)
+            else:
+                logger.error("Failed to parse plot output: %s", str(content)[:200])
         elif output_type == "csv":
-            try:
-                csv_data = json.loads(content)
+            csv_data = _coerce_to_dict(content)
+            if isinstance(csv_data, dict):
                 csv_artefacts.append({
                     "description": csv_data.get("description"),
                     "artefact_id": csv_data.get("artefact_id")
                 })
-            except json.JSONDecodeError:
-                logger.error("Failed to parse csv output: %s", content)
+            else:
+                logger.error("Failed to parse csv output: %s", str(content)[:200])
 
     # Define the LLM prompt for generating the final response
     reporter_prompt = ChatPromptTemplate.from_messages([
@@ -143,23 +153,29 @@ Return a single markdown-formatted string, using sectioning only when necessary 
         metadata = raw.get("metadata", {}) if isinstance(raw, dict) else {}
         output_type = metadata.get("type", "raw")
         content = raw.get("content", "") if isinstance(raw, dict) else str(raw)
-        # Provide a concise prefix for non-final artefacts while retaining original content.
+
+        jd = None
+
         if output_type == "plot":
-            try:
-                jd = json.loads(content)
-                display_text = f"Plot artefact created: {jd.get('description','(no description)')} (id={jd.get('artefact_id')})"
-            except Exception:
-                display_text = f"Plot artefact (unparsed): {content[:200]}"  # fallback
+            jd = _coerce_to_dict(content)
+            if isinstance(jd, dict):
+                display_text = (
+                    f"Plot artefact created: {jd.get('description','(no description)')} (id={jd.get('artefact_id')})"
+                )
+            else:
+                display_text = f"Plot artefact (unparsed): {str(content)[:200]}"
         elif output_type == "csv":
-            try:
-                jd = json.loads(content)
-                display_text = f"Data file created: {jd.get('description','(no description)')} (id={jd.get('artefact_id')})"
-            except Exception:
-                display_text = f"Data file artefact (unparsed): {content[:200]}"
+            jd = _coerce_to_dict(content)
+            if isinstance(jd, dict):
+                display_text = (
+                    f"Data file created: {jd.get('description','(no description)')} (id={jd.get('artefact_id')})"
+                )
+            else:
+                display_text = f"Data file artefact (unparsed): {str(content)[:200]}"
         elif output_type == "final":
-            display_text = content
+            display_text = str(content)
         else:
-            display_text = content
+            display_text = str(content)
 
         updated_messages.append(AIMessage(
             name="Reporter",
@@ -167,7 +183,7 @@ Return a single markdown-formatted string, using sectioning only when necessary 
             additional_kwargs={
                 "stage": "execution_output",
                 "process": output_type,
-                **({"artefact_id": jd.get("artefact_id")} if output_type in {"plot", "csv"} and 'jd' in locals() and isinstance(jd, dict) else {})
+                **({"artefact_id": jd.get("artefact_id")} if output_type in {"plot", "csv"} and isinstance(jd, dict) else {})
             }
         ))
 

@@ -61,6 +61,7 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
        - "The date range refers to the query implicitly requesting the most recent reading. The extended period of the date range from a very early date to now allows for the most recent reading being at any time. Take the latest reading returned as the most recent reading."
        - "The date range refers to the query requesting reading on 20 Oct. The date range spanning the seven days before the requested date assumes this refers to the current year and that readings could be missing on that date. Take the most recent reading from the requested date."
        - "The date range refers to the query requesting readings in mid January. The date range spans symmetrically across 15 January with 7 days either side to account for missing readings on 15 January itself. Take the three readings closest to 15 January as the readings in mid January."
+    13. The user will never ask for dates before year 2000. Check that no date range covers before 2000.
 
     If no date is mentioned or implied, default to the most recent reading range.
     """

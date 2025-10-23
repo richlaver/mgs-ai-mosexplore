@@ -386,12 +386,18 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 if y_min == y_max:
                     y_min -= 1
                     y_max += 1
+                if secondary_y_instruments:
+                    axis_suffix = f" {primary_y_title}".lower()
+                    display_name = f"{instr_id}{axis_suffix}"
+                else:
+                    display_name = f"{instr_id}"
                 fig.add_trace(go.Scatter(
                     x=times,
                     y=values,
                     mode='lines+markers',
-                    name=f"Instrument {instr_id} ({instr.column_name})",
-                    line=dict(color=primary_colors[i % len(primary_colors)])
+                    name=display_name,
+                    line=dict(color=primary_colors[i % len(primary_colors)]),
+                    hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {primary_y_unit}<extra></extra>"
                 ))
                 logger.debug(f"Added primary trace for {instr_id}")
             logger.debug(f"Primary traces added | y_min={y_min}, y_max={y_max}")
@@ -408,13 +414,16 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 logger.debug(f"Secondary instrument {instr_id}: {len(times)} data points")
                 secondary_y_min = min(secondary_y_min, min(values))
                 secondary_y_max = max(secondary_y_max, max(values))
+                sec_suffix_title = (secondary_y_title or "").lower()
+                display_name = f"{instr_id} {sec_suffix_title}" if sec_suffix_title else f"{instr_id}"
                 fig.add_trace(go.Scatter(
                     x=times,
                     y=values,
                     mode='lines+markers',
-                    name=f"Instrument {instr_id} ({instr.column_name})",
+                    name=display_name,
                     line=dict(color=secondary_colors[i % len(secondary_colors)]),
-                    yaxis='y2'
+                    yaxis='y2',
+                    hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {secondary_y_unit if secondary_y_unit is not None else ''}<extra></extra>"
                 ))
                 logger.debug(f"Added secondary trace for {instr_id}")
             logger.debug(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
@@ -1625,6 +1634,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         tickvals = [min(vals), max(vals)]
                         ticktext = [f"{min(vals):.2f}", f"{max(vals):.2f}"]
                     text = [f"{id}: {v:.2f} {s.abbreviated_unit}" for id, v in zip(instr_ids, vals)]
+                    customdata = list(zip(instr_ids, vals))
                     fig.add_trace(go.Scattermapbox(
                         lat=lats, lon=lons, mode='markers',
                         marker=go.scattermapbox.Marker(
@@ -1644,6 +1654,8 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                             )
                         ),
                         text=text,
+                        customdata=customdata,
+                        hovertemplate="%{customdata[0]}<br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
                         name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
                     ))
                     logger.debug(f"Added readings trace")

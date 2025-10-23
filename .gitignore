@@ -13,6 +13,5 @@ run_extraction_sandbox_test.py
 run_map_plot_sandbox_test.py
 run_sandbox_test.py
 run_timeseries_plot_sandbox_test.py
-agents/extraction_sandbox_agent_0.py
 tools/create_output_toolkit_ananthu.py
 tools/review_values_toolkit_ananthu.py

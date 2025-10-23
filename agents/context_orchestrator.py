@@ -1,8 +1,8 @@
 from langchain_core.language_models import BaseLanguageModel
-from langchain.agents import tool
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command, Send
-from langchain_core.messages import SystemMessage, HumanMessage
 
 from agents.instrument_validator import instrument_validator
 from agents.database_expert import database_expert
