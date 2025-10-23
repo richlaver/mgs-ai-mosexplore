@@ -4,12 +4,11 @@ import os
 import re
 from typing import Any, Dict, List
 
-from langchain_core.messages import AIMessage
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
-from langgraph.types import Command
 
-from classes import InstrInfo, DbField, DbSource, QueryWords
+from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -434,32 +433,30 @@ def _metadata_based_selection(query: str, fields: List[Dict[str, Any]]) -> List[
     # Return top 1-2 fields based on score
     return selected_fields[:2]
 
-def database_expert(state: any, llm: BaseLanguageModel, db: any) -> dict:
-    """Database expert agent: Retrieves and updates word_context if no clarification needed."""
+def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
+    """Database expert agent: Retrieves and updates word_context if no clarification needed.
+    Returns a Command to update state in the graph.
+    """
     if state.clarification_request:
-        state.messages.append(AIMessage(
-            name="DatabaseExpert",
-            content="Skipping context retrieval due to clarification needed.",
-            additional_kwargs={"next": "supervisor"}
-        ))
-        return state
-
-    state.messages.append(AIMessage(
-        name="DatabaseExpert",
-        content="Starting context retrieval...",
-        additional_kwargs={
-            "stage": "node",
-            "process": "database_expert"
-        }
-    ))
+        return Command(
+            goto="supervisor",
+            update={
+                "db_context_provided": False,
+            }
+        )
 
     instrument_data = load_instrument_context()
-    query = state.context.retrospective_query
+    if isinstance(state.context, dict):
+        query = state.context.get("retrospective_query", "")
+        verif_info = state.context.get("verif_ID_info") or {}
+    else:
+        query = getattr(state.context, "retrospective_query", "")
+        verif_info = getattr(state.context, "verif_ID_info", {}) or {}
     query_words_list: list[QueryWords] = []
     type_subtype_groups: dict[tuple, list[str]] = {}
     verified_type_subtype = []
-    if state.context.verif_ID_info:
-        for instr_id, info in state.context.verif_ID_info.items():
+    if verif_info:
+        for instr_id, info in verif_info.items():
             db_type = info["type"]
             db_subtype = info["subtype"]
             key_tuple = (db_type, db_subtype)
@@ -507,22 +504,14 @@ def database_expert(state: any, llm: BaseLanguageModel, db: any) -> dict:
                         query_words=query_words_str,
                         data_sources=[db_sources]
                     ))
-    state.context.word_context = query_words_list
-
-    state.messages.append(AIMessage(
-        name="DatabaseExpert",
-        content="Context retrieval complete.",
-        additional_kwargs={
-            "stage": "node",
-            "process": "database_expert"
-        }
-    ))
+    context_update = {
+        "word_context": query_words_list
+    }
 
     return Command(
         goto="supervisor",
         update={
-            "messages": state.messages,
-            "context": state.context,
-            "db_context_provided": True
+            "context": context_update,
+            "db_context_provided": True,
         }
     )

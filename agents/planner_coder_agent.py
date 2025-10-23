@@ -17,6 +17,7 @@ planner_coder_prompt = PromptTemplate(
         "verified_instrument_ids",
         "verified_instrument_info_json",
         "word_context_json",
+        "relevant_date_ranges_json",
         "tools_str",
         "previous_attempts_summary",
     ],
@@ -35,6 +36,9 @@ Verified instrument ID details (JSON mapping of ID -> {{type, subtype}}):
 
 Structured instrument & field context (JSON format):
 {word_context_json}
+
+Relevant date ranges and explanations (JSON list of {{explanation, start_datetime, end_datetime}}):
+{relevant_date_ranges_json}
 
 Available tools (name and description):
 {tools_str}
@@ -55,7 +59,7 @@ Thought processes (DO NOT include in output):
 8. Select the one extension most likely to contribute value in relation to the original query, with justification.
 9. Think up a detailed execution plan as a numbered list (1., 2., 3., ...). Incorporate the selected extension as optional last steps. Each step must be action-oriented:
    - Specify instrument type/subtype & database field names to extract.
-   - Explicit filters (date ranges, instrument IDs) or how to derive them.
+    - Explicit filters (date ranges, instrument IDs) or how to derive them, using relevant_date_ranges_json and following each range's explanation on how to apply (e.g., take latest reading within range, take all readings, or use two ranges for change-over-period).
    - When to call extraction_sandbox_agent (describe the prompt for SQL generation).
    - When to perform calculations (describe formula/aggregation).
    - Ensure logic: gather data -> validate -> calculate -> optional extension -> finalize.
@@ -74,6 +78,8 @@ Code Generation Constraints:
 - extraction_sandbox_agent.invoke(prompt_str) expects str prompt, returns pandas.DataFrame or None.
 - timeseries_plot_sandbox_agent.invoke(prompt_str) and map_plot_sandbox_agent.invoke(prompt_str) expect a str natural language prompt describing the plot, returns artefact ID to access plot in file system or None.
 - Write tool inputs to include ALL details in tool descriptions.
+- Use relevant_date_ranges_json as the authoritative source for date filtering and follow each range's explanation and start/end datetimes to choose the correct selection rule (e.g., select latest reading within range, use both start/end ranges for change over period, include all readings when explicitly requested).
+- When composing natural-language prompts for plotting tools, convert ISO 8601 timestamps from relevant_date_ranges_json into the human-readable form shown in examples (e.g., "1 January 2025 12:00:00 PM").
 - In scope: llm (BaseLanguageModel), db (SQLDatabase), extraction_sandbox_agent, timeseries_plot_sandbox_agent, map_plot_sandbox_agent, datetime module.
 - Import standard libraries inside the function (e.g., from datetime import datetime, timezone; import pandas as pd; import json).
 - No network calls or file I/O.
@@ -161,6 +167,10 @@ def planner_coder_agent(
     word_context_json = json.dumps([qw.model_dump() for qw in context.word_context] if context and context.word_context else [], indent=2)
     verified_instrument_ids = ", ".join((context.verif_ID_info or {}).keys()) if context else "None"
     verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
+    logger.debug(f"Word context JSON: {word_context_json}")
+    relevant_date_ranges_json = json.dumps([
+        r.model_dump() for r in (context.relevant_date_ranges or [])
+    ], indent=2) if context else "[]"
 
     current_date = datetime.now().strftime('%B %d, %Y')
 
@@ -186,6 +196,7 @@ def planner_coder_agent(
             "verified_instrument_ids": verified_instrument_ids,
             "verified_instrument_info_json": verified_instrument_info_json,
             "word_context_json": word_context_json,
+            "relevant_date_ranges_json": relevant_date_ranges_json,
             "tools_str": tools_str,
             "previous_attempts_summary": previous_attempts_summary,
         })

@@ -1,7 +1,7 @@
 from agents.history_summariser_agent import history_summariser
 from agents.planner_coder_agent import planner_coder_agent
 from agents.reporter_agent import reporter_agent
-from classes import AgentState
+from classes import AgentState, Context
 from agents.context_agent import context_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from agents.context_orchestrator import get_context_graph
@@ -51,29 +51,53 @@ def build_codeact_graph(
         return {"context": new_context}
 
     def context_orchestrator_node(state: AgentState):
+        base_context_dict = {}
+        if isinstance(state.context, Context):
+            base_context_dict = state.context.model_dump(exclude_none=True)
+        elif isinstance(state.context, dict):
+            base_context_dict = state.context
         sub_input = {
             "messages": state.messages,
-            "context": state.context,
+            "context": base_context_dict,
             "clarification_request": ""
         }
+        logger.info(f'Starting context in context_orchestrator_node with context: {state.context}')
 
         sub_graph = get_context_graph(llm, db)
-        accumulated_context = state.context  # Track final context
+        accumulated_context = base_context_dict
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
             logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')
-            # Extract messages and any context updates from sub-chunk
-            new_messages = []
-            for node, update in sub_chunk.items():
-                if update:
-                    new_messages.extend(update.get("messages", []))
-                logger.info(f'Context Orchestrator update from node {node}: {update}')
+            for node, context_update in sub_chunk.items():
+                if context_update:
+                    update_model = context_update.get("context")
+                    if update_model is not None:
+                        try:
+                            if not isinstance(accumulated_context, dict):
+                                accumulated_context = (
+                                    accumulated_context.model_dump(exclude_none=True)
+                                    if isinstance(accumulated_context, Context)
+                                    else {}
+                                )
+                            update_dict = (
+                                update_model.model_dump(exclude_none=True)
+                                if isinstance(update_model, Context)
+                                else update_model if isinstance(update_model, dict)
+                                else {}
+                            )
+                            # dict union (last-writer-wins per key) but drop Nones
+                            update_dict = {k: v for k, v in update_dict.items() if v is not None}
+                            accumulated_context = {**accumulated_context, **update_dict}
+                        except Exception as e:
+                            logger.error(f"Failed to merge context update from node {node}: {e}")
+                logger.info(f'Context Orchestrator update from node {node}: {context_update}')
+                logger.info(f'Accumulated context so far: {accumulated_context}')
 
-            # Yield progress messages in real-time
-            logger.info(f'Yielding new messages from Context Orchestrator: {new_messages}')
-            yield {"messages": new_messages}
-
-        # Final yield for complete state (e.g., final context)
-        # yield {"context": accumulated_context}
+        try:
+            merged_context_model = Context.model_validate(accumulated_context)
+        except Exception as e:
+            logger.error(f"Failed to validate merged context dict into Context model: {e}")
+            merged_context_model = state.context if isinstance(state.context, Context) else None
+        yield {"context": merged_context_model}
 
     def query_enricher_node(state: AgentState) -> dict:
         return context_agent(llm=llm, chat_history=state.messages, db=db)

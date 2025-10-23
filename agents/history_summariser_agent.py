@@ -12,15 +12,26 @@ def history_summariser(messages: List[BaseMessage], llm: BaseLanguageModel) -> s
     Summarizes the chat history and updates the retrospective_query in the context.
     """
 
-    current_query = ""
-    current_query = next(
-        (msg.content for msg in reversed(messages) if isinstance(msg, HumanMessage)),
+    current_query_msg = next(
+        (m for m in reversed(messages) if isinstance(m, HumanMessage)),
         None
     )
-    if not current_query:
+    if not current_query_msg:
         raise ValueError("No query found in chat history")
 
-    previous_messages = [msg for msg in messages[:-1] if isinstance(msg, (HumanMessage, AIMessage))]
+    current_query = current_query_msg.content
+
+    previous_messages = [
+        msg
+        for msg in messages
+        if msg is not current_query_msg and (
+            isinstance(msg, HumanMessage)
+            or (
+                isinstance(msg, AIMessage)
+                and getattr(msg, "additional_kwargs", {}) == {"stage": "final", "process": "response"}
+            )
+        )
+    ]
 
     if len(previous_messages) == 0:
         return current_query

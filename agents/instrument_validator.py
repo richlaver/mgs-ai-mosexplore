@@ -3,10 +3,11 @@ import logging
 import ast
 import re
 
-from langchain_core.messages import AIMessage
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.types import Command
+
+from classes import ContextState
 
 logger = logging.getLogger(__name__)
 
@@ -105,104 +106,85 @@ def validate_instruments_in_database(db: any, instrument_ids: list[str]) -> dict
             logger.error(f"Error validating {instrument_id}: {e}")
     return valid_instruments
 
-def instrument_validator(state: any, llm: BaseLanguageModel, db: any) -> dict:
-    """Instrument validator agent: Excludes and identifies/validates instrument IDs, updates context."""
-    state.messages.append(AIMessage(
-        name="InstrumentValidator",
-        content="Starting instrument validation...",
-        additional_kwargs={
-            "stage": "node",
-            "process": "instrument_validator"
-        }
-    ))
+def instrument_validator(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
+    """Instrument validator agent: Excludes and identifies/validates instrument IDs, updates context.
+    Returns a Command to update state in the graph.
+    """
 
-    exclude_prompt_messages = [
-        ("system", """You are a precise instrument ID analyzer.
-Your task is to identify terms that look like instrument IDs but have been explicitly mentioned as NOT being instrument IDs.
+    retro_query = ""
+    if isinstance(state.context, dict):
+        retro_query = state.context.get("retrospective_query", "")
+    elif hasattr(state.context, "retrospective_query"):
+        retro_query = getattr(state.context, "retrospective_query") or ""
 
-Analyze the query and return your findings in the following JSON format:
-{{
-    "excluded_ids": [
-        {{
-            "id": "string",            # The ID to exclude
-            "reason": "string",        # Why this ID should be excluded
-            "confidence": float,       # Confidence score 0-1
-            "source_text": "string"    # The text that indicates this should be excluded
-        }}
-    ],
-    "analysis": {{
-        "total_found": int,           # Total number of exclusions found
-        "reasoning": "string"         # Brief explanation of the analysis
-    }}
-}}
+    # Exclusion of instrument IDs has been disabled to reduce latency.
+    # To include again, uncomment the code below and remove the line setting ignore_IDs to [].
+#     exclude_prompt_messages = [
+#         ("system", """You are a precise instrument ID analyzer.
+# Your task is to identify terms that look like instrument IDs but have been explicitly mentioned as NOT being instrument IDs.
 
-Only include IDs that are explicitly mentioned as NOT being instrument IDs.
-If no exclusions are found, return an empty list for excluded_ids.
-"""),
-        ("human", f"""
-Analyze this query for terms that should NOT be treated as instrument IDs:
-{state.context.retrospective_query}
-""")
-    ]
-    exclude_prompt = ChatPromptTemplate.from_messages(exclude_prompt_messages)
-    exclude_chain = exclude_prompt | llm
-    exclude_response = exclude_chain.invoke({})
-    try:
-        response_data = json.loads(exclude_response.content)
-        CONFIDENCE_THRESHOLD = 0.7
-        state.context.ignore_IDs = [
-            item["id"] for item in response_data.get("excluded_ids", [])
-            if item.get("confidence", 0) >= CONFIDENCE_THRESHOLD
-        ]
-    except json.JSONDecodeError:
-        state.context.ignore_IDs = []
+# Analyze the query and return your findings in the following JSON format:
+# {{
+#     "excluded_ids": [
+#         {{
+#             "id": "string",            # The ID to exclude
+#             "reason": "string",        # Why this ID should be excluded
+#             "confidence": float,       # Confidence score 0-1
+#             "source_text": "string"    # The text that indicates this should be excluded
+#         }}
+#     ],
+#     "analysis": {{
+#         "total_found": int,           # Total number of exclusions found
+#         "reasoning": "string"         # Brief explanation of the analysis
+#     }}
+# }}
 
-    state.messages.append(AIMessage(
-        name="InstrumentValidator",
-        content="Exclusions processed.",
-        additional_kwargs={
-            "stage": "node",
-            "process": "instrument_validator"
-        }
-    ))
+# Only include IDs that are explicitly mentioned as NOT being instrument IDs.
+# If no exclusions are found, return an empty list for excluded_ids.
+# """),
+#     ("human", f"""
+# Analyze this query for terms that should NOT be treated as instrument IDs:
+# {retro_query}
+# """)
+#     ]
+#     exclude_prompt = ChatPromptTemplate.from_messages(exclude_prompt_messages)
+#     exclude_chain = exclude_prompt | llm
+#     exclude_response = exclude_chain.invoke({})
+#     try:
+#         response_data = json.loads(exclude_response.content)
+#         CONFIDENCE_THRESHOLD = 0.7
+#         ignore_IDs = [
+#             item["id"] for item in response_data.get("excluded_ids", [])
+#             if item.get("confidence", 0) >= CONFIDENCE_THRESHOLD
+#         ]
+#     except json.JSONDecodeError:
+#         ignore_IDs = []
+    ignore_IDs = []
 
-    result = extract_instruments_with_llm(llm, state.context.retrospective_query)
+    result = extract_instruments_with_llm(llm, retro_query)
     instruments = result.get("instruments", [])
     ids = [inst["text"] for inst in instruments if inst["confidence"] > 0.7]
-    ids = [id_ for id_ in ids if id_ not in state.context.ignore_IDs]
+    ids = [id_ for id_ in ids if id_ not in ignore_IDs]
     valid_instruments = validate_instruments_in_database(db, ids)
-    state.context.verif_ID_info = valid_instruments
-    state.context.unverif_IDs = [id_ for id_ in ids if id_ not in valid_instruments]
-
-    state.messages.append(AIMessage(
-        name="InstrumentValidator",
-        content="Identification and validation complete.",
-        additional_kwargs={
-            "stage": "node",
-            "process": "instrument_validator"
-        }
-    ))
+    unverif_IDs = [id_ for id_ in ids if id_ not in valid_instruments]
 
     clarification_request = ""
-    if state.context.unverif_IDs:
+    if unverif_IDs:
         clarification_request = (
             f"The following instrument IDs could not be found in the database: "
-            f"{', '.join(state.context.unverif_IDs)}. Please clarify or provide correct IDs."
+            f"{', '.join(unverif_IDs)}. Please clarify or provide correct IDs."
         )
-    state.clarification_request = clarification_request
-
-    state.messages.append(AIMessage(
-        name="InstrumentValidator",
-        content="Handing off to database expert.",
-        additional_kwargs={"next": "database_expert"}
-    ))
-
+    context_update = {
+        "ignore_IDs": ignore_IDs,
+        "verif_ID_info": valid_instruments,
+        "unverif_IDs": unverif_IDs,
+    }
+    
     return Command(
-        goto="database_expert",
+        goto="supervisor",
         update={
-            "messages": state.messages,
-            "context": state.context,
-            "clarification_request": state.clarification_request,
-            "instruments_validated": True
+            "context": context_update,
+            "clarification_request": clarification_request,
+            "instruments_validated": True,
         }
     )

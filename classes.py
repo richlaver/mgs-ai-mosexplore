@@ -1,4 +1,4 @@
-from typing import List, Annotated, Literal, Optional, Dict
+from typing import List, Annotated, Optional, Dict, Any
 import operator
 
 from langchain_core.messages import BaseMessage
@@ -34,11 +34,11 @@ class QueryWords(BaseModel):
     query_words: str = Field(description="Words extracted from query")
     data_sources: List[DbSource] = Field(description="Data sources and background info relevant to words extracted from query")
 
-class RelevantTimeRange(BaseModel):
-    """Time range relevant to user query."""
-    description: str = Field(description="Description of what in the query the time range refers to and how it should be used")
-    start_time: str = Field(description="Start time in ISO 8601 format")
-    end_time: str = Field(description="End time in ISO 8601 format")
+class RelevantDateRange(BaseModel):
+    """Date range relevant to user query."""
+    explanation: str = Field(description="Explanation of what the date range refers to in the query, why the date range was chosen thus and how to apply the date range to answer the query")
+    start_datetime: str = Field(description="Start datetime in ISO 8601 format")
+    end_datetime: str = Field(description="End datetime in ISO 8601 format")
 
 class RelevantPlaceCoordinates(BaseModel):
     """Geographical coordinates relevant to user query."""
@@ -55,7 +55,7 @@ class Context(BaseModel):
     unverif_IDs: Optional[List[str]] = Field(description="Instrument IDs in query not found in database", default=None)
     word_context: Optional[List[QueryWords]] = Field(description="How query words relate to where to get data and background info to answer", default=None)
     edge_case: Optional[bool] = Field(description="Indicates whether the user query is an edge case", default=None)
-    relevant_time_range: Optional[RelevantTimeRange] = Field(description="Time range relevant to user query", default=None)
+    relevant_date_ranges: Optional[List[RelevantDateRange]] = Field(description="Date ranges relevant to user query", default=None)
     review_level_context: Optional[str] = Field(description="Context on anything to do with review levels mentioned in query", default=None)
     relevant_place_coordinates: Optional[RelevantPlaceCoordinates] = Field(description="Geographical coordinates relevant to user query", default=None)
     web_info: Optional[str] = Field(description="Additional relevant information from web search", default=None)
@@ -93,3 +93,13 @@ class AgentState(BaseModel):
     
     class Config:
         arbitrary_types_allowed = True
+
+
+class ContextState(BaseModel):
+    """State passed through the context graph for orchestrating agents."""
+    messages: Annotated[List[BaseMessage], operator.add] = Field(default_factory=list)
+    context: Annotated[Dict[str, Any], operator.or_] = Field(default_factory=dict)
+    clarification_request: str = ""
+    instruments_validated: Annotated[bool, operator.or_] = False
+    db_context_provided: Annotated[bool, operator.or_] = False
+    period_deduced: Annotated[bool, operator.or_] = False
