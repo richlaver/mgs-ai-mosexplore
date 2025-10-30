@@ -38,6 +38,20 @@ def get_context_graph(llm: BaseLanguageModel, db: any) -> any:
     tools = [transfer_to_instrument_validator, transfer_to_database_expert, transfer_to_period_expert]
 
     def supervisor_node(state: ContextState):
+        has_clar_reqs = False
+        try:
+            if isinstance(state.context, dict):
+                clar = state.context.get("clarification_requests") or []
+                has_clar_reqs = bool(clar)
+            else:
+                clar = getattr(state.context, "clarification_requests", []) or []
+                has_clar_reqs = bool(clar)
+        except Exception:
+            has_clar_reqs = False
+
+        if has_clar_reqs:
+            return Command(goto=END)
+
         user_input = (
             state.context.get("retrospective_query", "")
             if isinstance(state.context, dict)
@@ -52,15 +66,33 @@ def get_context_graph(llm: BaseLanguageModel, db: any) -> any:
             scratch_lines.append("INTERNAL: Database context retrieval completed.")
         agent_scratchpad = "\n".join(scratch_lines)
 
-        system_content = f"""You are a supervisor that delegates by calling tools to transfer control to agents.
-Routing policy:
-- Call transfer_to_period_expert if period_deduced is false.
-- Call transfer_to_instrument_validator if instruments_validated is false.
-- Call transfer_to_database_expert only if instruments_validated is true and db_context_provided is false.
-You can call multiple tools at once if multiple conditions apply, to enable parallel execution where possible.
-If all flags are true, do not call any tools.
-Current status: period_deduced={state.period_deduced}, instruments_validated={state.instruments_validated}, db_context_provided={state.db_context_provided}
-{agent_scratchpad}"""
+        system_content = f"""
+You are a supervisor that delegates by calling tools to transfer control to agents.
+STRICT ROUTING CONTRACT (follow exactly, highest precedence first):
+1) If has_clarification_requests is true:
+    - Do NOT call any tools.
+    - Return NO tool calls.
+2) If ALL are true, do NOT call any tools:
+    - period_deduced == true
+    - instruments_validated == true
+    - db_context_provided == true
+3) Otherwise (has_clarification_requests is false):
+    - If period_deduced == false, call transfer_to_period_expert.
+    - If instruments_validated == false, call transfer_to_instrument_validator.
+    - If instruments_validated == true AND db_context_provided == false, call transfer_to_database_expert.
+
+Notes:
+- Call tools in parallel when multiple conditions in (3) apply.
+- If unsure, prefer calling fewer tools; never call any tool when rule (1) applies.
+- Do not explain your reasoning; just make the appropriate tool calls or none.
+
+Current status:
+- period_deduced={state.period_deduced}
+- instruments_validated={state.instruments_validated}
+- db_context_provided={state.db_context_provided}
+- has_clarification_requests={has_clar_reqs}
+{agent_scratchpad}
+"""
 
         messages = [
             SystemMessage(content=system_content),

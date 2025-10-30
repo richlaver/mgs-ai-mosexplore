@@ -1,6 +1,7 @@
 streamlit
 b2sdk
 geoalchemy2
+langchain
 langchain_core
 typing_extensions
 langchain_community

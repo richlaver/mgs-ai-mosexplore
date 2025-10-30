@@ -37,22 +37,31 @@ def history_summariser(messages: List[BaseMessage], llm: BaseLanguageModel) -> s
         return current_query
 
     prompt_messages = [
-        ("system", """
-You are a context-aware assistant. 
-Review the chat history and current query, 
-then rewrite the current query to include relevant context from previous messages. 
-Focus on maintaining critical details and relationships from the conversation that would help answer the current query accurately.
-If there is no relevant context from previous messages, just return the current query as-is.
-             """),
-        ("human", f"""
-Chat history (newest last):
-{chr(10).join(f"{'Human: ' if isinstance(msg, HumanMessage) else 'Assistant: '}{msg.content}" 
-               for msg in previous_messages)}
+        (
+            "system",
+            """
+# Role
+You are an expert at extracting relevant context from a chat history and incorporating it into the current query.
+# Task
+Incorporate relevant context from chat history, if any exists, into the current query so that the answer will address the user's intention.
+# Instructions
+Carefully analyse the provided chat history and current query. If there is relevant prior context, rewrite the query to include it while preserving critical details and relationships. If not, return the query unchanged.
+            """
+        ),
+        (
+            "human",
+            f"""
+Chat history:
+{chr(10).join(f"{'Human: ' if isinstance(msg, HumanMessage) else 'Assistant: '}{msg.content}" for msg in previous_messages)}
 
-Current query: {current_query}
+Current query:
+{current_query}
 
-Rewrite the query incorporating relevant context from the chat history, or return the query as-is if no relevant context exists.
-            """)
+Instructions:
+- If no relevant context exists, return the current query verbatim.
+- If relevant context exists, return a rewritten query that incorporates the context and preserves critical details and relationships.
+            """
+        ),
     ]
     prompt = ChatPromptTemplate.from_messages(prompt_messages)
     chain = prompt | llm

@@ -25,8 +25,6 @@ def setup_session() -> None:
         st.session_state.graph = False
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = 0
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "new_message_added" not in st.session_state:
@@ -44,10 +42,12 @@ def setup_session() -> None:
         st.session_state.global_hierarchy_access = False
     if "table_relationship_graph" not in st.session_state:
         st.session_state.table_relationship_graph = None
-    if "show_llm_responses" not in st.session_state:
-        st.session_state.show_llm_responses = True
+    if "developer_view" not in st.session_state:
+        st.session_state.developer_view = True
     if "sandbox_mode" not in st.session_state:
         st.session_state.sandbox_mode = "Remote"
+    if "num_parallel_executions" not in st.session_state:
+        st.session_state.num_parallel_executions = 2
     if "setup_complete" not in st.session_state:
         st.session_state.setup_complete = False
     if "need_rebuild_graph" not in st.session_state:

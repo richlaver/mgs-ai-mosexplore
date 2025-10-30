@@ -16,6 +16,14 @@ progress_messages = {
             "process": "history_summariser"
         }
     ),
+    'query_classifier_node': AIMessage(
+        name="QueryClassifier",
+        content="Deciding the agent best suited to answer your query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "query_classifier"
+        }
+    ),
     'planner_coder_node': AIMessage(
         name="PlannerCoder",
         content="Thinking up a strategy to answer your query...",

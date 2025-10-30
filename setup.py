@@ -194,7 +194,15 @@ def get_db() -> SQLDatabase:
         port = st.secrets["database"]["port"]
 
         db_uri = f"mysql+mysqlconnector://{db_user}:{db_pass}@{db_host}:{port}/{db_name}"
-        engine = create_engine(db_uri, echo=False)
+        engine = create_engine(
+            url=db_uri,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            echo=False
+        )
 
         # Define metadata with custom Geometry type
         metadata = MetaData()

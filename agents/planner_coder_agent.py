@@ -6,7 +6,7 @@ from datetime import datetime
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
 
-from classes import CodingAttempt, Context
+from classes import Execution, Context
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ Generate code to answer the following user query plus an optional extension that
 # Tools
 ## `extraction_sandbox_agent`
 ### How to Use
-- Use to extract data from database with `extraction_sandbox_agent.invoke(prompt_str)`.
+- Use to extract data from database with `extraction_sandbox_agent.invoke(prompt)`
 - Prompt is natural language description of data to extract.
 - Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
 - Always include `Output columns` in prompt to specify DataFrame column names.
@@ -116,7 +116,7 @@ Generate code to answer the following user query plus an optional extension that
 
 ## `timeseries_plot_sandbox_agent`
 ### How to Use
-- Use to display change of data with time for one or more series with `timeseries_plot_sandbox_agent.invoke(prompt_str)`.
+- Use to display change of data with time for one or more series with `timeseries_plot_sandbox_agent.invoke(prompt)`.
 - Prompt is natural language description of plot which MUST include:
   * Instrument IDs for each series
   * Database field names for extracting data
@@ -148,14 +148,14 @@ Generate code to answer the following user query plus an optional extension that
 
 ## `map_plot_sandbox_agent`
 ### How to Use
-- Use to display spatial distribution of readings or review status with `map_plot_sandbox_agent.invoke(prompt_str)`.
+- Use to display spatial distribution of readings or review status with `map_plot_sandbox_agent.invoke(prompt)`.
 - Readings or review status can be plotted as at single time or as change over period.
 - Can plot multiple series with different instrument types, subtypes and database fields.
 - Prompt is natural language description of plot which MUST include:
   * Whether plotting readings or review status
   * Whether plotting at single time or change over period
   * Time if single time or time range if change over period
-  * Buffer period to look for missing readings (get from date ranges relevant to query)
+  * Buffer period to look for missing readings (>= 1 day, get from date ranges relevant to query)
   * For each series:
     + Instrument type
     + Instrument subtype
@@ -230,7 +230,7 @@ def planner_coder_agent(
     llm: BaseLanguageModel,
     tools: List[Any],
     context: Context,
-    previous_attempts: List[CodingAttempt]
+    previous_attempts: List[Execution]
 ) -> Dict[str, Any]:
     """Generates code in one LLM call.
 
@@ -238,11 +238,10 @@ def planner_coder_agent(
         llm: Language model.
         tools: Available tool instances (including plotting tools).
         context: Context object.
-        previous_attempts: Prior CodingAttempt objects.
-        existing_plots: Ignored, as plots are generated in code.
+        previous_attempts: Prior Execution objects.
 
     Returns:
-        Dict for state update: {"coding_attempts": [new_attempt]}
+        Dict for state update: {"executions": [new_execution]}
     """
     retrospective_query = context.retrospective_query if context else ""
     word_context_json = json.dumps([qw.model_dump() for qw in context.word_context] if context and context.word_context else [], indent=2)
@@ -262,9 +261,9 @@ def planner_coder_agent(
     if previous_attempts:
         previous_attempts_summary = "Summary of previous failed coding attempts:\n"
         for i, attempt in enumerate(previous_attempts):
-            if attempt.analysis:
+            if attempt.error_summary:
                 previous_attempts_summary += f"Attempt {i+1} failed.\n"
-                previous_attempts_summary += f"Analysis: {attempt.analysis}\n\n"
+                previous_attempts_summary += f"Error summary: {attempt.error_summary}\n\n"
 
     chain = planner_coder_prompt | llm
 
@@ -281,14 +280,27 @@ def planner_coder_agent(
 
         cleaned_code = strip_code_tags(response.content)
 
-        new_attempt = CodingAttempt(
-            plan="Plan embedded in code comments",
-            code=cleaned_code,
+        new_execution = Execution(
+            agent_type="CodeAct",
+            parallel_agent_id=0,
+            retry_number=len(previous_attempts),
+            codeact_code=cleaned_code,
+            final_response=None,
+            artefacts=[],
+            error_summary=""
         )
 
-        return {"coding_attempts": [new_attempt]}
+        return {"executions": [new_execution]}
 
     except Exception as e:
         logger.error("Error in planner_coder_agent: %s", str(e))
-        new_attempt = CodingAttempt(plan="", code="")
-        return {"coding_attempts": [new_attempt]}
+        new_execution = Execution(
+            agent_type="CodeAct",
+            parallel_agent_id=0,
+            retry_number=len(previous_attempts),
+            codeact_code="",
+            final_response=None,
+            artefacts=[],
+            error_summary=str(e)
+        )
+        return {"executions": [new_execution]}

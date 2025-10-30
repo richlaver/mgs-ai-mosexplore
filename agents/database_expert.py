@@ -437,13 +437,21 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
     """Database expert agent: Retrieves and updates word_context if no clarification needed.
     Returns a Command to update state in the graph.
     """
-    if state.clarification_request:
-        return Command(
-            goto="supervisor",
-            update={
-                "db_context_provided": False,
-            }
-        )
+    try:
+        clar = []
+        if isinstance(state.context, dict):
+            clar = state.context.get("clarification_requests") or []
+        else:
+            clar = getattr(state.context, "clarification_requests", []) or []
+        if clar:
+            return Command(
+                goto="supervisor",
+                update={
+                    "db_context_provided": False,
+                }
+            )
+    except Exception:
+        pass
 
     instrument_data = load_instrument_context()
     if isinstance(state.context, dict):

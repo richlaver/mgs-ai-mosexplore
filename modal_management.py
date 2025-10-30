@@ -5,7 +5,7 @@ import time
 import logging
 
 import modal_sandbox_remote
-from graph import build_codeact_graph
+from graph import build_graph
 from parameters import table_info
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def make_local_sandbox_mode():
     current_sandbox_mode = st.session_state.get("sandbox_mode")
     if current_sandbox_mode != "Local":
         st.session_state.sandbox_mode = "Local"
-        st.session_state.update({'graph': build_codeact_graph(
+        st.session_state.update({'graph': build_graph(
             llm=st.session_state.llm,
             db=st.session_state.db,
             table_info=table_info,
@@ -34,7 +34,9 @@ def make_local_sandbox_mode():
             thread_id=st.session_state.thread_id,
             user_id=st.session_state.selected_user_id,
             global_hierarchy_access=st.session_state.global_hierarchy_access,
-            remote_sandbox=False,)})
+            remote_sandbox=False,
+            num_parallel_executions=st.session_state.num_parallel_executions,
+        )})
 
 # Check if app is deployed using Modal API
 def is_app_deployed():

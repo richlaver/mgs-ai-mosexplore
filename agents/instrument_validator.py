@@ -180,11 +180,13 @@ def instrument_validator(state: ContextState, llm: BaseLanguageModel, db: any) -
         "unverif_IDs": unverif_IDs,
     }
     
+    if clarification_request:
+        context_update["clarification_requests"] = [clarification_request]
+
     return Command(
         goto="supervisor",
         update={
             "context": context_update,
-            "clarification_request": clarification_request,
             "instruments_validated": True,
         }
     )

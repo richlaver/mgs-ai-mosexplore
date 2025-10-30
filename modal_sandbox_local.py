@@ -39,9 +39,9 @@ def run_sandboxed_code(
     _ensure_basic_logging()
     run_logger = logging.getLogger("modal_sandbox.run")
     run_logger.info("Starting sandbox execution | user_id=%s global_access=%s code_len=%s table_info=%s rel_graph_keys=%s",
-                    user_id, global_hierarchy_access, len(code) if isinstance(code, str) else None,
-                    len(table_info) if isinstance(table_info, list) else None,
-                    list(table_relationship_graph.keys()) if isinstance(table_relationship_graph, dict) else None)
+        user_id, global_hierarchy_access, len(code) if isinstance(code, str) else None,
+        len(table_info) if isinstance(table_info, list) else None,
+        list(table_relationship_graph.keys()) if isinstance(table_relationship_graph, dict) else None)
 
     sys.path.append(os.path.dirname(__file__))
 

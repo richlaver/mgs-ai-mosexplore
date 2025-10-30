@@ -5,13 +5,15 @@ from langchain_core.messages import AIMessage, HumanMessage, AIMessageChunk
 import json
 import uuid
 import logging
+import re
 
-from classes import Context
+from classes import AgentState,Context
 from parameters import users, table_info
-from graph import build_codeact_graph
+from graph import build_graph
 import setup
 from tools.artefact_toolkit import ReadArtefactsTool
 from modal_management import deploy_app, warm_up_container, stop_app, is_app_deployed, is_container_warm
+from utils.chat_history import filter_messages_only_final
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +119,8 @@ def render_initial_ui() -> None:
         .block-container {
             padding-top: 0rem;
             padding-bottom: 0rem;
-            padding-left: 0rem;
-            padding-right: 0rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
         }
         .chat-messages {
             max-height: 70vh;
@@ -131,7 +133,7 @@ def render_initial_ui() -> None:
             position: fixed;
             bottom: 10px;
             width: 100%;
-            max-width: 720px;
+            max-width: 1100px;
             margin: 0 auto;
             background-color: white;
             z-index: 1000;
@@ -222,6 +224,26 @@ def render_initial_ui() -> None:
 
     with st.sidebar:
         st.divider()
+        st.slider(
+            label="No. of Parallel-Running Agents",
+            min_value=1,
+            max_value=3,
+            step=1,
+            format="%i",
+            key="num_parallel_executions",
+            help="Number of agents to run in parallel for each query",
+            on_change=lambda: st.session_state.update({'graph': build_graph(
+                llm=st.session_state.llm,
+                db=st.session_state.db,
+                table_info=table_info,
+                table_relationship_graph=st.session_state.table_relationship_graph, 
+                thread_id=st.session_state.thread_id,
+                user_id=st.session_state.selected_user_id,
+                global_hierarchy_access=st.session_state.global_hierarchy_access,
+                remote_sandbox=st.session_state.sandbox_mode,
+                num_parallel_executions=st.session_state.num_parallel_executions,
+            )})
+        )
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
@@ -240,7 +262,7 @@ def render_initial_ui() -> None:
                 icon=":material/menu:",
                 use_container_width=False
             ):
-                st.toggle(label="Show LLM Responses", key="show_llm_responses", help="Toggle to show or hide raw LLM responses")
+                st.toggle(label="Developer View", key="developer_view", help="Toggle to show or hide internal LLM responses")
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
                 st.divider()
                 st.markdown(f"Sandbox Execution Mode: **{st.session_state.get('sandbox_mode', 'Unreadable')}**")
@@ -250,7 +272,7 @@ def render_initial_ui() -> None:
                     key="sandbox_mode",
                     selection_mode="single",
                     disabled=not st.session_state.get("app_deployed", False),
-                    on_change=lambda: st.session_state.update({'graph': build_codeact_graph(
+                    on_change=lambda: st.session_state.update({'graph': build_graph(
                         llm=st.session_state.llm,
                         db=st.session_state.db,
                         table_info=table_info,
@@ -258,7 +280,9 @@ def render_initial_ui() -> None:
                         thread_id=st.session_state.thread_id,
                         user_id=st.session_state.selected_user_id,
                         global_hierarchy_access=st.session_state.global_hierarchy_access,
-                        remote_sandbox=st.session_state.sandbox_mode == "Remote",)})
+                        remote_sandbox=st.session_state.sandbox_mode == "Remote",
+                        num_parallel_executions=st.session_state.num_parallel_executions,
+                    )})
                 )
                 st.button(
                     label="Sandbox App",
@@ -304,20 +328,56 @@ def prepend_message_icon(message):
     return message
 
 def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
-    """Determine if a message should be visible based on its type and additional_kwargs."""
     additional_kwargs = message.additional_kwargs or {}
-
-    stage = additional_kwargs.get('stage', 'unknown')
-    process = additional_kwargs.get('process', 'unknown')
     if is_final:
-        if stage == 'final':
-            return True
+        return additional_kwargs.get('is_final') is True
     else:
-        if isinstance(message, AIMessageChunk) and st.session_state.get('show_llm_responses', False):
+        if st.session_state.get('developer_view', False):
             return True
-        if stage == 'node' or (stage == 'execution_output' and process in ['progress', 'error']):
+        if additional_kwargs.get('is_messenger') is True:
             return True
     return False
+
+def postprocess_state_update(state_update) -> AIMessage | AIMessageChunk | None:
+    node_icon_map = {
+        'history_summariser': 'summarize',
+        'context_orchestrator': 'search',
+        'query_classifier': 'shuffle',
+        'planner_branch': 'lightbulb',
+        'executor_branch': 'sprint',
+        'reporter': 'edit_square'
+    }
+    if isinstance(state_update, tuple) and len(state_update) == 2:
+        message, metadata = state_update
+        if isinstance(message, (AIMessage, AIMessageChunk)) and isinstance(metadata, dict):
+            # Augment metadata
+            langgraph_node = metadata.get('langgraph_node', "")
+            if not hasattr(message, "additional_kwargs"):
+                message.additional_kwargs = {}
+
+            stage = message.additional_kwargs.get('stage')
+            message.additional_kwargs["is_final"] = stage == 'final'
+
+            message.additional_kwargs["is_messenger"] = "messenger" in langgraph_node
+            if "branch" in langgraph_node:
+                message.additional_kwargs["thinking_container"] = "parallel"
+            elif "reporter" in langgraph_node:
+                message.additional_kwargs["thinking_container"] = "postparallel"
+            else:
+                message.additional_kwargs["thinking_container"] = "preparallel"
+            suffix_match = re.search(r'_branch_(\d+)$', langgraph_node)
+            message.additional_kwargs["branch_id"] = int(suffix_match.group(1)) if suffix_match else None
+
+            # Prepend icon
+            if message.additional_kwargs["is_messenger"] or stage == "execution_output":
+                for node_key, icon_name in node_icon_map.items():
+                    if node_key in langgraph_node:
+                        if not message.content.startswith(':material/'):
+                            message.content = f":material/{icon_name}: " + message.content.lstrip()
+                        break
+
+            return message
+    return None
 
 def render_message_content(message: AIMessage):
     """Render message content based on its type, handling artifacts for final and observation messages."""
@@ -374,45 +434,46 @@ def render_chat_content() -> None:
     handle_clear_chat()
 
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
-    current_query_steps = []
-    query_index = 0
-    previous_message_type = None
 
-    for message in st.session_state.get('messages', []):
+    i = 0
+    query_index = 0
+    while i < len(st.session_state.get('messages', [])):
+        message = st.session_state.messages[i]
         if isinstance(message, HumanMessage):
             with st.chat_message("user"):
                 st.markdown(message.content)
-            if query_index < len(st.session_state.intermediate_steps_history):
-                with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):
-                    rendered_content = ""
-                    for step in st.session_state.intermediate_steps_history[query_index]:
-                        rendered_content += step
-                    st.markdown(rendered_content)
+            
+            with st.chat_message("assistant"):
+                if query_index < len(st.session_state.intermediate_steps_history):
+                    query_steps = st.session_state.intermediate_steps_history[query_index]
+                    with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):                    
+                        if query_steps['preparallel']:
+                            preparallel_content = ''.join(query_steps['preparallel'])
+                            st.markdown(preparallel_content)
+                        
+                        parallels = query_steps['parallels']
+                        if parallels:
+                            num_branches = len(parallels)
+                            parallel_thinking_cols = st.columns(num_branches)
+                            for branch_id, steps in enumerate(parallels):
+                                with parallel_thinking_cols[branch_id]:
+                                    if steps:
+                                        parallel_content = ''.join(steps)
+                                        st.markdown(parallel_content)
+                        
+                        if query_steps['postparallel']:
+                            postparallel_content = ''.join(query_steps['postparallel'])
+                            st.markdown(postparallel_content)
+                
+                i += 1
+                while i < len(st.session_state.messages) and isinstance(st.session_state.messages[i], (AIMessage, AIMessageChunk)):
+                    final_message = st.session_state.messages[i]
+                    render_message_content(final_message)
+                    i += 1
+                i -= 1
+            
             query_index += 1
-            previous_message_type = HumanMessage
-        elif isinstance(message, (AIMessage, AIMessageChunk)):
-            message = prepend_message_icon(message)
-            if is_message_visible(message=message, is_final=True):
-                with st.chat_message("assistant"):
-                    render_message_content(message)
-            elif is_message_visible(message=message, is_final=False):
-                separator = "" if previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
-                current_query_steps.append(separator + (message.content or ""))
-                with st.chat_message("assistant"):
-                    rendered_content = ""
-                    prev_type = None
-                    for step in current_query_steps:
-                        if step.startswith("\n\n"):
-                            if prev_type is AIMessageChunk:
-                                rendered_content += step[2:]
-                                step = step[2:]
-                            else:
-                                rendered_content += step
-                        else:
-                            rendered_content += step
-                        prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
-                    st.markdown(rendered_content)
-            previous_message_type = type(message)
+        i += 1
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -433,62 +494,85 @@ def render_chat_content() -> None:
         config = {
             "configurable": {
                 "thread_id": st.session_state.thread_id,
-                "user_id": st.session_state.user_id
+                "user_id": st.session_state.selected_user_id
             }
         }
-        initial_state = {
-            "messages": st.session_state.messages,
-            "context": Context(
-                retrospective_query=""
-            )
-        }
+        messages_summary = filter_messages_only_final(st.session_state.messages)
+        initial_state = AgentState(
+            messages=messages_summary,
+            context=Context(retrospective_query="")
+        )
 
         with st.spinner("Generating..."):
             with st.chat_message("assistant"):
                 with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=True):
-                    thinking_container = st.empty()
+                    # Define thinking containers
+                    preparallel_thinking_container = st.empty()
+                    parallel_thinking_containers = []
+                    parallel_thinking_cols = st.columns(st.session_state.num_parallel_executions)
+                    for col_idx in range(st.session_state.num_parallel_executions):
+                        with parallel_thinking_cols[col_idx]:
+                            parallel_thinking_container = st.empty()
+                            parallel_thinking_containers.append(parallel_thinking_container)
+                    postparallel_thinking_container = st.empty()
 
-                current_query_steps = []
-                previous_message_type = None
+                    current_query_steps = {
+                        'preparallel': [],
+                        'parallels': [[] for _ in range(st.session_state.num_parallel_executions)],
+                        'postparallel': []
+                    }
+                    st.session_state.intermediate_steps_history.append(current_query_steps)
+
+                    preparallel_current_query_steps = current_query_steps['preparallel']
+                    postparallel_current_query_steps = current_query_steps['postparallel']
+                    parallel_current_query_steps = current_query_steps['parallels']
+
+                    preparallel_previous_message_type = None
+                    parallel_previous_message_types = [None for _ in range(st.session_state.num_parallel_executions)]
+                    postparallel_previous_message_type = None
 
                 for state_update in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
                     logger.debug(f'Raw state update in ui.py: {state_update[:100]}')
+                    message = postprocess_state_update(state_update)
 
-                    if isinstance(state_update, tuple):
-                        state = state_update[0]
-                        if isinstance(state, dict):
-                            messages = state.get('messages', [])
-                        else:
-                            messages = [state]
-                    else:
-                        messages = state_update.get('messages', [])
-                    
-                    for message in messages:
-                        logger.info(f'Streamed message: {message}')
-                        if isinstance(message, (AIMessage, AIMessageChunk)):
-                            message = prepend_message_icon(message)
-                            if is_message_visible(message=message, is_final=True):
-                                st.session_state.messages.append(message)
-                                render_message_content(message)
-                            elif is_message_visible(message=message, is_final=False):
-                                separator = "" if previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
-                                current_query_steps.append(separator + (message.content or ""))
+                    if is_message_visible(message=message, is_final=True):
+                        # Render final response
+                        st.session_state.messages.append(message)
+                        render_message_content(message)
+                    elif is_message_visible(message=message, is_final=False):
+                        # Render intermediate steps
+                        match message.additional_kwargs.get("thinking_container"):
+                            case "preparallel":
+                                separator = "" if preparallel_previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
+                                preparallel_current_query_steps.append(separator + (message.content or ""))
                                 rendered_content = ""
                                 prev_type = None
-                                for step in current_query_steps:
-                                    if step.startswith("\n\n"):
-                                        if prev_type is AIMessageChunk:
-                                            rendered_content += step[2:]
-                                            step = step[2:]
-                                        else:
-                                            rendered_content += step
-                                    else:
-                                        rendered_content += step
+                                for step in preparallel_current_query_steps:
+                                    rendered_content += step
                                     prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
-                                thinking_container.markdown(rendered_content)
-                            previous_message_type = type(message)
+                                preparallel_thinking_container.markdown(rendered_content)
+                                preparallel_previous_message_type = type(message)
+                            case "parallel":
+                                branch_id = message.additional_kwargs.get("branch_id", 0)
+                                separator = "" if parallel_previous_message_types[branch_id] is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
+                                parallel_current_query_steps[branch_id].append(separator + (message.content or ""))
+                                rendered_content = ""
+                                prev_type = None
+                                for step in parallel_current_query_steps[branch_id]:
+                                    rendered_content += step
+                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
+                                parallel_thinking_containers[branch_id].markdown(rendered_content)
+                                parallel_previous_message_types[branch_id] = type(message)
+                            case "postparallel":
+                                separator = "" if postparallel_previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
+                                postparallel_current_query_steps.append(separator + (message.content or ""))
+                                rendered_content = ""
+                                prev_type = None
+                                for step in postparallel_current_query_steps:
+                                    rendered_content += step
+                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
+                                postparallel_thinking_container.markdown(rendered_content)
+                                postparallel_previous_message_type = type(message)
 
-                if current_query_steps:
-                    st.session_state.intermediate_steps_history.append(current_query_steps)
                 if len(st.session_state.intermediate_steps_history) > MAX_HISTORY // 2:
                     st.session_state.intermediate_steps_history = st.session_state.intermediate_steps_history[-MAX_HISTORY // 2:]

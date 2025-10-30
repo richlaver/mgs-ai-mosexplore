@@ -244,7 +244,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
     ) -> Tuple[str, List[Dict]]:
         secondary_y_instruments = secondary_y_instruments or []
         review_level_values = review_level_values or []
-        logger.debug(
+        logger.info(
             f"TimeSeriesPlotTool._run called with {len(primary_y_instruments)} primary and {len(secondary_y_instruments)} secondary instruments"
         )
         try:
@@ -311,9 +311,9 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     end_time=end_time.strftime("%Y-%m-%d %H:%M:%S")
                 )
                 
-                logger.debug(f"Executing SQL query for {column_name}:\n{query}")
+                logger.info(f"Executing SQL query for {column_name}:\n{query}")
                 results = self.sql_tool._run(query)
-                logger.debug(f"Query results: {results}")
+                logger.info(f"Query results: {results}")
                 
                 if results == "No data was found in the database matching the specified search criteria.":
                     continue
@@ -360,12 +360,12 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             if not any(time_series_data.values()):
                 raise ValueError("No valid data found for any instruments in the specified time range. Check instrument IDs, column names, or expand the time range.")
             
-            logger.debug(f"Processed data for instruments: {list(time_series_data.keys())}")
-            logger.debug(f"Parsed data into time series data: {time_series_data}")
+            logger.info(f"Processed data for instruments: {list(time_series_data.keys())}")
+            logger.info(f"Parsed data into time series data: {time_series_data}")
 
             # Create Plotly figure
             fig = go.Figure()
-            logger.debug("Plotly figure initialized")
+            logger.info("Plotly figure initialized")
             
             # Colors for time series
             primary_colors = ['#1f77b4', '#4b9cd3', '#87ceeb', '#add8e6']  # Blue hues
@@ -377,10 +377,10 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             for i, instr in enumerate(primary_y_instruments):
                 instr_id = instr.instrument_id
                 if instr_id not in time_series_data or not time_series_data[instr_id]:
-                    logger.debug(f"No data for primary instrument {instr_id}")
+                    logger.info(f"No data for primary instrument {instr_id}")
                     continue
                 times, values = zip(*time_series_data[instr_id])
-                logger.debug(f"Primary instrument {instr_id}: {len(times)} data points")
+                logger.info(f"Primary instrument {instr_id}: {len(times)} data points")
                 y_min = min(y_min, min(values))
                 y_max = max(y_max, max(values))
                 if y_min == y_max:
@@ -399,8 +399,8 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     line=dict(color=primary_colors[i % len(primary_colors)]),
                     hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {primary_y_unit}<extra></extra>"
                 ))
-                logger.debug(f"Added primary trace for {instr_id}")
-            logger.debug(f"Primary traces added | y_min={y_min}, y_max={y_max}")
+                logger.info(f"Added primary trace for {instr_id}")
+            logger.info(f"Primary traces added | y_min={y_min}, y_max={y_max}")
 
             # Plot time series for secondary y-axis
             secondary_y_min, secondary_y_max = float('inf'), float('-inf')
@@ -408,10 +408,10 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             for i, instr in enumerate(secondary_y_instruments):
                 instr_id = instr.instrument_id
                 if instr_id not in time_series_data or not time_series_data[instr_id]:
-                    logger.debug(f"No data for secondary instrument {instr_id}")
+                    logger.info(f"No data for secondary instrument {instr_id}")
                     continue
                 times, values = zip(*time_series_data[instr_id])
-                logger.debug(f"Secondary instrument {instr_id}: {len(times)} data points")
+                logger.info(f"Secondary instrument {instr_id}: {len(times)} data points")
                 secondary_y_min = min(secondary_y_min, min(values))
                 secondary_y_max = max(secondary_y_max, max(values))
                 sec_suffix_title = (secondary_y_title or "").lower()
@@ -425,8 +425,8 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     yaxis='y2',
                     hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {secondary_y_unit if secondary_y_unit is not None else ''}<extra></extra>"
                 ))
-                logger.debug(f"Added secondary trace for {instr_id}")
-            logger.debug(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
+                logger.info(f"Added secondary trace for {instr_id}")
+            logger.info(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
 
             # Plot review levels if provided
             if review_level_values:
@@ -444,7 +444,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     )
                     y_min = min(y_min, level)
                     y_max = max(y_max, level)
-                logger.debug(f"Added {len(pos_levels + neg_levels)} review level hlines")
+                logger.info(f"Added {len(pos_levels + neg_levels)} review level hlines")
 
             # Highlight zero line
             if highlight_zero and not secondary_y_instruments:
@@ -455,13 +455,13 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 )
                 y_min = min(y_min, 0)
                 y_max = max(y_max, 0)
-                logger.debug("Added zero highlight hline")
+                logger.info("Added zero highlight hline")
 
             # Set axis properties
             x_grid = self._get_x_grid_settings(start_time, end_time)
-            logger.debug(f"x_grid calculated: {x_grid}")
+            logger.info(f"x_grid calculated: {x_grid}")
             primary_y_grid = self._get_y_grid_settings(y_min, y_max)
-            logger.debug(f"primary_y_grid calculated: {primary_y_grid}")
+            logger.info(f"primary_y_grid calculated: {primary_y_grid}")
 
             if primary_y_grid['major_step'] <= 0 or primary_y_grid['minor_step'] <= 0:
                 logger.error(f"Invalid primary y-grid steps: major={primary_y_grid['major_step']}, minor={primary_y_grid['minor_step']}")
@@ -486,7 +486,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             
             if secondary_y_instruments:
                 secondary_y_grid = self._get_y_grid_settings(secondary_y_min, secondary_y_max)
-                logger.debug(f"secondary_y_grid calculated: {secondary_y_grid}")
+                logger.info(f"secondary_y_grid calculated: {secondary_y_grid}")
                 if secondary_y_grid['major_step'] <= 0 or secondary_y_grid['minor_step'] <= 0:
                     logger.error(f"Invalid secondary y-grid steps: major={secondary_y_grid['major_step']}, minor={secondary_y_grid['minor_step']}")
                     raise ValueError("Invalid secondary y-axis grid steps calculated")
@@ -509,7 +509,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 template="plotly_white",
                 **layout
             )
-            logger.debug("Figure layout updated")
+            logger.info("Figure layout updated")
 
             if not fig.data:
                 logger.error("Plotly figure has no traces")
@@ -521,7 +521,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 instr_id = instr.instrument_id
                 column_name = instr.column_name
                 if instr_id not in time_series_data or not time_series_data[instr_id]:
-                    logger.debug(f"Skipping empty data for instrument {instr_id}")
+                    logger.info(f"Skipping empty data for instrument {instr_id}")
                     continue
                 for dt, val in time_series_data[instr_id]:
                     all_data.append({
@@ -531,22 +531,22 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                         'Value': val,
                         'Y-Axis': 'Primary' if instr in primary_y_instruments else 'Secondary'
                     })
-            logger.debug(f"all_data populated with {len(all_data)} entries")
+            logger.info(f"all_data populated with {len(all_data)} entries")
 
             if not all_data:
                 logger.error("No data for CSV generation")
                 raise ValueError("No data available for CSV generation")
             
             df = pd.DataFrame(all_data)
-            logger.debug(f"DataFrame created with shape {df.shape}")
+            logger.info(f"DataFrame created with shape {df.shape}")
             csv_content = df.to_csv(index=False)
-            logger.debug(f"CSV content generated (length: {len(csv_content)})")
+            logger.info(f"CSV content generated (length: {len(csv_content)})")
             
             # Prepare artefacts
             plotly_filename = f"time_series_{uuid.uuid4()}.json"
             try:
                 plotly_json = fig.to_json()
-                logger.debug(f"Plotly JSON generated (length: {len(plotly_json)})")
+                logger.info(f"Plotly JSON generated (length: {len(plotly_json)})")
             except Exception as e:
                 logger.error(f"Failed to serialize Plotly figure: {str(e)}", exc_info=True)
                 raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
@@ -567,10 +567,10 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     'content': csv_content
                 }
             ]
-            logger.debug(f"Artefacts list created with {len(artefacts)} items")
+            logger.info(f"Artefacts list created with {len(artefacts)} items")
             
             content = f"Generated time series plot and CSV for instruments {', '.join(all_instrument_ids)} from {format_datetime(start_time)} to {format_datetime(end_time)}."
-            logger.debug(f"Returning content: {content}, artefacts count: {len(artefacts)}")
+            logger.info(f"Returning content: {content}, artefacts count: {len(artefacts)}")
             return {"content": content, "artefacts": artefacts}
         
         except ValueError as e:
@@ -630,8 +630,8 @@ class TimeSeriesPlotWrapperTool(BaseTool):
         return json_str
 
     def _run(self, input_json: str) -> str:
-        logger.debug(f"TimeSeriesPlotWrapperTool._run called")
-        logger.debug(f"Input JSON: {input_json}")
+        logger.info(f"TimeSeriesPlotWrapperTool._run called")
+        logger.info(f"Input JSON: {input_json}")
         try:
             # Remove JSON code block markers if present
             input_json = re.sub(r'^```json\s*\n|\s*```$', '', input_json, flags=re.MULTILINE)
@@ -648,7 +648,7 @@ class TimeSeriesPlotWrapperTool(BaseTool):
             if missing:
                 content = f"Error processing input: Missing required fields: {', '.join(missing)}"
                 return content, []
-            logger.debug(f"Parsed input dictionary: {input_dict}")
+            logger.info(f"Parsed input dictionary: {input_dict}")
             
             try:
                 start_time = parse_datetime(input_dict['start_time'])
@@ -671,7 +671,7 @@ class TimeSeriesPlotWrapperTool(BaseTool):
                 review_level_values=input_dict.get('review_level_values', []),
                 highlight_zero=input_dict.get('highlight_zero', False)
             )
-            logger.debug(f"Plot tool result: {plot_tool_result}")
+            logger.info(f"Plot tool result: {plot_tool_result}")
 
             content, artifacts = plot_tool_result
             result = {'content': content, 'artifacts': artifacts}
@@ -1041,7 +1041,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
     response_format: str = "content"
 
     def _get_center_coords(self, center_instrument_id: Optional[str], center_easting: Optional[float], center_northing: Optional[float]) -> Tuple[float, float]:
-        logger.debug(f"Fetching center coordinates for instrument_id={center_instrument_id}, easting={center_easting}, northing={center_northing}")
+        logger.info(f"Fetching center coordinates for instrument_id={center_instrument_id}, easting={center_easting}, northing={center_northing}")
         if center_instrument_id:
             query = f"""
             SELECT l.easting, l.northing
@@ -1049,9 +1049,9 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             JOIN location l ON i.location_id = l.id
             WHERE i.instr_id = '{center_instrument_id}';
             """
-            logger.debug(f"Executing SQL query for center: {query}")
+            logger.info(f"Executing SQL query for center: {query}")
             result = self.sql_tool._run(query)
-            logger.debug(f"Query result: {result}")
+            logger.info(f"Query result: {result}")
             if result == "No data was found in the database matching the specified search criteria.":
                 raise ValueError(f"No location found for instrument ID {center_instrument_id}")
             try:
@@ -1085,34 +1085,34 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 if None in (easting_clean, northing_clean):
                     raise ValueError(f"Invalid easting or northing for instrument ID {center_instrument_id}")
                 e_f, n_f = float(easting_clean), float(northing_clean)
-                logger.debug(f"Center coords from instrument: easting={e_f}, northing={n_f}")
+                logger.info(f"Center coords from instrument: easting={e_f}, northing={n_f}")
                 return e_f, n_f
             except Exception as e:
                 logger.error(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
                 raise ValueError(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
         elif center_easting is not None and center_northing is not None:
-            logger.debug(f"Using provided center coords: easting={center_easting}, northing={center_northing}")
+            logger.info(f"Using provided center coords: easting={center_easting}, northing={center_northing}")
             return center_easting, center_northing
         else:
             raise ValueError("Either center_instrument_id or both center_easting and center_northing must be provided")
 
     def _get_bounds(self, center_e: float, center_n: float, radius_m: float) -> Tuple[float, float, float, float]:
-        logger.debug(f"Calculating bounds with center_e={center_e}, center_n={center_n}, radius_m={radius_m}")
+        logger.info(f"Calculating bounds with center_e={center_e}, center_n={center_n}, radius_m={radius_m}")
         min_e = center_e - radius_m
         max_e = center_e + radius_m
         min_n = center_n - radius_m
         max_n = center_n + radius_m
-        logger.debug(f"Bounds: min_e={min_e}, max_e={max_e}, min_n={min_n}, max_n={max_n}")
+        logger.info(f"Bounds: min_e={min_e}, max_e={max_e}, min_n={min_n}, max_n={max_n}")
         return min_e, max_e, min_n, max_n
 
     def _get_review_config(self, field: str) -> Dict:
-        logger.debug(f"Getting review config for field={field}")
+        logger.info(f"Getting review config for field={field}")
         pos_values = [100, 50, 20]
         neg_values = [-20, -50, -100]
         severity_map = {100: 3, 50: 2, 20: 1, -20: 1, -50: 2, -100: 3}
         color_map = {100: 'red', 50: 'orange', 20: 'yellow', -20: 'yellow', -50: 'orange', -100: 'red'}
         config = {'pos_values': pos_values, 'neg_values': neg_values, 'severity_map': severity_map, 'color_map': color_map}
-        logger.debug(f"Review config: {config}")
+        logger.info(f"Review config: {config}")
         return config
 
     def _extract_numeric(self, v: Any) -> Optional[str]:
@@ -1180,7 +1180,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
     def _get_readings(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
                       start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
         field = s.database_field_name
-        logger.debug(f"Getting readings for field={field}")
+        logger.info(f"Getting readings for field={field}")
         is_data = field.startswith('data')
         
         # Define value extraction logic
@@ -1218,38 +1218,38 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             {extra_conditions};
             """
-            logger.debug(f"Executing readings query for value_at_time: {query}")
+            logger.info(f"Executing readings query for value_at_time: {query}")
             raw_result = self.sql_tool._run(query)
-            logger.debug(f"Raw SQL result: {raw_result!r}")
+            logger.info(f"Raw SQL result: {raw_result!r}")
             raw_data = safe_eval(raw_result)
-            logger.debug(f"Parsed eval result: {raw_data}")
+            logger.info(f"Parsed eval result: {raw_data}")
             if not raw_data:
                 logger.warning(f"No data returned for series {s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}")
                 return []
             data = []
             for row in raw_data:
-                logger.debug(f"Processing row: {row}")
+                logger.info(f"Processing row: {row}")
                 norm = self._extract_row_reading(row)
                 if not norm:
                     logger.warning(f"Skipping unrecognized row format: {row}")
                     continue
                 id_, e, n, v = norm
-                logger.debug(f"Raw extracted values: id={id_!r}, easting={e!r}, northing={n!r}, value={v!r}")
+                logger.info(f"Raw extracted values: id={id_!r}, easting={e!r}, northing={n!r}, value={v!r}")
                 e_clean = self._extract_numeric(e)
                 n_clean = self._extract_numeric(n)
                 v_clean = self._extract_numeric(v)
-                logger.debug(f"Cleaned values: easting={e_clean!r}, northing={n_clean!r}, value={v_clean!r}")
+                logger.info(f"Cleaned values: easting={e_clean!r}, northing={n_clean!r}, value={v_clean!r}")
                 if None in (e_clean, n_clean, v_clean):
                     logger.warning(f"Invalid cleaned values after normalization: easting={e!r}, northing={n!r}, value={v!r}")
                     continue
                 try:
                     fe = float(e_clean); fn = float(n_clean); fv = float(v_clean)
                     data.append((id_, fe, fn, fv))
-                    logger.debug(f"Appended valid data point: {id_}, {fe}, {fn}, {fv}")
+                    logger.info(f"Appended valid data point: {id_}, {fe}, {fn}, {fv}")
                 except ValueError as conv_err:
                     logger.warning(f"ValueError converting numeric strings: {conv_err}, row: {row}")
                     continue
-            logger.debug(f"Collected {len(data)} valid data points")
+            logger.info(f"Collected {len(data)} valid data points")
             return data
         else:
             query_end = f"""
@@ -1261,7 +1261,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             {extra_conditions};
             """
-            logger.debug(f"Executing end readings query for change_over_period: {query_end}")
+            logger.info(f"Executing end readings query for change_over_period: {query_end}")
             raw_end = safe_eval(self.sql_tool._run(query_end))
             result_end = []
             for row in raw_end:
@@ -1286,7 +1286,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_start}' AND '{start_time_str}')
             {extra_conditions};
             """
-            logger.debug(f"Executing start readings query for change_over_period: {query_start}")
+            logger.info(f"Executing start readings query for change_over_period: {query_start}")
             raw_start = safe_eval(self.sql_tool._run(query_start))
             result_start = []
             for row in raw_start:
@@ -1308,7 +1308,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 if val_start is not None:
                     changes[instr_id] = val_end - val_start
             if not changes:
-                logger.debug("No changes found")
+                logger.info("No changes found")
                 return []
             instr_ids_str = ','.join(f"'{id_}'" for id_ in changes)
             loc_query = f"""
@@ -1316,7 +1316,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             FROM instrum i JOIN location l ON i.location_id = l.id
             WHERE i.instr_id IN ({instr_ids_str});
             """
-            logger.debug(f"Executing location query: {loc_query}")
+            logger.info(f"Executing location query: {loc_query}")
             raw_locs = safe_eval(self.sql_tool._run(loc_query))
             loc_dict = {}
             for row in raw_locs:
@@ -1337,11 +1337,11 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 except ValueError:
                     continue
             data = [(id_, loc_dict[id_][0], loc_dict[id_][1], changes[id_]) for id_ in changes if id_ in loc_dict]
-            logger.debug(f"Collected {len(data)} change data points")
+            logger.info(f"Collected {len(data)} change data points")
             return data
 
     def _get_review_status(self, value: float, review_config: Dict) -> Tuple[int, str]:
-        logger.debug(f"Getting review status for value={value}")
+        logger.info(f"Getting review status for value={value}")
         pos = review_config['pos_values']
         neg = review_config['neg_values']
         abs_thresh = 0
@@ -1355,14 +1355,14 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     abs_thresh = max(abs_thresh, abs(t))
         severity = review_config['severity_map'].get(abs_thresh, 0)
         color = review_config['color_map'].get(abs_thresh, 'grey')
-        logger.debug(f"Status: severity={severity}, color={color}")
+        logger.info(f"Status: severity={severity}, color={color}")
         return severity, color
 
     def _get_reviews(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
                      start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
         review_config = self._get_review_config(s.database_field_name)
         field = s.database_field_name
-        logger.debug(f"Getting reviews for field={field}")
+        logger.info(f"Getting reviews for field={field}")
         is_data = field.startswith('data')
         field_extract = field if is_data else f"JSON_EXTRACT(m.custom_fields, '$.{field}')"
         extra_conditions = f"AND {field_extract} != ''" if is_data else f"AND m.custom_fields IS NOT NULL AND JSON_VALID(m.custom_fields) AND {field_extract} IS NOT NULL AND {field_extract} != 'null' AND {field_extract} != ''"
@@ -1390,7 +1390,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
-            logger.debug(f"Executing reviews query for value_at_time: {query}")
+            logger.info(f"Executing reviews query for value_at_time: {query}")
             raw_result = self.sql_tool._run(query)
             raw_data = safe_eval(raw_result)
             data = []
@@ -1409,7 +1409,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     data.append((id_, float(e_clean), float(n_clean), self._get_review_status(v_float, review_config)[1]))
                 except ValueError:
                     continue
-            logger.debug(f"Collected {len(data)} review data points")
+            logger.info(f"Collected {len(data)} review data points")
             return data
         else:
             query_end = f"""
@@ -1423,7 +1423,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
-            logger.debug(f"Executing end reviews query for change_over_period: {query_end}")
+            logger.info(f"Executing end reviews query for change_over_period: {query_end}")
             raw_end = safe_eval(self.sql_tool._run(query_end))
             result_end = []
             for row in raw_end:
@@ -1450,7 +1450,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_start}' AND '{start_time_str}')
             AND {field_extract} IS NOT NULL {extra_conditions};
             """
-            logger.debug(f"Executing start reviews query for change_over_period: {query_start}")
+            logger.info(f"Executing start reviews query for change_over_period: {query_start}")
             raw_start = safe_eval(self.sql_tool._run(query_start))
             result_start = []
             for row in raw_start:
@@ -1477,7 +1477,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     else:
                         statuses[instr_id] = 'grey'
             if not statuses:
-                logger.debug("No statuses found")
+                logger.info("No statuses found")
                 return []
             instr_ids_str = ','.join(f"'{id_}'" for id_ in statuses)
             loc_query = f"""
@@ -1485,7 +1485,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             FROM instrum i JOIN location l ON i.location_id = l.id
             WHERE i.instr_id IN ({instr_ids_str});
             """
-            logger.debug(f"Executing location query for reviews: {loc_query}")
+            logger.info(f"Executing location query for reviews: {loc_query}")
             raw_locs = safe_eval(self.sql_tool._run(loc_query))
             loc_dict = {}
             for row in raw_locs:
@@ -1506,7 +1506,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 except ValueError:
                     continue
             data = [(id_, loc_dict.get(id_, (0,0))[0], loc_dict.get(id_, (0,0))[1], statuses[id_]) for id_ in statuses if id_ in loc_dict]
-            logger.debug(f"Collected {len(data)} review change data points")
+            logger.info(f"Collected {len(data)} review change data points")
             return data
 
     def _run(
@@ -1523,7 +1523,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         radius_meters: Optional[float] = None,
         exclude_instrument_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        logger.debug(f"MapPlotTool._run called with data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}, buffer_period_hours={buffer_period_hours}, series_count={len(series) if series else 0}, center_instrument_id={center_instrument_id}, center_easting={center_easting}, center_northing={center_northing}, radius_meters={radius_meters}, exclude_instrument_ids={exclude_instrument_ids}")
+        logger.info(f"MapPlotTool._run called with data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}, buffer_period_hours={buffer_period_hours}, series_count={len(series) if series else 0}, center_instrument_id={center_instrument_id}, center_easting={center_easting}, center_northing={center_northing}, radius_meters={radius_meters}, exclude_instrument_ids={exclude_instrument_ids}")
         try:
             if buffer_period_hours is None:
                 buffer_period_hours = 72
@@ -1549,7 +1549,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 radius_meters=radius_meters,
                 exclude_instrument_ids=exclude_instrument_ids
             )
-            logger.debug(f"Validated inputs: {inputs}")
+            logger.info(f"Validated inputs: {inputs}")
 
             if inputs.plot_type == 'change_over_period' and inputs.start_time is None:
                 raise ValueError("start_time is required for 'change_over_period'")
@@ -1562,27 +1562,27 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             min_e, max_e, min_n, max_n = self._get_bounds(center_e, center_n, inputs.radius_meters)
             exclude_str = ','.join(f"'{id}'" for id in inputs.exclude_instrument_ids)
             exclude_clause = f"AND i.instr_id NOT IN ({exclude_str})" if exclude_str else ""
-            logger.debug(f"Exclude clause: {exclude_clause}")
+            logger.info(f"Exclude clause: {exclude_clause}")
             start_time_str = inputs.start_time.strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
             end_time_str = inputs.end_time.strftime("%Y-%m-%d %H:%M:%S")
             buffer_end = (inputs.end_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S")
             buffer_start = (inputs.start_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
-            logger.debug(f"Time strings: start_time_str={start_time_str}, end_time_str={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
+            logger.info(f"Time strings: start_time_str={start_time_str}, end_time_str={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
 
             data = {}
             suggestions = []
             for s in inputs.series:
                 key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
-                logger.debug(f"Processing series: {key}")
+                logger.info(f"Processing series: {key}")
                 if inputs.data_type == 'readings':
                     points = self._get_readings(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
                     if points:
                         vals = [v for _, _, _, v in points]
-                        logger.debug(f"Values for outlier detection: {vals}")
+                        logger.info(f"Values for outlier detection: {vals}")
                         mean = np.mean(vals)
                         std = np.std(vals)
                         outliers = [id for id, _, _, v in points if abs(v - mean) > 3 * std]
-                        logger.debug(f"Outliers detected: {outliers}")
+                        logger.info(f"Outliers detected: {outliers}")
                         suggestions.extend(outliers)
                 else:
                     points = self._get_reviews(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
@@ -1592,29 +1592,29 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     try:
                         lat, lon = easting_northing_to_lat_lon(e, n)
                         data[key].append((id, lat, lon, v))
-                        logger.debug(f"Converted coords for {id}: lat={lat}, lon={lon}, value={v}")
+                        logger.info(f"Converted coords for {id}: lat={lat}, lon={lon}, value={v}")
                     except Exception as e:
                         logger.warning(f"Failed to convert coords for {id}: easting={e}, northing={n}, error: {str(e)}")
                         continue
-                logger.debug(f"Collected {len(data[key])} points for series {key}")
+                logger.info(f"Collected {len(data[key])} points for series {key}")
 
             if not any(data.values()):
                 logger.warning("No data found for any series")
                 return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
 
             center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
-            logger.debug(f"Center lat/lon: {center_lat}, {center_lon}")
+            logger.info(f"Center lat/lon: {center_lat}, {center_lon}")
             fig = go.Figure()
-            logger.debug("Plotly figure initialized")
+            logger.info("Plotly figure initialized")
             for i, s in enumerate(inputs.series):
                 key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
                 points = data.get(key, [])
                 if not points:
-                    logger.debug(f"No points for series {key}")
+                    logger.info(f"No points for series {key}")
                     continue
                 instr_ids, lats, lons, vals = zip(*points)
                 if inputs.data_type == 'readings':
-                    logger.debug(f"Adding readings trace for series {key}")
+                    logger.info(f"Adding readings trace for series {key}")
                     max_abs = max(abs(max(vals)), abs(min(vals))) if vals else 1
                     if inputs.plot_type == 'change_over_period':
                         cmap = pc.diverging.PiYG
@@ -1658,9 +1658,9 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         hovertemplate="%{customdata[0]}<br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
                         name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
                     ))
-                    logger.debug(f"Added readings trace")
+                    logger.info(f"Added readings trace")
                 else:
-                    logger.debug(f"Adding reviews trace for series {key}")
+                    logger.info(f"Adding reviews trace for series {key}")
                     colors = vals
                     text = [f"{id}: {v}" for id, v in zip(instr_ids, vals)]
                     unique_colors = list(set(vals))
@@ -1689,10 +1689,10 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         text=text,
                         name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
                     ))
-                    logger.debug(f"Added reviews trace")
+                    logger.info(f"Added reviews trace")
 
             time_str = f"at {format_datetime(inputs.end_time)}" if inputs.plot_type == 'value_at_time' else f"change from {format_datetime(inputs.start_time)} to {format_datetime(inputs.end_time)}"
-            logger.debug(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
+            logger.info(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
             fig.update_layout(
                 title=f"{inputs.data_type.capitalize()} {time_str}",
                 mapbox_style="open-street-map",
@@ -1700,7 +1700,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 mapbox_zoom=15,
                 showlegend=False  
             )
-            logger.debug("Figure layout updated")
+            logger.info("Figure layout updated")
 
             all_data = []
             for s in inputs.series:
@@ -1714,19 +1714,19 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         'Series': s.measured_quantity_name,
                         'Unit': s.abbreviated_unit
                     })
-            logger.debug(f"all_data populated with {len(all_data)} entries")
+            logger.info(f"all_data populated with {len(all_data)} entries")
             if not all_data:
                 logger.error("No data for CSV generation")
                 raise ValueError("No data available for CSV generation")
             df = pd.DataFrame(all_data)
-            logger.debug(f"DataFrame created with shape {df.shape}")
+            logger.info(f"DataFrame created with shape {df.shape}")
             csv_content = df.to_csv(index=False)
-            logger.debug(f"CSV content generated (length: {len(csv_content)})")
+            logger.info(f"CSV content generated (length: {len(csv_content)})")
 
             plotly_filename = f"map_plot_{uuid.uuid4()}.json"
             try:
                 plotly_json = fig.to_json()
-                logger.debug(f"Plotly JSON generated (length: {len(plotly_json)})")
+                logger.info(f"Plotly JSON generated (length: {len(plotly_json)})")
             except Exception as e:
                 logger.error(f"Failed to serialize Plotly figure: {str(e)}")
                 raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
@@ -1747,10 +1747,10 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     'content': csv_content
                 }
             ]
-            logger.debug(f"Artefacts list created with {len(artefacts)} items")
+            logger.info(f"Artefacts list created with {len(artefacts)} items")
 
             content = f"Generated map plot and CSV for {inputs.data_type} {time_str}." + (f" Suggested outliers to exclude: {', '.join(set(suggestions))}" if suggestions and inputs.data_type == 'readings' else "")
-            logger.debug(f"Returning content: {content}, artefacts count: {len(artefacts)}")
+            logger.info(f"Returning content: {content}, artefacts count: {len(artefacts)}")
             return {"content": content, "artefacts": artefacts}
         
         except ValueError as e:
@@ -1784,8 +1784,8 @@ class MapPlotWrapperTool(BaseTool):
     response_format: str = "content"
 
     def _run(self, input_json: str) -> str:
-        logger.debug(f"MapPlotWrapperTool._run called")
-        logger.debug(f"Input JSON: {input_json}")
+        logger.info(f"MapPlotWrapperTool._run called")
+        logger.info(f"Input JSON: {input_json}")
         try:
             # Remove JSON code block markers if present
             input_json = re.sub(r'^```json\s*\n|\s*```$', '', input_json, flags=re.MULTILINE)
@@ -1794,7 +1794,7 @@ class MapPlotWrapperTool(BaseTool):
             # Replace "None" with "null" for JSON compatibility
             input_json = re.sub(r':\s*None\b', ': null', input_json)
             input_dict = json.loads(input_json)
-            logger.debug(f"Parsed input dictionary: {input_dict}")
+            logger.info(f"Parsed input dictionary: {input_dict}")
 
             # Extract required fields (will raise KeyError if missing)
             data_type = input_dict['data_type']
@@ -1832,7 +1832,7 @@ class MapPlotWrapperTool(BaseTool):
                 radius_meters=radius_meters,
                 exclude_instrument_ids=exclude_instrument_ids
             )
-            logger.debug(f"Plot tool result: {content}, {artefacts}")
+            logger.info(f"Plot tool result: {content}, {artefacts}")
 
             return json.dumps({'content': content, 'artifacts': artefacts})
         except KeyError as e:

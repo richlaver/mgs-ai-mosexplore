@@ -3,7 +3,7 @@ import streamlit as st
 st.set_page_config(
     page_title="MissionOS Explore",
     page_icon="mgs-small-logo.svg",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="expanded",
 )
 
@@ -40,7 +40,7 @@ def perform_setup():
     st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
 
     import graph
-    st.session_state.graph = graph.build_codeact_graph(
+    st.session_state.graph = graph.build_graph(
         llm=st.session_state.llm,
         db=st.session_state.db,
         table_info=table_info,
@@ -49,6 +49,7 @@ def perform_setup():
         user_id=st.session_state.selected_user_id,
         global_hierarchy_access=st.session_state.global_hierarchy_access,
         remote_sandbox=st.session_state.sandbox_mode == "Remote",
+        num_parallel_executions=st.session_state.num_parallel_executions,
     )
 
 def main() -> None:
