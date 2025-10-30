@@ -399,7 +399,7 @@ def render_message_content(message: AIMessage):
                         fig_json = json.loads(blob.decode('utf-8'))
                         fig = pio.from_json(json.dumps(fig_json))
                         with st.container():
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
                     except Exception as e:
                         logger.error(f"Failed to render Plotly figure: {str(e)}")
                         st.error("Error rendering plot")
