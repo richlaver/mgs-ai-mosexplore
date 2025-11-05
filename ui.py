@@ -244,6 +244,28 @@ def render_initial_ui() -> None:
                 global_hierarchy_access=st.session_state.global_hierarchy_access,
                 remote_sandbox=st.session_state.sandbox_mode,
                 num_parallel_executions=st.session_state.num_parallel_executions,
+                agent_type=st.session_state.agent_type,
+            )})
+        )
+        st.segmented_control(
+            label="Agent Type",
+            options=["CodeAct", "Auto", "ReAct"],
+            selection_mode="single",
+            key="agent_type",
+            help="CodeAct: writes and executes code | ReAct: reasons and uses tools",
+            on_change=lambda: st.session_state.update({'graph': build_graph(
+                llm=st.session_state.llm,
+                db=st.session_state.db,
+                blob_db=st.session_state.blob_db,
+                metadata_db=st.session_state.metadata_db,
+                table_info=table_info,
+                table_relationship_graph=st.session_state.table_relationship_graph, 
+                thread_id=st.session_state.thread_id,
+                user_id=st.session_state.selected_user_id,
+                global_hierarchy_access=st.session_state.global_hierarchy_access,
+                remote_sandbox=st.session_state.sandbox_mode == "Remote",
+                num_parallel_executions=st.session_state.num_parallel_executions,
+                agent_type=st.session_state.agent_type,
             )})
         )
         cols = st.columns([3, 1])
@@ -266,28 +288,6 @@ def render_initial_ui() -> None:
             ):
                 st.toggle(label="Developer View", key="developer_view", help="Toggle to show or hide internal LLM responses")
                 st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
-                st.divider()
-                st.markdown(f"Sandbox Execution Mode: **{st.session_state.get('sandbox_mode', 'Unreadable')}**")
-                st.segmented_control(
-                    label="Sandbox Execution Mode",
-                    options=["Local", "Remote"],
-                    key="sandbox_mode",
-                    selection_mode="single",
-                    disabled=not st.session_state.get("app_deployed", False),
-                    on_change=lambda: st.session_state.update({'graph': build_graph(
-                        llm=st.session_state.llm,
-                        db=st.session_state.db,
-                        blob_db=st.session_state.blob_db,
-                        metadata_db=st.session_state.metadata_db,
-                        table_info=table_info,
-                        table_relationship_graph=st.session_state.table_relationship_graph, 
-                        thread_id=st.session_state.thread_id,
-                        user_id=st.session_state.selected_user_id,
-                        global_hierarchy_access=st.session_state.global_hierarchy_access,
-                        remote_sandbox=st.session_state.sandbox_mode == "Remote",
-                        num_parallel_executions=st.session_state.num_parallel_executions,
-                    )})
-                )
                 st.button(
                     label="Sandbox App",
                     icon=":material/developer_board:",
@@ -303,33 +303,6 @@ def render_initial_ui() -> None:
             disabled=True,
             key="initial_chat_input"
         )
-
-def prepend_message_icon(message):
-    process_icon_map = {
-        'history_summariser': 'summarize',
-        'context_orchestrator': 'search',
-        'router': 'shuffle',
-        'planner_coder': 'lightbulb',
-        'code_checker': 'policy',
-        'code_executor': 'terminal',
-        'error_summariser': 'bug_report',
-        'reporter': 'edit_square'
-    }
-
-    process = message.additional_kwargs.get('process')
-    stage = message.additional_kwargs.get('stage')
-
-    if process and (stage != 'final'):
-        if stage == 'execution_output':
-            icon_name = 'sprint'
-        else:
-            icon_name = process_icon_map.get(process)
-        if icon_name:
-            stripped = message.content.lstrip()
-            if not stripped.startswith(':material/'):
-                message.content = f":material/{icon_name}: " + stripped
-
-    return message
 
 def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
     additional_kwargs = message.additional_kwargs or {}
@@ -347,8 +320,9 @@ def postprocess_state_update(state_update) -> AIMessage | AIMessageChunk | None:
         'history_summariser': 'summarize',
         'context_orchestrator': 'search',
         'query_classifier': 'shuffle',
-        'planner_branch': 'lightbulb',
-        'executor_branch': 'sprint',
+        'codeact_coder_branch': 'lightbulb',
+        'codeact_executor_branch': 'sprint',
+        'react_branch': 'conversion_path',
         'reporter': 'edit_square'
     }
     if isinstance(state_update, tuple) and len(state_update) == 2:
@@ -369,7 +343,7 @@ def postprocess_state_update(state_update) -> AIMessage | AIMessageChunk | None:
                 message.additional_kwargs["thinking_container"] = "postparallel"
             else:
                 message.additional_kwargs["thinking_container"] = "preparallel"
-            suffix_match = re.search(r'_branch_(\d+)$', langgraph_node)
+            suffix_match = re.search(r'_branch_(\d+)(?=_|$)', langgraph_node)
             message.additional_kwargs["branch_id"] = int(suffix_match.group(1)) if suffix_match else None
 
             # Prepend icon

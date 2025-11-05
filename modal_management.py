@@ -38,6 +38,7 @@ def make_local_sandbox_mode():
             global_hierarchy_access=st.session_state.global_hierarchy_access,
             remote_sandbox=False,
             num_parallel_executions=st.session_state.num_parallel_executions,
+            agent_type=st.session_state.agent_type,
         )})
 
 # Check if app is deployed using Modal API

@@ -52,3 +52,5 @@ def setup_session() -> None:
         st.session_state.setup_complete = False
     if "need_rebuild_graph" not in st.session_state:
         st.session_state.need_rebuild_graph = False
+    if "agent_type" not in st.session_state:
+        st.session_state.agent_type = "Auto"

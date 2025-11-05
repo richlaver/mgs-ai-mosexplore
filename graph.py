@@ -48,14 +48,20 @@ def build_graph(
     global_hierarchy_access: bool,
     remote_sandbox: bool,
     num_parallel_executions: int = 2,
+    agent_type: str = "Auto",
 ) -> StateGraph:
     REMOTE_SANDBOX = remote_sandbox
     st.toast("Building graph...", icon=":material/account_tree:")
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
-        progress_msg = progress_messages.get(node)
-        if progress_msg:
-            return {"messages": [progress_msg]}
+        template = progress_messages.get(node)
+        if template:
+            msg = AIMessage(
+                content=template.content,
+                additional_kwargs=dict(template.additional_kwargs or {}),
+                name=template.name,
+            )
+            return {"messages": [msg]}
         return {"messages": []}
     
     def history_summariser_node(state: AgentState) -> dict:
@@ -120,13 +126,13 @@ def build_graph(
         return "continue_execution"
     
     def query_classifier_node(state: AgentState) -> dict:
-        agent_type = query_classifier_agent(llm=llm, messages=state.messages, context=state.context)
-        logger.info(f"Classified agent type: {agent_type}")
-        
+        classified_agent_type = query_classifier_agent(llm=llm, messages=state.messages, context=state.context) if agent_type == "Auto" else agent_type
+        logger.info(f"Classified agent type: {classified_agent_type}")
+
         new_executions = []
         for i in range(num_parallel_executions):
             execution = Execution(
-                agent_type=agent_type,
+                agent_type=classified_agent_type,
                 parallel_agent_id=i,
                 retry_number=0,
                 codeact_code="",
@@ -184,9 +190,9 @@ def build_graph(
                 return Command(goto=END)
 
             if ex.agent_type == "CodeAct":
-                return Command(goto=[Send(f"codeact_coder_branch_{branch_id}", state)])
+                return Command(goto=[Send(f"codeact_coder_branch_{branch_id}_messenger", state)])
             elif ex.agent_type == "ReAct":
-                return Command(goto=[Send(f"react_branch_{branch_id}", state)])
+                return Command(goto=[Send(f"react_branch_{branch_id}_messenger", state)])
             else:
                 return Command(goto=END)
         return branch_entry
@@ -434,7 +440,7 @@ def build_graph(
     graph.add_node("context_orchestrator_messenger_node", lambda state: progress_messenger_node(state, "context_orchestrator_node"))
     graph.add_node("context_orchestrator_node", context_orchestrator_node)
     graph.add_node("query_clarifier_node", query_clarifier_node)
-    graph.add_node("query_classifier_messenger_node", lambda state: progress_messenger_node(state, "query_classifier_messenger_node"))
+    graph.add_node("query_classifier_messenger_node", lambda state: progress_messenger_node(state, "query_classifier_node"))
     graph.add_node("query_classifier_node", query_classifier_node)
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
@@ -456,11 +462,17 @@ def build_graph(
 
     for i in range(num_parallel_executions):
         graph.add_node(f"branch_entry_{i}", make_branch_entry(i))
+        graph.add_node(f"codeact_coder_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"codeact_coder_branch"))
         graph.add_node(f"codeact_coder_branch_{i}", make_codeact_coder_branch(i))
+        graph.add_node(f"codeact_executor_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"codeact_executor_branch"))
         graph.add_node(f"codeact_executor_branch_{i}", make_codeact_executor_branch(i))
-        graph.add_edge(f"codeact_coder_branch_{i}", f"codeact_executor_branch_{i}")
+        graph.add_edge(f"codeact_coder_branch_{i}_messenger", f"codeact_coder_branch_{i}")
+        graph.add_edge(f"codeact_coder_branch_{i}", f"codeact_executor_branch_{i}_messenger")
+        graph.add_edge(f"codeact_executor_branch_{i}_messenger", f"codeact_executor_branch_{i}")
         graph.add_edge(f"codeact_executor_branch_{i}", "exit_parallel_execution_node")
+        graph.add_node(f"react_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"react_branch"))
         graph.add_node(f"react_branch_{i}", make_react_branch(i))
+        graph.add_edge(f"react_branch_{i}_messenger", f"react_branch_{i}")
         graph.add_edge(f"react_branch_{i}", "exit_parallel_execution_node")
 
     graph.add_conditional_edges(

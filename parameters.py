@@ -24,20 +24,28 @@ progress_messages = {
             "process": "query_classifier"
         }
     ),
-    'planner_coder_node': AIMessage(
-        name="PlannerCoder",
+    'codeact_coder_branch': AIMessage(
+        name="CodeActCoderBranch",
         content="Thinking up a strategy to answer your query...",
         additional_kwargs={
             "stage": "node",
-            "process": "planner_coder"
+            "process": "codeact_coder_branch"
         }
     ),
-    'code_executor_node': AIMessage(
-        name="CodeExecutor",
+    'codeact_executor_branch': AIMessage(
+        name="CodeActExecutorBranch",
         content="Actioning my strategy...",
         additional_kwargs={
             "stage": "node",
-            "process": "code_executor"
+            "process": "codeact_executor_branch"
+        }
+    ),
+    'react_branch': AIMessage(
+        name="ReactBranch",
+        content="Working on an answer to your query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "react_branch"
         }
     ),
     'reporter_node': AIMessage(
