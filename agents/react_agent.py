@@ -296,7 +296,7 @@ Begin!
                             fields = _extract_tool_call_fields(tc)
                             tool_name = fields.get("name") or ""
                             tool_input = fields.get("__arg1") or ""
-                            invocations.append(f"Invoking tool {tool_name} with input {tool_input}")
+                            invocations.append(f"Invoking tool `{tool_name}` with input:\n" + "\n".join(["> " + line for line in tool_input.splitlines()]))
                         content = f"{base_content}\n" + "\n".join(invocations)
                     progress_msg = AIMessage(
                         name="ReAct",
@@ -307,7 +307,7 @@ Begin!
             elif isinstance(m, ToolMessage):
                 tool_exec_msg = AIMessage(
                     name="ReAct",
-                    content=f"Tool {m.name} executed with output {m.content}",
+                    content=f"Tool `{m.name}` executed with output:\n" + "\n".join(["> " + line for line in m.content.splitlines()]),
                     additional_kwargs={"stage": "execution_output", "process": "progress"},
                 )
                 streamed_messages.append(tool_exec_msg)
