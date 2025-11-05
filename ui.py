@@ -235,6 +235,8 @@ def render_initial_ui() -> None:
             on_change=lambda: st.session_state.update({'graph': build_graph(
                 llm=st.session_state.llm,
                 db=st.session_state.db,
+                blob_db=st.session_state.blob_db,
+                metadata_db=st.session_state.metadata_db,
                 table_info=table_info,
                 table_relationship_graph=st.session_state.table_relationship_graph, 
                 thread_id=st.session_state.thread_id,
@@ -275,6 +277,8 @@ def render_initial_ui() -> None:
                     on_change=lambda: st.session_state.update({'graph': build_graph(
                         llm=st.session_state.llm,
                         db=st.session_state.db,
+                        blob_db=st.session_state.blob_db,
+                        metadata_db=st.session_state.metadata_db,
                         table_info=table_info,
                         table_relationship_graph=st.session_state.table_relationship_graph, 
                         thread_id=st.session_state.thread_id,
@@ -389,9 +393,11 @@ def render_message_content(message: AIMessage):
             st.markdown(content)
         elif process == 'plot':
             artefact_id = additional_kwargs.get('artefact_id')
+            logger.info("artefact_id from `render_message_content`: %s", artefact_id)
             if artefact_id:
                 read_tool = ReadArtefactsTool(blob_db=st.session_state.blob_db, metadata_db=st.session_state.metadata_db)
                 result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+                logger.info("Result from ReadArtefactsTool in `render_message_content`: %s", result)
                 if result['success'] and result['artefacts']:
                     artefact = result['artefacts'][0]
                     blob = artefact['blob']

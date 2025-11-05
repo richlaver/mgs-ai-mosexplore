@@ -43,6 +43,8 @@ def perform_setup():
     st.session_state.graph = graph.build_graph(
         llm=st.session_state.llm,
         db=st.session_state.db,
+        blob_db=st.session_state.blob_db,
+        metadata_db=st.session_state.metadata_db,
         table_info=table_info,
         table_relationship_graph=st.session_state.table_relationship_graph,
         thread_id=st.session_state.thread_id,

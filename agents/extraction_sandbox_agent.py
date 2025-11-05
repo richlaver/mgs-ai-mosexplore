@@ -19,7 +19,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
-from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict
 
 from tools.sql_security_toolkit import GeneralSQLQueryTool
@@ -37,7 +36,7 @@ class ExtractionSandboxAgentState(TypedDict):
     messages: List[AIMessage]
     next_path: Optional[str]  # Added for conditional routing after decide_next
 
-def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_graph, user_id, global_hierarchy_access) -> CompiledStateGraph:
+def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_graph, user_id, global_hierarchy_access):
     logger.debug(
         "Creating extraction sandbox subgraph | tables=%d, rel_nodes=%d, user_id=%s, global_access=%s",
         len(table_info) if isinstance(table_info, list) else -1,

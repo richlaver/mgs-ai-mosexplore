@@ -29,10 +29,6 @@ Output your answer as either “CodeAct” or “ReAct” with no other words.
     response = llm.invoke(prompt)
     agent_type = response.content.strip()
 
-    # Hardcode to return CodeAct
-    # Delete the line below to revert to dynamic classification
-    return "CodeAct"
-
     if agent_type == "ReAct":
         return "ReAct"
     return "CodeAct"

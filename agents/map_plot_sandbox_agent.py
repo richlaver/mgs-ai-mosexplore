@@ -10,7 +10,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
-from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from tools.create_output_toolkit import MapPlotTool
@@ -39,7 +38,7 @@ class MapPlotSandboxAgentState(TypedDict):
     messages: List[AIMessage]
     next_path: Optional[str]
 
-def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQLQueryTool, write_artefact_tool: WriteArtefactTool, thread_id: str, user_id: int) -> CompiledStateGraph:
+def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQLQueryTool, write_artefact_tool: WriteArtefactTool, thread_id: str, user_id: int):
     logger.debug("Entering create_map_plot_sandbox_subgraph")
     plot_tool = MapPlotTool(sql_tool=sql_tool)
     logger.debug("MapPlotTool initialized")

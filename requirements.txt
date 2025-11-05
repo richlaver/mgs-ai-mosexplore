@@ -1,12 +1,12 @@
 streamlit
 b2sdk
 geoalchemy2
-langchain
-langchain_core
+langchain>=1.0,<2
+langchain-core>=1.0,<2
+langchain-community>=0.4,<0.5
+langgraph>=1.0,<1.1
+langchain-google-vertexai>=2
 typing_extensions
-langchain_community
-langgraph
-langchain_google_vertexai
 modal
 numpy
 plotly

@@ -10,7 +10,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
-from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from tools.create_output_toolkit import TimeSeriesPlotTool
@@ -37,7 +36,7 @@ class TimeSeriesPlotSandboxAgentState(TypedDict):
     messages: List[AIMessage]
     next_path: Optional[str]
 
-def create_timeseries_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQLQueryTool, write_artefact_tool: WriteArtefactTool, thread_id: str, user_id: int) -> CompiledStateGraph:
+def create_timeseries_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQLQueryTool, write_artefact_tool: WriteArtefactTool, thread_id: str, user_id: int):
     logger.debug("Entering create_timeseries_plot_sandbox_subgraph")
     plot_tool = TimeSeriesPlotTool(sql_tool=sql_tool)
     logger.debug("TimeSeriesPlotTool initialized")

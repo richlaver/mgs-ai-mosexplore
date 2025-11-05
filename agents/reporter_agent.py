@@ -82,7 +82,7 @@ You are a helpful assistant generating a concise, polite, and coherent response 
 - **Execution Outputs**: Ensemble outputs from multiple executions following these rules:
   - Ignore any obviously erroneous results (e.g., those with errors or nonsensical/invalid outputs).
   - If the remaining results are unanimous, accept that result.
-  - If they disagree, accept the majority result if 60% or more of the executions agree on it; otherwise, discard the result and note the lack of consensus in the response.
+  - If they disagree, accept the majority result if 60 percent or more of the executions agree on it; otherwise, discard the result and note the lack of consensus in the response.
   - Make the ensembled result coherent and flowing in the final response.
 - **Plots**: If plots are provided, reference them by description, noting they will be displayed below in the UI.
 - **CSV Files**: If CSV files are provided, reference them by description, noting they are available for download/viewing below in the UI.
@@ -167,5 +167,6 @@ Return a single markdown-formatted string, using sectioning only when necessary 
         ))
 
     logger.info("Completed reporter_agent with %d messages", len(updated_messages))
+    logger.info("updated_messages from reporter_agent: %s", [msg.content for msg in updated_messages])
 
     return updated_messages
