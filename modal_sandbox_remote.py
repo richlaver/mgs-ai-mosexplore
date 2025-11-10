@@ -1,4 +1,6 @@
 import sys
+import asyncio
+import inspect
 import modal
 import logging
 import json
@@ -10,7 +12,7 @@ from langchain_google_vertexai import ChatVertexAI
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
-from typing import Generator, List, Dict
+from typing import Generator, List, Dict, AsyncGenerator
 from parameters import include_tables
 from setup import build_modal_secrets
 
@@ -154,7 +156,7 @@ class SandboxExecutor:
             logger.info("Closed PostgreSQL connection")
 
     @modal.method()
-    def run_sandboxed_code(
+    async def run_sandboxed_code(
         self,
         code: str,
         table_info: List[Dict],
@@ -162,7 +164,7 @@ class SandboxExecutor:
         thread_id: str,
         user_id: int,
         global_hierarchy_access: bool,
-    ) -> Generator[dict, None, None]:
+    ) -> AsyncGenerator[dict, None]:
         from tools.artefact_toolkit import WriteArtefactTool
         run_logger = logging.getLogger("modal_sandbox.run")
         run_logger.info("Starting sandbox execution | user_id=%s global_access=%s code_len=%s table_info=%s rel_graph_keys=%s",
@@ -232,6 +234,20 @@ class SandboxExecutor:
             )
             run_logger.info("Initialized plotting tools")
 
+            async def ainvoke(tool, prompt: str, timeout: float | None = None):
+                try:
+                    if hasattr(tool, "ainvoke") and callable(getattr(tool, "ainvoke")):
+                        coro = tool.ainvoke(prompt)
+                        return await (asyncio.wait_for(coro, timeout) if timeout else coro)
+                    call = getattr(tool, "invoke", None)
+                    if call is None or not callable(call):
+                        raise AttributeError("Tool has neither ainvoke nor invoke")
+                    fut = asyncio.to_thread(call, prompt)
+                    return await (asyncio.wait_for(fut, timeout) if timeout else fut)
+                except Exception as e:
+                    run_logger.exception("ainvoke failed for tool %s: %s", getattr(tool, 'name', type(tool).__name__), e)
+                    raise
+
             # Prepare and execute code
             if not code.strip().startswith("from __future__ import annotations"):
                 code = "from __future__ import annotations\n" + code
@@ -243,6 +259,9 @@ class SandboxExecutor:
                 "llm": self.llm,
                 "db": self.db,
                 "datetime": __import__("datetime"),
+                "ainvoke": ainvoke,
+                "asyncio": asyncio,
+                "PARALLEL_ENABLED": True,
             }
             run_logger.info("Executing user code via exec()")
             
@@ -259,8 +278,44 @@ class SandboxExecutor:
                 return
 
             run_logger.info("Running execute_strategy() with zero arguments ...")
+            
+            async def _yield_outputs(obj):
+                """Yield outputs from any kind of result (async gen, coroutine, sync iterable, dict)."""
+                try:
+                    if obj is None:
+                        return
+                    # Async generator
+                    if inspect.isasyncgen(obj):
+                        async for item in obj:
+                            yield item
+                        return
+                    # Coroutine -> await and recurse
+                    if inspect.iscoroutine(obj):
+                        awaited = await obj
+                        async for item in _yield_outputs(awaited):
+                            yield item
+                        return
+                    # Single dict payload
+                    if isinstance(obj, dict):
+                        yield obj
+                        return
+                    # Synchronous iterable (avoid iterating strings/bytes)
+                    if isinstance(obj, (str, bytes, bytearray)):
+                        return
+                    try:
+                        iterator = iter(obj)
+                    except TypeError:
+                        return
+                    else:
+                        for item in iterator:
+                            yield item
+                        return
+                except Exception as e:
+                    run_logger.exception("Error while yielding outputs: %s", e)
+                    raise
+
             try:
-                iterator = execute_strategy()
+                result = execute_strategy()
             except TypeError as te:
                 yield {"type": "error", "content": (
                     "Error: execute_strategy must be defined with zero arguments. "
@@ -268,7 +323,7 @@ class SandboxExecutor:
                 )}
                 return
 
-            for output in iterator:
+            async for output in _yield_outputs(result):
                 yield output
             run_logger.info("execute_strategy completed")
 

@@ -51,10 +51,10 @@ def is_app_deployed():
         logger.info(f"App Description: {app.description}")
         return app is not None
     except modal.exception.ExecutionError:
-        make_local_sandbox_mode()
+        # make_local_sandbox_mode()
         return False
     except Exception as e:
-        make_local_sandbox_mode()
+        # make_local_sandbox_mode()
         # Comment the line below to fail silently when running Streamlit locally
         # st.error(f"Failed to check app status: {str(e)}")
         return False
@@ -135,7 +135,7 @@ def stop_app():
             st.session_state.app_deployed = False
             st.session_state.container_warm = False
             st.session_state.app_id = None
-            make_local_sandbox_mode()
+            # make_local_sandbox_mode()
             st.toast("App and containers stopped successfully.", icon=":material/block:")
         except Exception as e:
             st.toast(f"Stop failed: {str(e)}. Use CLI: modal app stop {app_id}", icon=":material/error:")

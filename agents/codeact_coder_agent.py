@@ -45,16 +45,20 @@ Generate code to answer the following user query plus an optional extension that
 
 # Constraints on Your Generated Code
 ## Structure
-- Write a single function named `execute_strategy` that takes no parameters and returns a generator yielding dictionaries defined as:
-`def execute_strategy() -> Generator[dict, None, None]:`
+- Define a single function named `execute_strategy` that takes no parameters.
+- Execute tools and code in parallel where possible to reduce latency.
+- Declare as `async def` if running parallel, otherwise `def`.
+- If async: `async def execute_strategy() -> AsyncGenerator[dict, None]:`
+- If sync: `def execute_strategy() -> Generator[dict, None, None]:`
 - Omit docstrings.
 - Dynamically respond to extracted data and errors for robustness.
-- Use `try`-`except` blocks to handle exceptions but continuing where possible.
+- Use `try`-`except` blocks to handle exceptions but continue where possible.
 - Already in environment (DO NOT import):
   * `extraction_sandbox_agent`
   * `timeseries_plot_sandbox_agent`
   * `map_plot_sandbox_agent`
   * `datetime` module (NOT class)
+  * helper `ainvoke` and `asyncio`
 - Available for import:
   * `numpy`
   * `pandas`
@@ -94,7 +98,7 @@ Generate code to answer the following user query plus an optional extension that
 # Tools
 ## `extraction_sandbox_agent`
 ### How to Use
-- Use to extract data from database with `extraction_sandbox_agent.invoke(prompt)`
+- Use to extract data from database with `extraction_sandbox_agent.invoke(prompt)` or in async code `await ainvoke(extraction_sandbox_agent, prompt)`.
 - Prompt is natural language description of data to extract.
 - Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
 - Always include `Output columns` in prompt to specify DataFrame column names.
@@ -116,7 +120,7 @@ Generate code to answer the following user query plus an optional extension that
 
 ## `timeseries_plot_sandbox_agent`
 ### How to Use
-- Use to display change of data with time for one or more series with `timeseries_plot_sandbox_agent.invoke(prompt)`.
+- Use to display change of data with time for one or more series with `timeseries_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(timeseries_plot_sandbox_agent, prompt)` if async).
 - Prompt is natural language description of plot which MUST include:
   * Instrument IDs for each series
   * Database field names for extracting data
@@ -148,7 +152,7 @@ Generate code to answer the following user query plus an optional extension that
 
 ## `map_plot_sandbox_agent`
 ### How to Use
-- Use to display spatial distribution of readings or review status with `map_plot_sandbox_agent.invoke(prompt)`.
+- Use to display spatial distribution of readings or review status with `map_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(map_plot_sandbox_agent, prompt)` if async).
 - Readings or review status can be plotted as at single time or as change over period.
 - Can plot multiple series with different instrument types, subtypes and database fields.
 - Prompt is natural language description of plot which MUST include:
@@ -193,7 +197,7 @@ Generate code to answer the following user query plus an optional extension that
 2. Deduce the user's underlying need.
 3. Think up an optional extension to the query that adds value to the user's need.
 4. Produce a step-by-step execution plan to answer the query and optional extension. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
-5. Write the code to implement the execution plan.
+5. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`).
 6. Check code for:
   - Logic to answer query
   - Adheres to constraints
@@ -204,27 +208,27 @@ Generate code to answer the following user query plus an optional extension that
 )
 
 def strip_code_tags(code: str) -> str:
-    """Remove markdown and HTML tags from Python code, preserving valid code."""
-    logger.debug(f"Original code before tag stripping: {code}")
-    
-    # Strip markdown code fences (```python, ```, or similar)
-    code = code.strip()
-    if code.startswith("```"):
-        lines = code.splitlines()
-        if lines and lines[-1].strip() == "```":
-            code = "\n".join(lines[1:-1]).strip()
-        else:
-            code = "\n".join(lines[1:]).strip()
-    
-    # Strip HTML <code> tags
-    code = re.sub(r'<code>\s*', '', code)
-    code = re.sub(r'\s*</code>', '', code)
-    
-    # Remove any remaining backticks
-    code = code.replace('```', '')
-    
-    logger.debug(f"Code after tag stripping: {code}")
-    return code
+  """Remove markdown and HTML tags from Python code, preserving valid code."""
+  logger.debug(f"Original code before tag stripping: {code}")
+
+  code = code.strip()
+  # Strip markdown code fences (```python ... ```)
+  if code.startswith("```"):
+    lines = code.splitlines()
+    if lines and lines[-1].strip() == "```":
+      code = "\n".join(lines[1:-1]).strip()
+    else:
+      code = "\n".join(lines[1:]).strip()
+
+  # Strip HTML <code> tags
+  code = re.sub(r"<code>\s*", "", code)
+  code = re.sub(r"\s*</code>", "", code)
+
+  # Remove any remaining backticks
+  code = code.replace("```", "")
+
+  logger.debug(f"Code after tag stripping: {code}")
+  return code
 
 def codeact_coder_agent(
     llm: BaseLanguageModel,

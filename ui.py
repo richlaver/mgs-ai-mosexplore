@@ -143,8 +143,8 @@ def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
     if "app_deployed" not in st.session_state:
         st.session_state.app_deployed = is_app_deployed()
-        if not st.session_state.app_deployed:
-            st.session_state.sandbox_mode = "Local"
+        # if not st.session_state.app_deployed:
+        #     st.session_state.sandbox_mode = "Local"
         logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
     if "container_warm" not in st.session_state:
         st.session_state.container_warm = is_container_warm()
@@ -283,7 +283,7 @@ def render_initial_ui() -> None:
                 thread_id=st.session_state.thread_id,
                 user_id=st.session_state.selected_user_id,
                 global_hierarchy_access=st.session_state.global_hierarchy_access,
-                remote_sandbox=st.session_state.sandbox_mode,
+                remote_sandbox=st.session_state.sandbox_mode == "Remote",
                 num_parallel_executions=st.session_state.num_parallel_executions,
                 agent_type=st.session_state.agent_type,
             )})
