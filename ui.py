@@ -11,7 +11,7 @@ from classes import AgentState,Context
 from parameters import users, table_info
 from graph import build_graph
 import setup
-from tools.artefact_toolkit import ReadArtefactsTool
+from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
 from modal_management import deploy_app, warm_up_container, stop_app, is_app_deployed, is_container_warm
 from utils.chat_history import filter_messages_only_final
 
@@ -84,6 +84,47 @@ def sandbox_modal():
         if st.button("Kill", disabled=kill_disabled, key="kill", icon=":material/block:"):
             stop_app()
             st.rerun()
+
+@st.dialog("Delete All Artefacts")
+def delete_artefacts_modal():
+    st.markdown(
+        """
+        <div style="text-align: center;">
+            <h3 style="color: #d32f2f;">Do you really want to irreversibly delete all artefacts?<br></h3>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", type="secondary", use_container_width=True):
+            pass
+    with col2:
+        delete_button = st.button(
+            "Delete Forever",
+            type="primary",
+            icon=":material/delete_forever:",
+            use_container_width=True,
+            key="delete_forever_btn"
+        )
+        if delete_button:
+            with st.spinner("Deleting all artefacts... This may take some time..."):
+                try:
+                    delete_tool = DeleteArtefactsTool(
+                        blob_db=st.session_state.blob_db,
+                        metadata_db=st.session_state.metadata_db
+                    )
+                    result = delete_tool._run()
+
+                    if result.get("error"):
+                        st.error(f"Failed to delete some artefacts: {result['error']}")
+                    else:
+                        st.toast("All artefacts deleted", icon=":material/delete_forever:")
+                except Exception as e:
+                    st.error(f"Unexpected error: {str(e)}")
+                finally:
+                    st.rerun()
 
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
@@ -247,12 +288,11 @@ def render_initial_ui() -> None:
                 agent_type=st.session_state.agent_type,
             )})
         )
-        st.segmented_control(
+        st.selectbox(
             label="Agent Type",
-            options=["CodeAct", "Auto", "ReAct"],
-            selection_mode="single",
+            options=["Auto", "CodeAct", "ReAct", "Tool-Calling"],
             key="agent_type",
-            help="CodeAct: writes and executes code | ReAct: reasons and uses tools",
+            help="CodeAct: writes and executes code | ReAct: reasons and uses tools | Tool-Calling: parallel tool execution",
             on_change=lambda: st.session_state.update({'graph': build_graph(
                 llm=st.session_state.llm,
                 db=st.session_state.db,
@@ -294,6 +334,14 @@ def render_initial_ui() -> None:
                     key="sandbox_button",
                     help="Manage Sandbox app and containers",
                     on_click=sandbox_modal,
+                    use_container_width=True
+                )
+                st.button(
+                    "Delete Artefacts",
+                    icon=":material/delete_forever:",
+                    key="delete_artefacts_button",
+                    help="Delete all generated plots and CSVs",
+                    on_click=delete_artefacts_modal,
                     use_container_width=True
                 )
 

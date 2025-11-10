@@ -26,6 +26,49 @@ def _vector_to_str(vec):
     """Convert vector list to PostgreSQL-compatible string for insertion/query."""
     return '[' + ','.join(map(str, vec)) + ']'
 
+def _delete_all_versions_by_name(blob_db, file_name: str) -> bool:
+    """Delete all versions of a B2 file by listing all versions for exact file_name.
+    Returns True if at least one version was deleted.
+    """
+    versions: list[tuple[str, str]] = []
+    try:
+        for file_version, _ in blob_db.ls(file_name, show_versions=True, recursive=True):
+            if getattr(file_version, 'file_name', None) == file_name:
+                file_id = getattr(file_version, 'id_', None) or getattr(file_version, 'file_id', None)
+                if file_id:
+                    versions.append((file_id, file_name))
+    except Exception:
+        pass
+
+    if not versions:
+        try:
+            for file_version, _ in blob_db.ls('', show_versions=True, recursive=True):
+                if getattr(file_version, 'file_name', None) == file_name:
+                    file_id = getattr(file_version, 'id_', None) or getattr(file_version, 'file_id', None)
+                    if file_id:
+                        versions.append((file_id, file_name))
+        except Exception as e:
+            logger.error("Error listing versions for '%s': %s", file_name, e)
+
+    seen = set()
+    unique_versions = []
+    for fid, fname in versions:
+        if fid not in seen:
+            seen.add(fid)
+            unique_versions.append((fid, fname))
+
+    deleted_any = False
+    for fid, fname in unique_versions:
+        try:
+            blob_db.delete_file_version(fid, fname)
+            deleted_any = True
+        except Exception as e:
+            msg = str(e).lower()
+            if 'not found' in msg or 'no such file' in msg or 'does not exist' in msg:
+                continue
+            logger.error("Error deleting version '%s' for '%s': %s", fid, file_name, e)
+    return deleted_any
+
 def write_artefact(blob_db, metadata_db, blob, thread_id, user_id: int, generating_tool, generating_parameters, description):
     """
     Writes the blob to Backblaze B2, generates metadata including embedded vector, and stores it in RDS.
@@ -69,8 +112,7 @@ def write_artefact(blob_db, metadata_db, blob, thread_id, user_id: int, generati
     except Exception as e:
         # Clean up orphan blob if metadata insertion fails
         try:
-            for file_version, _ in blob_db.ls(artefact_id, latest_only=True):
-                blob_db.delete_file_version(file_version.id_, file_version.file_name)
+            _delete_all_versions_by_name(blob_db, artefact_id)
         except:
             pass
         return {'artefact_id': None, 'error': str(e)}
@@ -207,11 +249,8 @@ def delete_artefacts(blob_db, metadata_db, artefact_ids=None, thread_ids=None, u
         for row in rows:
             art_id = row[0]
             try:
-                # Delete from B2 first
-                deleted_blob = False
-                for file_version, _ in blob_db.ls(art_id, latest_only=True):
-                    blob_db.delete_file_version(file_version.id_, file_version.file_name)
-                    deleted_blob = True
+                logger.debug("Deleting all B2 versions for artefact_id=%s", art_id)
+                deleted_blob = _delete_all_versions_by_name(blob_db, art_id)
                 
                 if deleted_blob:
                     # Delete from metadata if blob deleted

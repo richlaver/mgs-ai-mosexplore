@@ -48,6 +48,14 @@ progress_messages = {
             "process": "react_branch"
         }
     ),
+    'tool_calling_branch': AIMessage(
+        name="ToolCallingBranch",
+        content="Working on an answer to your query...",
+        additional_kwargs={
+            "stage": "node",
+            "process": "tool_calling_branch"
+        }
+    ),
     'reporter_node': AIMessage(
         name="Reporter",
         content="Drafting my response to your query...",

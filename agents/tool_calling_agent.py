@@ -3,26 +3,34 @@ import logging
 from typing import Dict, Any, List, Union
 from datetime import datetime
 
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage, AnyMessage
 from langchain_core.tools import Tool
 from langchain_core.language_models import BaseLanguageModel
 import pandas as pd
+
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from typing_extensions import TypedDict, Annotated
+import operator
 
 from classes import Execution, Context
 
 logger = logging.getLogger(__name__)
 
 
-def react_agent(
+class AgentState(TypedDict):
+    messages: Annotated[List[AnyMessage], operator.add]
+    steps: Annotated[int, operator.add]
+
+
+def tool_calling_agent(
     llm: BaseLanguageModel,
     tools: List[Any],
     context: Context,
     previous_attempts: List[Execution]
 ) -> Dict[str, Any]:
     """
-    ReAct agent that answers queries using tools.
-    Returns only final_response and artefacts for attaching to Execution.
+    Tool-calling agent using LangGraph for parallel tool execution.
     """
     retrospective_query = context.retrospective_query if context else ""
     word_context_json = json.dumps(
@@ -161,102 +169,138 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 2. Deduce the user's underlying need.
 3. Think up an optional extension to the query that adds value to the user's need.
 4. Plan how to answer the query and optional extension.
-5. Use tools to extract and/or plot data.
-6. Parse JSON from `extraction_sandbox_agent` if needed.
+5. Use tools to extract and/or plot data. You must call multiple tools in parallel if their executions are independent (e.g., extracting data for different sets of instruments, or creating different plots). This reduces latency.
+6. After receiving tool outputs, parse JSON from `extraction_sandbox_agent` if needed.
 7. Collect artefact IDs from plotting tools.
-8. Provide final answer.
+8. Provide a final answer that addresses the query and extension, referencing the data and artefacts as appropriate.
 
-Begin!
+When calling tools, provide detailed natural language prompts as specified in the tool descriptions (pass as the "prompt" argument).
+
+If you have enough information after tool calls, provide the final answer directly in your response.
+
+Begin by analyzing the query.
     """.strip()
 
     langchain_tools = []
+    def _resolve_prompt(arg: Any) -> str:
+        """Resolve a prompt string from various possible arg formats produced by LC tool routing."""
+        if isinstance(arg, str):
+            return arg
+        if isinstance(arg, dict):
+            for k in ["prompt", "__arg1", "input", "text"]:
+                if k in arg and isinstance(arg[k], str):
+                    return arg[k]
+            for v in arg.values():
+                if isinstance(v, str):
+                    return v
+        return str(arg)
+
+    def make_extraction_wrapper(tool: Any):
+        def _fn(arg: Any) -> str:
+            prompt = _resolve_prompt(arg)
+            logger.info("Invoking %s with resolved prompt: %s", tool.name, prompt)
+            result = tool.invoke(prompt)
+            logger.info("%s returned: %s", tool.name, result)
+            if result is None:
+                return "None"
+            if not isinstance(result, pd.DataFrame):
+                logger.warning("%s did not return a DataFrame", tool.name)
+                return "None"
+            return result.to_json(orient="records")
+        return _fn
+
+    def make_generic_wrapper(tool: Any):
+        def _fn(arg: Any) -> str:
+            prompt = _resolve_prompt(arg)
+            logger.info("Invoking %s with resolved prompt: %s", tool.name, prompt)
+            result = tool.invoke(prompt)
+            logger.info("%s returned: %s", tool.name, result)
+            return str(result) if result is not None else "None"
+        return _fn
+
     for t in tools:
         if t.name == "extraction_sandbox_agent":
-            def extraction_func(prompt: str, tool=t) -> str:
-                logger.info("Invoking %s with prompt: %s", tool.name, prompt)
-                result = tool.invoke(prompt)
-                logger.info("%s returned: %s", tool.name, result)
-                if result is None:
-                    return "None"
-                if not isinstance(result, pd.DataFrame):
-                    logger.warning("%s did not return a DataFrame", tool.name)
-                    return "None"
-                return result.to_json(orient="records")
-            tool = Tool.from_function(
-                func=extraction_func,
+            tool_obj = Tool.from_function(
+                func=make_extraction_wrapper(t),
                 name=t.name,
                 description=t.description
             )
         else:
-            def plot_func(prompt: str, tool=t) -> str:
-                logger.info("Invoking %s with prompt: %s", tool.name, prompt)
-                result = tool.invoke(prompt)
-                logger.info("%s returned: %s", tool.name, result)
-                return str(result) if result is not None else "None"
-            tool = Tool.from_function(
-                func=plot_func,
+            tool_obj = Tool.from_function(
+                func=make_generic_wrapper(t),
                 name=t.name,
                 description=t.description
             )
-        langchain_tools.append(tool)
+        langchain_tools.append(tool_obj)
 
-    agent = create_agent(
-        llm,
-        tools=langchain_tools,
-        system_prompt=react_system_prompt,
-        debug=True,
+    llm_with_tools = llm.bind_tools(langchain_tools)
+
+    def agent_node(state: AgentState) -> Dict[str, Any]:
+        messages = state["messages"]
+        result = llm_with_tools.invoke(messages)
+        return {"messages": [result], "steps": 1}
+
+    def should_continue(state: AgentState) -> str:
+        if state["steps"] >= 5:
+            return END
+        return tools_condition(state)
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("agent", agent_node)
+    tool_node = ToolNode(langchain_tools)
+    workflow.add_node("tools", tool_node)
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", END: END},
     )
+    workflow.add_edge("tools", "agent")
+    graph = workflow.compile()
 
     input_value = f"Answer the following user query plus an optional extension that adds value:\n{retrospective_query}"
 
-    try:
-        inputs = {"messages": [HumanMessage(content=input_value)]}
-        stream = agent.stream(
-            inputs,
-            {"recursion_limit": 10},
-            stream_mode="updates",
-        )
+    initial_state = {
+        "messages": [SystemMessage(content=react_system_prompt), HumanMessage(content=input_value)],
+        "steps": 0,
+    }
 
-        raw_messages: List[Union[HumanMessage, AIMessage, ToolMessage]] = []
+    raw_messages: List[Union[HumanMessage, AIMessage, ToolMessage]] = []
+
+    try:
+        stream = graph.stream(initial_state, stream_mode="updates")
 
         for chunk in stream:
-            logger.debug("Received chunk from ReAct agent stream: %s", chunk)
-            if "tools" in chunk:
-                tools_output = chunk["tools"]
-                if isinstance(tools_output, dict) and "messages" in tools_output and tools_output["messages"]:
-                    tmsg = tools_output["messages"][-1]
-                    if isinstance(tmsg, (ToolMessage, AIMessage)):
-                        raw_messages.append(tmsg)
-            if "model" in chunk:
-                model_output = chunk["model"]
-                if isinstance(model_output, dict) and "messages" in model_output and model_output["messages"]:
-                    msg = model_output["messages"][-1]
-                    if isinstance(msg, AIMessage):
+            logger.debug("Received chunk from LangGraph stream: %s", chunk)
+            for node, update in chunk.items():
+                if "messages" in update:
+                    for msg in update["messages"]:
                         raw_messages.append(msg)
 
         def _extract_tool_call_fields(call: Any) -> Dict[str, Any]:
-            try:
+            if isinstance(call, dict):
                 name = call.get("name")
-            except AttributeError:
-                name = getattr(call, "name", None)
-            try:
-                args = call.get("args")
-            except AttributeError:
-                args = getattr(call, "args", None)
-            try:
+                args = call.get("args", {})
                 cid = call.get("id")
-            except AttributeError:
+                if isinstance(args, dict):
+                    arg1 = args.get("prompt", next(iter(args.values())) if args else "")
+                else:
+                    arg1 = str(args)
+            else:
+                name = getattr(call, "name", None)
+                args = getattr(call, "args", None)
                 cid = getattr(call, "id", None)
-            arg1 = None
-            if isinstance(args, dict):
-                arg1 = args.get("__arg1")
-            elif isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                    if isinstance(parsed, dict):
-                        arg1 = parsed.get("__arg1")
-                except Exception:
-                    arg1 = None
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args)
+                        if isinstance(parsed, dict):
+                            arg1 = parsed.get("__arg1", parsed.get("prompt", next(iter(parsed.values())) if parsed else ""))
+                        else:
+                            arg1 = str(parsed)
+                    except Exception:
+                        arg1 = args
+                else:
+                    arg1 = str(args) if args is not None else ""
             return {"name": name, "id": cid, "__arg1": arg1}
 
         tool_input_map: Dict[str, str] = {}
@@ -281,7 +325,7 @@ Begin!
             if isinstance(m, AIMessage):
                 if m is final_ai_msg:
                     final_msg_obj = AIMessage(
-                        name="ReAct",
+                        name="Tool-Calling",
                         content=m.content or "",
                         additional_kwargs={"stage": "execution_output", "process": "final"},
                     )
@@ -299,14 +343,14 @@ Begin!
                             invocations.append(f"Invoking tool `{tool_name}` with input:\n" + "\n".join(["> " + line for line in tool_input.splitlines()]))
                         content = f"{base_content}\n" + "\n".join(invocations)
                     progress_msg = AIMessage(
-                        name="ReAct",
+                        name="Tool-Calling",
                         content=content,
                         additional_kwargs={"stage": "execution_output", "process": "progress"},
                     )
                     streamed_messages.append(progress_msg)
             elif isinstance(m, ToolMessage):
                 tool_exec_msg = AIMessage(
-                    name="ReAct",
+                    name="Tool-Calling",
                     content=f"Tool `{m.name}` executed with output:\n" + "\n".join(["> " + line for line in m.content.splitlines()]),
                     additional_kwargs={"stage": "execution_output", "process": "progress"},
                 )
@@ -317,7 +361,7 @@ Begin!
                     if plot_description:
                         artefact_msgs.append(
                             AIMessage(
-                                name="ReAct",
+                                name="Tool-Calling",
                                 content=plot_description,
                                 additional_kwargs={
                                     "stage": "execution_output",
@@ -336,7 +380,7 @@ Begin!
     except Exception as e:
         logger.error("Error in react_agent: %s", str(e))
         error_msg = AIMessage(
-            name="ReAct",
+            name="Tool-Calling",
             content=str(e),
             additional_kwargs={"stage": "execution_output", "process": "error"},
         )

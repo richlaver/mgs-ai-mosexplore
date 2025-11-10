@@ -671,15 +671,10 @@ class ExtractionSandboxAgentTool(BaseTool):
         - invoke({"prompt": ...}) -> dict input using args_schema
         - invoke("...")      -> plain string input
         """
-        # Prefer explicit prompt kw if provided
         if input is None and "prompt" in kwargs:
             input = kwargs.pop("prompt")
-
-        # If a dict with just {"prompt": ...} is passed, unwrap to string for _run
         if isinstance(input, dict) and set(input.keys()) == {"prompt"}:
             input = input["prompt"]
-
-        # Defer to BaseTool's invoke (will route to _run/_arun as appropriate)
         return super().invoke(input, **kwargs)
 
 def extraction_sandbox_agent(

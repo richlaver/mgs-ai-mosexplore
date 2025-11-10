@@ -11,6 +11,7 @@ from agents.context_orchestrator import get_context_graph
 from agents.query_clarifier import query_clarifier_agent
 from agents.query_classifier import query_classifier_agent
 from agents.react_agent import react_agent
+from agents.tool_calling_agent import tool_calling_agent
 from utils.chat_history import filter_messages_only_final
 
 from langgraph.graph import StateGraph, END
@@ -179,7 +180,6 @@ def build_graph(
 
     def make_branch_entry(branch_id: int):
         def branch_entry(state: AgentState):
-            # Pick the execution for this branch id (if any)
             ex = None
             try:
                 ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
@@ -189,12 +189,15 @@ def build_graph(
             if ex is None:
                 return Command(goto=END)
 
-            if ex.agent_type == "CodeAct":
-                return Command(goto=[Send(f"codeact_coder_branch_{branch_id}_messenger", state)])
-            elif ex.agent_type == "ReAct":
-                return Command(goto=[Send(f"react_branch_{branch_id}_messenger", state)])
-            else:
-                return Command(goto=END)
+            match ex.agent_type:
+                case "CodeAct":
+                    return Command(goto=[Send(f"codeact_coder_branch_{branch_id}_messenger", state)])
+                case "ReAct":
+                    return Command(goto=[Send(f"react_branch_{branch_id}_messenger", state)])
+                case "Tool-Calling":
+                    return Command(goto=[Send(f"tool_calling_branch_{branch_id}_messenger", state)])
+                case _:
+                    return Command(goto=END)
         return branch_entry
     
     def make_codeact_coder_branch(branch_id: int):
@@ -435,6 +438,72 @@ def build_graph(
             return {"messages": react_messages, "executions": [updated]}
         return react_branch
 
+    def make_tool_calling_branch(branch_id: int):
+        def tool_calling_branch(state: AgentState) -> dict:
+            pending = [
+                ex for ex in state.executions
+                if ex.parallel_agent_id == branch_id
+                and ex.final_response is None
+                and ex.agent_type == "Tool-Calling"
+            ]
+            if not pending:
+                return {}
+            
+            target_execution = max(pending, key=lambda e: e.retry_number)
+
+            extraction_tool = extraction_sandbox_agent(
+                llm=llm,
+                db=db,
+                table_info=table_info,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access,
+            )
+            general_sql_query_tool = GeneralSQLQueryTool(
+                db=db,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            )
+            write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
+            timeseries_tool = timeseries_plot_sandbox_agent(
+                llm=llm,
+                sql_tool=general_sql_query_tool,
+                write_artefact_tool=write_artefact_tool,
+                thread_id=thread_id,
+                user_id=user_id
+            )
+            map_tool = map_plot_sandbox_agent(
+                llm=llm,
+                sql_tool=general_sql_query_tool,
+                write_artefact_tool=write_artefact_tool,
+                thread_id=thread_id,
+                user_id=user_id
+            )
+            tools = [extraction_tool, timeseries_tool, map_tool]
+
+            previous_attempts = [
+                ex for ex in state.executions
+                if ex.parallel_agent_id == branch_id
+                and ex.retry_number < target_execution.retry_number
+            ]
+            result = tool_calling_agent(
+                llm=llm,
+                tools=tools,
+                context=state.context,
+                previous_attempts=previous_attempts
+            )
+
+            updated = target_execution.model_copy(update={
+                "final_response": result["final_response"],
+                "artefacts": result["artefacts"],
+                "error_summary": result.get("error_summary", "")
+            })
+
+            tool_calling_messages = result.get("messages", [])
+            return {"messages": tool_calling_messages, "executions": [updated]}
+        return tool_calling_branch
+
     graph.add_node("history_summariser_messenger_node", lambda state: progress_messenger_node(state, "history_summariser_node"))
     graph.add_node("history_summariser_node", history_summariser_node)
     graph.add_node("context_orchestrator_messenger_node", lambda state: progress_messenger_node(state, "context_orchestrator_node"))
@@ -474,6 +543,10 @@ def build_graph(
         graph.add_node(f"react_branch_{i}", make_react_branch(i))
         graph.add_edge(f"react_branch_{i}_messenger", f"react_branch_{i}")
         graph.add_edge(f"react_branch_{i}", "exit_parallel_execution_node")
+        graph.add_node(f"tool_calling_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"tool_calling_branch"))
+        graph.add_node(f"tool_calling_branch_{i}", make_tool_calling_branch(i))
+        graph.add_edge(f"tool_calling_branch_{i}_messenger", f"tool_calling_branch_{i}")
+        graph.add_edge(f"tool_calling_branch_{i}", "exit_parallel_execution_node")
 
     graph.add_conditional_edges(
         "exit_parallel_execution_node",
