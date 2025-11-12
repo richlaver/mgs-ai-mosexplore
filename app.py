@@ -52,6 +52,7 @@ def perform_setup():
         global_hierarchy_access=st.session_state.global_hierarchy_access,
         remote_sandbox=st.session_state.sandbox_mode == "Remote",
         num_parallel_executions=st.session_state.num_parallel_executions,
+        num_completions_before_response=st.session_state.num_completions_before_response,
         agent_type=st.session_state.agent_type,
     )
 

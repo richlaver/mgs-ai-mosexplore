@@ -48,6 +48,8 @@ def setup_session() -> None:
         st.session_state.sandbox_mode = "Remote"
     if "num_parallel_executions" not in st.session_state:
         st.session_state.num_parallel_executions = 2
+    if "num_completions_before_response" not in st.session_state:
+        st.session_state.num_completions_before_response = 2
     if "setup_complete" not in st.session_state:
         st.session_state.setup_complete = False
     if "need_rebuild_graph" not in st.session_state:

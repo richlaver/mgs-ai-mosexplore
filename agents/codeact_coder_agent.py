@@ -80,7 +80,7 @@ Generate code to answer the following user query plus an optional extension that
   * "final": after all steps with result summary for query and optional extension, self-explanatory and comprehensive for downstream interpretation
   * "plot": when calling a plotting tool
 - ALWAYS yield a "final" output.
-- For "plot" yields write content as:
+- For "plot" yields write "content" field of above yield dictionary as:
 {{
     "tool_name": "timeseries_plot_sandbox_agent"|"map_plot_sandbox_agent",
     "description": detailed description of plot,

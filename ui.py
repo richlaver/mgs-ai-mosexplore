@@ -7,7 +7,7 @@ import uuid
 import logging
 import re
 
-from classes import AgentState,Context
+from classes import AgentState, Context
 from parameters import users, table_info
 from graph import build_graph
 import setup
@@ -263,6 +263,30 @@ def render_initial_ui() -> None:
         icon_image="mgs-small-logo.svg"
     )
 
+    def _rebuild_graph():
+        st.session_state.num_completions_before_response = max(
+            1,
+            min(
+                st.session_state.get('num_completions_before_response', 1),
+                st.session_state.num_parallel_executions,
+            ),
+        )
+        st.session_state.graph = build_graph(
+            llm=st.session_state.llm,
+            db=st.session_state.db,
+            blob_db=st.session_state.blob_db,
+            metadata_db=st.session_state.metadata_db,
+            table_info=table_info,
+            table_relationship_graph=st.session_state.table_relationship_graph,
+            thread_id=st.session_state.thread_id,
+            user_id=st.session_state.selected_user_id,
+            global_hierarchy_access=st.session_state.global_hierarchy_access,
+            remote_sandbox=st.session_state.sandbox_mode == "Remote",
+            num_parallel_executions=st.session_state.num_parallel_executions,
+            num_completions_before_response=st.session_state.num_completions_before_response,
+            agent_type=st.session_state.agent_type,
+        )
+
     with st.sidebar:
         st.divider()
         st.slider(
@@ -272,41 +296,27 @@ def render_initial_ui() -> None:
             step=1,
             format="%i",
             key="num_parallel_executions",
-            help="Number of agents to run in parallel for each query",
-            on_change=lambda: st.session_state.update({'graph': build_graph(
-                llm=st.session_state.llm,
-                db=st.session_state.db,
-                blob_db=st.session_state.blob_db,
-                metadata_db=st.session_state.metadata_db,
-                table_info=table_info,
-                table_relationship_graph=st.session_state.table_relationship_graph, 
-                thread_id=st.session_state.thread_id,
-                user_id=st.session_state.selected_user_id,
-                global_hierarchy_access=st.session_state.global_hierarchy_access,
-                remote_sandbox=st.session_state.sandbox_mode == "Remote",
-                num_parallel_executions=st.session_state.num_parallel_executions,
-                agent_type=st.session_state.agent_type,
-            )})
+            help="Use more agents to improve **accuracy** with marginal latency penalty",
+            on_change=_rebuild_graph,
         )
+        # Uncomment to enable completions before response slider
+        # if st.session_state.num_parallel_executions > 1:
+        #     st.slider(
+        #         label="No. of Completions Before Responding",
+        #         min_value=1,
+        #         max_value=st.session_state.num_parallel_executions,
+        #         step=1,
+        #         format="%i",
+        #         key="num_completions_before_response",
+        #         help="Await completions to improve **accuracy** but prolong **latency**",
+        #         on_change=_rebuild_graph,
+        #     )
         st.selectbox(
             label="Agent Type",
             options=["Auto", "CodeAct", "ReAct", "Tool-Calling"],
             key="agent_type",
-            help="CodeAct: writes and executes code | ReAct: reasons and uses tools | Tool-Calling: parallel tool execution",
-            on_change=lambda: st.session_state.update({'graph': build_graph(
-                llm=st.session_state.llm,
-                db=st.session_state.db,
-                blob_db=st.session_state.blob_db,
-                metadata_db=st.session_state.metadata_db,
-                table_info=table_info,
-                table_relationship_graph=st.session_state.table_relationship_graph, 
-                thread_id=st.session_state.thread_id,
-                user_id=st.session_state.selected_user_id,
-                global_hierarchy_access=st.session_state.global_hierarchy_access,
-                remote_sandbox=st.session_state.sandbox_mode == "Remote",
-                num_parallel_executions=st.session_state.num_parallel_executions,
-                agent_type=st.session_state.agent_type,
-            )})
+            help="**CodeAct**: writes and executes code.  \n**ReAct**: reasons and uses tools.  \n**Tool-Calling**: parallel tool execution",
+            on_change=_rebuild_graph,
         )
         cols = st.columns([3, 1])
         with cols[0]:

@@ -32,29 +32,15 @@ def reporter_agent(
     retrospective_query = context.retrospective_query if context else "Unable to process query"
     is_edge_case = context.edge_case if context else False
 
-    # Collect successful executions (those with final_response)
-    successful_executions = [ex for ex in executions if ex.final_response is not None]
+    best_ex = next((ex for ex in executions if ex.is_best), None)
+    if best_ex is None:
+        best_ex = next((ex for ex in executions if ex.final_response is not None), None)
 
-    if successful_executions:
-        execution_progresses = [
-            ex.final_response.content + ("\nErrors: " + ex.error_summary if ex.error_summary else "")
-            for ex in successful_executions
-        ]
-    else:
-        # Fallback to error summaries if no successful executions
-        execution_progresses = [
-            "Errors: " + ex.error_summary
-            for ex in executions if ex.error_summary
-        ]
+    execution_outputs = best_ex.final_response.content if (best_ex and best_ex.final_response) else ""
 
-    execution_outputs = "\n\n".join(
-        f"Output {i+1}:\n{prog}" for i, prog in enumerate(execution_progresses)
-    )
-
-    # Collect artefacts from successful executions, dedup plots and CSVs by description
     plot_dict = {}
     csv_dict = {}
-    for ex in successful_executions:
+    for ex in ([best_ex] if best_ex else []):
         for art in ex.artefacts:
             process = art.additional_kwargs.get("process")
             desc = art.content
@@ -75,29 +61,17 @@ def reporter_agent(
 
     reporter_prompt = ChatPromptTemplate.from_messages([
         ("system", """
-You are a helpful assistant generating a concise, polite, and coherent response to a user's query based on provided data. Use markdown for structure (e.g., headings with **, lists with -) only if the response is long, complex, or requires separation of distinct components for clarity. Otherwise, keep the response simple and unstructured for conciseness and readability. The response should integrate:
+You are a helpful assistant generating a concise, polite, and coherent response to a user's query based on provided data. Use markdown only when helpful for clarity. Integrate:
 
-- **Query**: The user's rephrased query incorporating chat history.
-- **Edge Case**: If the query is an edge case, include a brief note about potential limitations.
-- **Execution Outputs**: Ensemble outputs from multiple executions following these rules:
-  - Ignore any obviously erroneous results (e.g., those with errors or nonsensical/invalid outputs).
-  - If the remaining results are unanimous, accept that result.
-  - If they disagree, accept the result which is most helpful to answering the query.
-  - Make the ensembled result coherent and flowing in the final response.
-- **Plots**: If plots are provided, reference them by description, noting they will be displayed below in the UI.
-- **CSV Files**: If CSV files are provided, reference them by description, noting they are available for download/viewing below in the UI.
+- Query: the user's rephrased query incorporating chat history.
+- Edge Case note only if relevant.
+- Best Execution Output: Use the provided content directly to answer the query, rewriting for clarity and flow.
+- Plots/CSVs: If provided, reference them by description, noting they'll be displayed below or available for download. Do not reference plots with captions e.g. "Plot 1" because there are none. Do not mention any artefact IDs.
 
-**Instructions:**
-- Keep the response polite, and helpful.
-- Keep the response concise but include ALL relevant ensembled execution results even if they are large.
-- Do not explicitly state the absence of plots or CSVs, as they are only generated when warranted.
-- If plots or CSVs are included, integrate them naturally into the response.
-- Do not include suggestions for follow-on queries.
-- Ensure the response is self-contained and answers the query directly.
-- If all outputs are errors or no consensus is reached, summarize the issues politely and suggest the query may need refinement.
+Instructions:
+- Keep the response concise, self-contained, and directly answer the query.
 
-**Output Format:**
-Return a single markdown-formatted string, using sectioning only when necessary for clarity.
+Output: return a single markdown-formatted string when needed for clarity.
         """),
         ("human", """
 **Query**: {retrospective_query}
@@ -115,6 +89,7 @@ Return a single markdown-formatted string, using sectioning only when necessary 
     csvs_info = [f"Data File {i+1}: {c['description']}" for i, c in enumerate(csv_artefacts)]
     csvs_info_str = "\n".join(csvs_info) if csvs_info else ""
 
+    final_response = None
     try:
         response_chain = reporter_prompt | llm
         final_response = response_chain.invoke({
@@ -126,14 +101,10 @@ Return a single markdown-formatted string, using sectioning only when necessary 
         }).content
     except Exception as e:
         logger.error("Failed to generate LLM response: %s", str(e))
-        edge_case_note = " (Note: This query was identified as an edge case, so the response may be limited.)" if is_edge_case else ""
-        final_response = f"Unable to ensemble results due to an issue.{edge_case_note}"
-        if execution_outputs:
-            final_response += f"\nRaw outputs:\n{execution_outputs}"
-        if plots_info:
-            final_response += f" See the following plots below: {', '.join(plots_info)}."
-        if csvs_info:
-            final_response += f" Data files are available for download: {', '.join(csvs_info)}."
+        final_response = execution_outputs or "I'm unable to provide a response at this time."
+
+    if not final_response or not str(final_response).strip():
+        final_response = execution_outputs or "I'm unable to provide a response at this time."
 
     updated_messages.append(AIMessage(
         name="Reporter",

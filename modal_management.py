@@ -38,6 +38,7 @@ def make_local_sandbox_mode():
             global_hierarchy_access=st.session_state.global_hierarchy_access,
             remote_sandbox=False,
             num_parallel_executions=st.session_state.num_parallel_executions,
+            num_completions_before_response=st.session_state.num_completions_before_response,
             agent_type=st.session_state.agent_type,
         )})
 
@@ -61,11 +62,16 @@ def is_app_deployed():
 
 # Check if container is warm (response time < 3s)
 def is_container_warm():
-    logger.info(f"Checking if container is warm...")
-    logger.info(f"is_app_deployed: {is_app_deployed()}")
-    if not is_app_deployed():
+    logger.info("Checking if container is warm (max 3s)...")
+    deployed = is_app_deployed()
+    logger.info(f"is_app_deployed: {deployed}")
+    if not deployed:
         return False
+
     start_time = time.time()
+    TIMEOUT = 3.0
+    warm_detected = False
+
     try:
         for output in modal_sandbox_remote.execute_remote_sandbox(
             code=MOCK_CODE,
@@ -75,13 +81,27 @@ def is_container_warm():
             user_id=MOCK_USER_ID,
             global_hierarchy_access=MOCK_GLOBAL_ACCESS,
         ):
-            logger.info(f"Container output from is_container_warm: {output}")
-            if output.get("type") == "error" and "App 'mgs-code-sandbox' is not deployed" in output.get("content", ""):
+            elapsed = time.time() - start_time
+            if elapsed > TIMEOUT:
+                logger.warning(f"Warm check exceeded {TIMEOUT}s (elapsed={elapsed:.2f}); aborting and returning False")
                 return False
-        elapsed = time.time() - start_time
-        logger.info(f"Container response time: {elapsed} seconds")
-        return elapsed < 3
-    except Exception:
+            logger.info(f"Container output from is_container_warm: {output}")
+            out_type = output.get("type")
+            content = output.get("content", "") or ""
+            normalized = content.lower()
+            if out_type == "error" and ("not deployed" in normalized or "is not deployed" in normalized):
+                logger.info("Detected 'not deployed' error in sandbox output; returning False")
+                return False
+            if out_type in ("warmup", "progress", "final"):
+                warm_detected = True
+        total_elapsed = time.time() - start_time
+        logger.info(f"Container warm check completed in {total_elapsed:.2f}s warm_detected={warm_detected}")
+        if total_elapsed > TIMEOUT:
+            logger.info("Total elapsed exceeded timeout; returning False")
+            return False
+        return warm_detected and total_elapsed < TIMEOUT
+    except Exception as e:
+        logger.exception(f"Warm check failed: {e}")
         return False
 
 # Deploy app

@@ -1,6 +1,7 @@
 from agents.history_summariser_agent import history_summariser
 from agents.codeact_coder_agent import codeact_coder_agent
 from agents.reporter_agent import reporter_agent
+from agents.response_selector import response_selector
 from classes import AgentState, Context, Execution
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
@@ -25,15 +26,15 @@ import streamlit as st
 import b2sdk.v1 as b2
 import psycopg2
 
-from typing import List, Dict
+from typing import List, Dict, Any
 import logging
 
-from modal_sandbox_remote import execute_remote_sandbox
-from modal_sandbox_local import execute_local_sandbox
 from parameters import progress_messages
 
 import json
 import traceback
+from modal_sandbox_remote import execute_remote_sandbox
+from modal_sandbox_local import execute_local_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,40 @@ def build_graph(
     global_hierarchy_access: bool,
     remote_sandbox: bool,
     num_parallel_executions: int = 2,
+    num_completions_before_response: int = 2,
     agent_type: str = "Auto",
 ) -> StateGraph:
-    REMOTE_SANDBOX = remote_sandbox
     st.toast("Building graph...", icon=":material/account_tree:")
+
+    extraction_tool = extraction_sandbox_agent(
+        llm=llm,
+        db=db,
+        table_info=table_info,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access,
+    )
+    _general_sql_query_tool = GeneralSQLQueryTool(
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access,
+    )
+    _write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
+    timeseries_plot_tool = timeseries_plot_sandbox_agent(
+        llm=llm,
+        sql_tool=_general_sql_query_tool,
+        write_artefact_tool=_write_artefact_tool,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+    map_plot_tool = map_plot_sandbox_agent(
+        llm=llm,
+        sql_tool=_general_sql_query_tool,
+        write_artefact_tool=_write_artefact_tool,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
         template = progress_messages.get(node)
@@ -153,17 +184,17 @@ def build_graph(
         return {"messages": [message]}
     
     def enter_parallel_execution_node(state: AgentState):
-        targets = [Send(f"branch_entry_{i}", state) for i in range(num_parallel_executions)]
+        logger.info("[MainGraph] Entering parallel execution (inline branches): %d", num_parallel_executions)
+        targets = [Send(f"run_branch_{i}", state) for i in range(num_parallel_executions)]
         return Command(goto=targets)
-
-    def exit_parallel_execution_node(state: AgentState) -> dict:
+    
+    def exit_parallel_execution_node(state: AgentState):
+        logger.info("[MainGraph] Exiting parallel execution (inline branches)")
         return {}
     
-    def router_after_parallel(state: AgentState) -> str:
-        all_done = all(
-            ex.final_response is not None for ex in state.executions
-        )
-        return "reporter_messenger_node" if all_done else END
+    def response_selector_node(state: AgentState) -> dict:
+        updated_executions = response_selector(llm=llm, executions=state.executions, context=state.context)
+        return {"executions": updated_executions}
         
     def reporter_node(state: AgentState) -> Dict[str, List]:
         base_len = len(state.messages)
@@ -178,331 +209,129 @@ def build_graph(
     
     graph = StateGraph(AgentState)
 
-    def make_branch_entry(branch_id: int):
-        def branch_entry(state: AgentState):
-            ex = None
-            try:
-                ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
-            except Exception:
-                ex = None
+    def make_run_branch(branch_id: int):
+        def _progress_msg(content: str, process: str = "progress") -> AIMessage:
+            return AIMessage(name=f"Executor_{branch_id}", content=str(content), additional_kwargs={"stage": "execution_output", "process": process})
 
-            if ex is None:
-                return Command(goto=END)
-
-            match ex.agent_type:
-                case "CodeAct":
-                    return Command(goto=[Send(f"codeact_coder_branch_{branch_id}_messenger", state)])
-                case "ReAct":
-                    return Command(goto=[Send(f"react_branch_{branch_id}_messenger", state)])
-                case "Tool-Calling":
-                    return Command(goto=[Send(f"tool_calling_branch_{branch_id}_messenger", state)])
-                case _:
-                    return Command(goto=END)
-        return branch_entry
-    
-    def make_codeact_coder_branch(branch_id: int):
-        def codeact_coder_branch(state: AgentState) -> dict:
-            pending = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.final_response is None
-                and ex.agent_type == "CodeAct"
-                and ex.codeact_code == ""
-            ]
-            if not pending:
-                return {}
-            
-            target_execution = max(pending, key=lambda e: e.retry_number)
-
-            extraction_tool = extraction_sandbox_agent(
-                llm=llm,
-                db=db,
-                table_info=table_info,
-                table_relationship_graph=table_relationship_graph,
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access
-            )
-            tools = [extraction_tool]
-            previous_attempts = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.retry_number < target_execution.retry_number
-            ]
-            result = codeact_coder_agent(
-                llm=llm,
-                tools=tools,
-                context=state.context,
-                previous_attempts=previous_attempts
-            )
-            new_execution = result["executions"][0]
-            generated_code = new_execution.codeact_code
-
-            if not generated_code.strip():
-                updated = target_execution.model_copy(update={
-                    "error_summary": "CodeAct agent failed to generate code."
-                })
-            else:
-                updated = target_execution.model_copy(update={
-                    "codeact_code": generated_code
-                })
-
-            return {"executions": [updated]}
-        return codeact_coder_branch
-
-    def make_codeact_executor_branch(branch_id: int):
-        def codeact_executor_branch(state: AgentState) -> dict:
-            pending = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.final_response is None
-                and ex.agent_type == "CodeAct"
-                and ex.codeact_code != ""
-            ]
-            if not pending:
+        def run_branch(state: AgentState):
+            ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
+            if not ex or ex.final_response is not None:
                 return {}
 
-            current = max(pending, key=lambda e: e.retry_number)
+            payload: Dict[str, Any] = {}
 
-            code = current.codeact_code
-            if not code:
-                updated = current.model_copy(update={"error_summary": "No code to execute."})
-                return {"executions": [updated]}
-
-            artefacts: List[AIMessage] = []
-            final_msg: AIMessage | None = None
-            logs: List[str] = []
-            messages: List[AIMessage] = []
-
-            try:
-                gen = (
-                    execute_remote_sandbox if REMOTE_SANDBOX else execute_local_sandbox
-                )(
-                    code=code,
-                    table_info=table_info,
-                    table_relationship_graph=table_relationship_graph,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    global_hierarchy_access=global_hierarchy_access,
+            if ex.agent_type == "CodeAct":
+                coder_result = codeact_coder_agent(
+                    llm=llm,
+                    tools=[extraction_tool, timeseries_plot_tool, map_plot_tool],
+                    context=state.context,
+                    previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
                 )
+                new_execution = coder_result["executions"][0]
+                code = (new_execution.codeact_code or "").strip()
+                updated = ex.model_copy(update={"codeact_code": code})
 
-                def _try_json(c):
-                    if isinstance(c, dict):
-                        return c
-                    if isinstance(c, str):
-                        try:
-                            return json.loads(c)
-                        except Exception:
-                            return None
-                    return None
-
-                for out in gen:
-                    if not isinstance(out, dict) or "metadata" not in out:
-                        logs.append(f"Invalid output: {out}")
-                        continue
-
-                    typ = out["metadata"].get("type")
-                    content = out.get("content", "")
-
-                    if typ in ("progress", "error"):
-                        msg = AIMessage(
-                            name=f"CodeExecutor_{branch_id}",
-                            content=str(content),
-                            additional_kwargs={"stage": "execution_output", "process": typ},
+                messages: List[AIMessage] = []
+                artefacts: List[AIMessage] = []
+                final_msg: AIMessage | None = None
+                logs: List[str] = []
+                if code:
+                    try:
+                        gen = (execute_remote_sandbox if remote_sandbox else execute_local_sandbox)(
+                            code=code,
+                            table_info=table_info,
+                            table_relationship_graph=table_relationship_graph,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                            global_hierarchy_access=global_hierarchy_access,
                         )
-                        messages.append(msg)
-                        logs.append(str(content))
+                        for out in gen:
+                            if not isinstance(out, dict) or "metadata" not in out:
+                                logs.append(f"Invalid output: {out}")
+                                continue
+                            typ = out["metadata"].get("type")
+                            content = out.get("content", "")
+                            if typ in ("progress", "error"):
+                                messages.append(_progress_msg(str(content), process=typ))
+                                logs.append(str(content))
+                            elif typ == "final":
+                                final_msg = _progress_msg(str(content), process="final")
+                                messages.append(final_msg)
+                            elif typ in ("plot", "csv"):
+                                try:
+                                    import json as _json
+                                    jd = _json.loads(content) if isinstance(content, str) else content
+                                except Exception:
+                                    jd = None
+                                if jd:
+                                    msg = AIMessage(
+                                        name=f"Executor_{branch_id}",
+                                        content=jd.get("description", "(no description)"),
+                                        additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
+                                    )
+                                    messages.append(msg)
+                                    artefacts.append(msg)
+                                else:
+                                    err = f"Failed to parse {typ}: {str(content)[:200]}"
+                                    logs.append(err)
+                                    messages.append(_progress_msg(err, process="error"))
+                            else:
+                                messages.append(_progress_msg(str(content), process="progress"))
+                    except Exception as e:
+                        err = f"Sandbox error: {e}"
+                        logs.append(err)
+                        messages.append(_progress_msg(err, process="error"))
 
-                    elif typ == "final":
-                        final_msg = AIMessage(
-                            name=f"CodeExecutor_{branch_id}",
-                            content=str(content),
-                            additional_kwargs={"stage": "execution_output", "process": "final"},
-                        )
-                        messages.append(final_msg)
+                updated = updated.model_copy(update={
+                    "final_response": final_msg,
+                    "artefacts": artefacts,
+                    "error_summary": "\n".join(logs) if logs else "",
+                    "is_sufficient": bool(final_msg),
+                })
+                payload["executions"] = [updated]
+                if messages:
+                    payload["messages"] = messages
 
-                    elif typ in ("plot", "csv"):
-                        jd = _try_json(content)
-                        if jd:
-                            msg = AIMessage(
-                                name=f"CodeExecutor_{branch_id}",
-                                content=jd.get("description", "(no description)"),
-                                additional_kwargs={
-                                    "stage": "execution_output",
-                                    "process": typ,
-                                    "artefact_id": jd.get("artefact_id"),
-                                },
-                            )
-                            messages.append(msg)
-                            artefacts.append(msg)
-                        else:
-                            err = f"Failed to parse {typ}: {content[:200]}"
-                            logs.append(err)
-                            messages.append(
-                                AIMessage(
-                                    name=f"CodeExecutor_{branch_id}",
-                                    content=err,
-                                    additional_kwargs={"stage": "execution_output", "process": "error"},
-                                )
-                            )
-                    else:
-                        messages.append(
-                            AIMessage(
-                                name=f"CodeExecutor_{branch_id}",
-                                content=str(content),
-                                additional_kwargs={"stage": "execution_output", "process": "progress"},
-                            )
-                        )
-            except Exception as e:
-                err = f"Sandbox error: {e}\n{traceback.format_exc()}"
-                logs.append(err)
-                messages.append(
-                    AIMessage(
-                        name=f"CodeExecutor_{branch_id}",
-                        content=err,
-                        additional_kwargs={"stage": "execution_output", "process": "error"},
-                    )
+            elif ex.agent_type == "ReAct":
+                tools = [extraction_tool, timeseries_plot_tool, map_plot_tool]
+                result = react_agent(
+                    llm=llm,
+                    tools=tools,
+                    context=state.context,
+                    previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
                 )
+                updated = ex.model_copy(update={
+                    "final_response": result.get("final_response"),
+                    "artefacts": result.get("artefacts", []),
+                    "error_summary": result.get("error_summary", ""),
+                    "is_sufficient": bool(result.get("final_response")),
+                })
+                msgs = result.get("messages", []) or []
+                payload["executions"] = [updated]
+                if msgs:
+                    payload["messages"] = msgs
 
-            updated = current.model_copy(update={
-                "final_response": final_msg,
-                "artefacts": artefacts,
-                "error_summary": "\n".join(logs) if logs else "",
-            })
+            elif ex.agent_type == "Tool-Calling":
+                tools = [extraction_tool, timeseries_plot_tool, map_plot_tool]
+                result = tool_calling_agent(
+                    llm=llm,
+                    tools=tools,
+                    context=state.context,
+                    previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
+                )
+                updated = ex.model_copy(update={
+                    "final_response": result.get("final_response"),
+                    "artefacts": result.get("artefacts", []),
+                    "error_summary": result.get("error_summary", ""),
+                    "is_sufficient": bool(result.get("final_response")),
+                })
+                msgs = result.get("messages", []) or []
+                payload["executions"] = [updated]
+                if msgs:
+                    payload["messages"] = msgs
 
-            return {"messages": messages, "executions": [updated]}
-        return codeact_executor_branch
-
-    def make_react_branch(branch_id: int):
-        def react_branch(state: AgentState) -> dict:
-            pending = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.final_response is None
-                and ex.agent_type == "ReAct"
-            ]
-            if not pending:
-                return {}
-            
-            target_execution = max(pending, key=lambda e: e.retry_number)
-
-            extraction_tool = extraction_sandbox_agent(
-                llm=llm,
-                db=db,
-                table_info=table_info,
-                table_relationship_graph=table_relationship_graph,
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access,
-            )
-            general_sql_query_tool = GeneralSQLQueryTool(
-                db=db,
-                table_relationship_graph=table_relationship_graph,
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access
-            )
-            write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
-            timeseries_tool = timeseries_plot_sandbox_agent(
-                llm=llm,
-                sql_tool=general_sql_query_tool,
-                write_artefact_tool=write_artefact_tool,
-                thread_id=thread_id,
-                user_id=user_id
-            )
-            map_tool = map_plot_sandbox_agent(
-                llm=llm,
-                sql_tool=general_sql_query_tool,
-                write_artefact_tool=write_artefact_tool,
-                thread_id=thread_id,
-                user_id=user_id
-            )
-            tools = [extraction_tool, timeseries_tool, map_tool]
-
-            previous_attempts = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.retry_number < target_execution.retry_number
-            ]
-            result = react_agent(
-                llm=llm,
-                tools=tools,
-                context=state.context,
-                previous_attempts=previous_attempts
-            )
-
-            updated = target_execution.model_copy(update={
-                "final_response": result["final_response"],
-                "artefacts": result["artefacts"],
-                "error_summary": result.get("error_summary", "")
-            })
-
-            react_messages = result.get("messages", [])
-            return {"messages": react_messages, "executions": [updated]}
-        return react_branch
-
-    def make_tool_calling_branch(branch_id: int):
-        def tool_calling_branch(state: AgentState) -> dict:
-            pending = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.final_response is None
-                and ex.agent_type == "Tool-Calling"
-            ]
-            if not pending:
-                return {}
-            
-            target_execution = max(pending, key=lambda e: e.retry_number)
-
-            extraction_tool = extraction_sandbox_agent(
-                llm=llm,
-                db=db,
-                table_info=table_info,
-                table_relationship_graph=table_relationship_graph,
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access,
-            )
-            general_sql_query_tool = GeneralSQLQueryTool(
-                db=db,
-                table_relationship_graph=table_relationship_graph,
-                user_id=user_id,
-                global_hierarchy_access=global_hierarchy_access
-            )
-            write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
-            timeseries_tool = timeseries_plot_sandbox_agent(
-                llm=llm,
-                sql_tool=general_sql_query_tool,
-                write_artefact_tool=write_artefact_tool,
-                thread_id=thread_id,
-                user_id=user_id
-            )
-            map_tool = map_plot_sandbox_agent(
-                llm=llm,
-                sql_tool=general_sql_query_tool,
-                write_artefact_tool=write_artefact_tool,
-                thread_id=thread_id,
-                user_id=user_id
-            )
-            tools = [extraction_tool, timeseries_tool, map_tool]
-
-            previous_attempts = [
-                ex for ex in state.executions
-                if ex.parallel_agent_id == branch_id
-                and ex.retry_number < target_execution.retry_number
-            ]
-            result = tool_calling_agent(
-                llm=llm,
-                tools=tools,
-                context=state.context,
-                previous_attempts=previous_attempts
-            )
-
-            updated = target_execution.model_copy(update={
-                "final_response": result["final_response"],
-                "artefacts": result["artefacts"],
-                "error_summary": result.get("error_summary", "")
-            })
-
-            tool_calling_messages = result.get("messages", [])
-            return {"messages": tool_calling_messages, "executions": [updated]}
-        return tool_calling_branch
+            return payload or {}
+        return run_branch
 
     graph.add_node("history_summariser_messenger_node", lambda state: progress_messenger_node(state, "history_summariser_node"))
     graph.add_node("history_summariser_node", history_summariser_node)
@@ -514,6 +343,7 @@ def build_graph(
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
     graph.add_node("reporter_messenger_node", lambda state: progress_messenger_node(state, "reporter_node"))
+    graph.add_node("response_selector_node", response_selector_node)
     graph.add_node("reporter_node", reporter_node)
 
     graph.set_entry_point("history_summariser_messenger_node")
@@ -530,30 +360,12 @@ def build_graph(
     graph.add_edge("query_classifier_node", "enter_parallel_execution_node")
 
     for i in range(num_parallel_executions):
-        graph.add_node(f"branch_entry_{i}", make_branch_entry(i))
-        graph.add_node(f"codeact_coder_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"codeact_coder_branch"))
-        graph.add_node(f"codeact_coder_branch_{i}", make_codeact_coder_branch(i))
-        graph.add_node(f"codeact_executor_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"codeact_executor_branch"))
-        graph.add_node(f"codeact_executor_branch_{i}", make_codeact_executor_branch(i))
-        graph.add_edge(f"codeact_coder_branch_{i}_messenger", f"codeact_coder_branch_{i}")
-        graph.add_edge(f"codeact_coder_branch_{i}", f"codeact_executor_branch_{i}_messenger")
-        graph.add_edge(f"codeact_executor_branch_{i}_messenger", f"codeact_executor_branch_{i}")
-        graph.add_edge(f"codeact_executor_branch_{i}", "exit_parallel_execution_node")
-        graph.add_node(f"react_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"react_branch"))
-        graph.add_node(f"react_branch_{i}", make_react_branch(i))
-        graph.add_edge(f"react_branch_{i}_messenger", f"react_branch_{i}")
-        graph.add_edge(f"react_branch_{i}", "exit_parallel_execution_node")
-        graph.add_node(f"tool_calling_branch_{i}_messenger", lambda state: progress_messenger_node(state, f"tool_calling_branch"))
-        graph.add_node(f"tool_calling_branch_{i}", make_tool_calling_branch(i))
-        graph.add_edge(f"tool_calling_branch_{i}_messenger", f"tool_calling_branch_{i}")
-        graph.add_edge(f"tool_calling_branch_{i}", "exit_parallel_execution_node")
+        graph.add_node(f"run_branch_{i}", make_run_branch(i))
+        graph.add_edge(f"run_branch_{i}", "exit_parallel_execution_node")
 
-    graph.add_conditional_edges(
-        "exit_parallel_execution_node",
-        router_after_parallel,
-        {"reporter_messenger_node": "reporter_messenger_node", END: END},
-    )
-    graph.add_edge("reporter_messenger_node", "reporter_node")
+    graph.add_edge("exit_parallel_execution_node", "reporter_messenger_node")
+    graph.add_edge("reporter_messenger_node", "response_selector_node")
+    graph.add_edge("response_selector_node", "reporter_node")
     graph.add_edge("reporter_node", END)
     
     return graph.compile()
