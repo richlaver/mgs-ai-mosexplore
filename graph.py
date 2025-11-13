@@ -52,6 +52,7 @@ def build_graph(
     num_parallel_executions: int = 2,
     num_completions_before_response: int = 2,
     agent_type: str = "Auto",
+    selected_project_key: str | None = None,
 ) -> StateGraph:
     st.toast("Building graph...", icon=":material/account_tree:")
 
@@ -244,6 +245,7 @@ def build_graph(
                             thread_id=thread_id,
                             user_id=user_id,
                             global_hierarchy_access=global_hierarchy_access,
+                            selected_project_key=selected_project_key,
                         )
                         for out in gen:
                             if not isinstance(out, dict) or "metadata" not in out:

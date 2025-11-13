@@ -132,3 +132,6 @@ class ContextState(BaseModel):
     instruments_validated: Annotated[bool, operator.or_] = False
     db_context_provided: Annotated[bool, operator.or_] = False
     period_deduced: Annotated[bool, operator.or_] = False
+
+AgentState.model_rebuild()
+Context.model_rebuild()

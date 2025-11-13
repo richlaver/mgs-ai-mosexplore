@@ -11,8 +11,12 @@ from classes import AgentState, Context
 from parameters import users, table_info
 from graph import build_graph
 import setup
+from utils.project_selection import (
+    list_projects,
+    get_selected_project_key,
+)
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
-from modal_management import deploy_app, warm_up_container, stop_app, is_app_deployed, is_container_warm
+from modal_management import deploy_app, stop_app, is_app_deployed
 from utils.chat_history import filter_messages_only_final
 
 logger = logging.getLogger(__name__)
@@ -66,19 +70,16 @@ def user_modal():
 @st.dialog("Sandbox")
 def sandbox_modal():
     st.markdown(f"App Deployed: **{'Yes' if st.session_state.app_deployed else 'No'}**")
-    st.markdown(f"Container Warm: **{'Yes' if st.session_state.container_warm else 'No'}**")
     st.info("Note: Keeping a container warm costs ~$55/month. Stop when not in use to save costs.")
 
-    spin_up_disabled = st.session_state.app_deployed and st.session_state.container_warm
-    kill_disabled = not (st.session_state.app_deployed and st.session_state.container_warm)
+    spin_up_disabled = st.session_state.app_deployed
+    kill_disabled = not st.session_state.app_deployed
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Spin-up", disabled=spin_up_disabled, key="spin_up", icon=":material/rocket_launch:"):
             if not st.session_state.app_deployed:
                 deploy_app()
-            if st.session_state.app_deployed and not st.session_state.container_warm:
-                warm_up_container()
             st.rerun()
     with col2:
         if st.button("Kill", disabled=kill_disabled, key="kill", icon=":material/block:"):
@@ -146,9 +147,6 @@ def render_initial_ui() -> None:
         # if not st.session_state.app_deployed:
         #     st.session_state.sandbox_mode = "Local"
         logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
-    if "container_warm" not in st.session_state:
-        st.session_state.container_warm = is_container_warm()
-        logger.info(f"container_warm after setting session state variable: {st.session_state.container_warm}")
         
     st.markdown(
         """
@@ -285,10 +283,73 @@ def render_initial_ui() -> None:
             num_parallel_executions=st.session_state.num_parallel_executions,
             num_completions_before_response=st.session_state.num_completions_before_response,
             agent_type=st.session_state.agent_type,
+            selected_project_key=st.session_state.get("selected_project_key"),
         )
 
     with st.sidebar:
         st.divider()
+        projects = list_projects()
+        if projects:
+            display_names = [p["display_name"] for p in projects]
+            key_by_display = {p["display_name"]: p["key"] for p in projects}
+            current_project_key = get_selected_project_key()
+            current_display_name = next((p["display_name"] for p in projects if p["key"] == current_project_key), display_names[0])
+
+            def _on_project_change():
+                selected_display = st.session_state.project_selector_display
+                selected_key = key_by_display.get(selected_display)
+                if selected_key and selected_key != st.session_state.get("selected_project_key"):
+                    st.session_state.selected_project_key = selected_key
+                    try:
+                        setup.set_db_env()
+                        st.session_state.db = setup.get_db()
+                    except Exception as e:
+                        st.error(f"Failed to switch project database: {e}")
+                        return
+                    try:
+                        st.session_state.modal_secrets = setup.build_modal_secrets()
+                    except Exception:
+                        pass
+                    try:
+                        st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+                    except Exception:
+                        pass
+                    try:
+                        st.session_state.table_relationship_graph = setup.build_relationship_graph()
+                    except Exception:
+                        pass
+                    if all(k in st.session_state for k in ["llm", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "agent_type", "num_parallel_executions"]):
+                        try:
+                            logger.info("[Project Switch] Rebuilding agent graph (remote_sandbox=%s) for project=%s", st.session_state.sandbox_mode == "Remote", selected_key)
+                            st.session_state.graph = build_graph(
+                                llm=st.session_state.llm,
+                                db=st.session_state.db,
+                                blob_db=st.session_state.blob_db,
+                                metadata_db=st.session_state.metadata_db,
+                                table_info=table_info,
+                                table_relationship_graph=st.session_state.table_relationship_graph,
+                                thread_id=st.session_state.thread_id,
+                                user_id=st.session_state.selected_user_id,
+                                global_hierarchy_access=st.session_state.global_hierarchy_access,
+                                remote_sandbox=st.session_state.sandbox_mode == "Remote",
+                                num_parallel_executions=st.session_state.num_parallel_executions,
+                                num_completions_before_response=st.session_state.get("num_completions_before_response", 1),
+                                agent_type=st.session_state.agent_type,
+                                selected_project_key=selected_key,
+                            )
+                            logger.info("[Project Switch] Graph rebuilt for project=%s", selected_key)
+                        except Exception as e:
+                            st.error(f"Failed to rebuild agent graph after project switch: {e}")
+                    st.toast(f"Switched to project: {selected_display}", icon=":material/database:")
+
+            st.selectbox(
+                label="Project",
+                options=display_names,
+                index=display_names.index(current_display_name) if current_display_name in display_names else 0,
+                key="project_selector_display",
+                help="Select which project database to query.",
+                on_change=_on_project_change,
+            )
         st.slider(
             label="No. of Parallel-Running Agents",
             min_value=1,
@@ -536,10 +597,13 @@ def render_chat_content() -> None:
             }
         }
         messages_summary = filter_messages_only_final(st.session_state.messages)
+        logger.info(f"Type of Context(retrospective_query=''): {type(Context(retrospective_query=''))}")
+        logger.info(f"Context(retrospective_query=''): {Context(retrospective_query='')}")
         initial_state = AgentState(
             messages=messages_summary,
             context=Context(retrospective_query="")
         )
+        logger.info(f"Initial state: {initial_state}")
 
         with st.spinner("Generating..."):
             with st.chat_message("assistant"):

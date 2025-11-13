@@ -18,6 +18,10 @@ from collections import defaultdict
 from typing import List, Tuple
 import modal
 import logging
+from utils.project_selection import (
+    get_selected_project_key,
+    get_project_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +44,19 @@ def build_modal_secrets():
 
     logger.info("Building Modal secrets (modal.is_local()=%s)", modal.is_local())
     if modal.is_local():
-        import streamlit as st  # type: ignore
+        import streamlit as st
         try:
-            st.toast("Building Modal secrets...", icon=":material/key:")
+            st.toast("Building Modal secrets...", icon=":material:key:")
         except Exception:
-            # Toast may fail outside Streamlit runtime; ignore.
             pass
-        if st.session_state.get("modal_secrets"):
+
+        current_project_key = get_selected_project_key() if "selected_project_key" in st.session_state else None
+        if st.session_state.get("modal_secrets") and st.session_state.get("modal_secrets_project_key") == current_project_key:
             return st.session_state.modal_secrets
+
         google_json = st.secrets.get("GOOGLE_CREDENTIALS_JSON")
-        db_dict = st.secrets.get("database", {})
+        selected_project_key = get_selected_project_key()
+        db_dict = get_project_config(selected_project_key)
         rds_dict = st.secrets.get("artefact_metadata_rds", {})
         b2_dict = st.secrets.get("artefact_blob_b2", {})
         logger.info("google_json present: %s", bool(google_json))
@@ -60,11 +67,14 @@ def build_modal_secrets():
         if not google_json:
             logger.error("st.secrets['GOOGLE_CREDENTIALS_JSON'] missing or empty")
             raise ValueError("st.secrets['GOOGLE_CREDENTIALS_JSON'] is missing or empty.")
+
         required_db_keys = ["db_host", "db_user", "db_pass", "db_name"]
         missing = [k for k in required_db_keys if not db_dict.get(k)]
         if missing:
-            logger.error("st.secrets['database'] missing required keys: %s", ", ".join(missing))
-            raise ValueError("st.secrets['database'] is missing required keys: " + ", ".join(missing))
+            logger.error("Selected project '%s' missing required keys: %s", selected_project_key, ", ".join(missing))
+            raise ValueError(
+                f"st.secrets['{selected_project_key}'] is missing required keys: " + ", ".join(missing)
+            )
         required_rds_keys = ["host", "user", "password", "database"]
         missing_rds = [k for k in required_rds_keys if not rds_dict.get(k)]
         if missing_rds:
@@ -79,6 +89,16 @@ def build_modal_secrets():
         google_secret = modal.Secret.from_dict({
             "GOOGLE_CREDENTIALS_JSON": str(google_json),
         })
+
+        project_data_raw = st.secrets.get("project_data", {})
+        project_data_json = json.dumps(
+            project_data_raw,
+            default=lambda o: dict(o) if hasattr(o, "items") else o,
+        )
+        project_data_secret = modal.Secret.from_dict({
+            "PROJECT_DATA_JSON": project_data_json,
+        })
+
         mysql_secret = modal.Secret.from_dict({
             "DB_HOST": str(db_dict.get("db_host")),
             "DB_USER": str(db_dict.get("db_user")),
@@ -98,15 +118,25 @@ def build_modal_secrets():
             "ARTEFACT_BLOB_B2_KEY": str(b2_dict.get("key")),
             "ARTEFACT_BLOB_B2_BUCKET": str(b2_dict.get("bucket")),
         })
-        logger.info("Created local Modal secrets from st.secrets (DB_HOST/USER/NAME set: %s/%s/%s, DB_PORT=%s)",
-                    bool(db_dict.get("db_host")), bool(db_dict.get("db_user")), bool(db_dict.get("db_name")), str(db_dict.get("port", "3306")))
+        logger.info(
+            "Created local Modal secrets from st.secrets for project '%s' (DB_HOST/USER/NAME set: %s/%s/%s, DB_PORT=%s)",
+            selected_project_key,
+            bool(db_dict.get("db_host")),
+            bool(db_dict.get("db_user")),
+            bool(db_dict.get("db_name")),
+            str(db_dict.get("port", "3306")),
+        )
         logger.info("Created local Modal secrets for artefact_metadata_rds and artefact_blob_b2")
-        st.session_state.modal_secrets = [google_secret, mysql_secret, rds_secret, b2_secret]
+        st.session_state.modal_secrets = [google_secret, project_data_secret, mysql_secret, rds_secret, b2_secret]
+        st.session_state.modal_secrets_project_key = selected_project_key
         return st.session_state.modal_secrets
     else:
-        logger.info("Using named Modal secrets: 'google-credentials-json', 'mysql-credentials', 'artefact-metadata-rds-credentials', 'artefact-blob-b2-credentials'")
+        logger.info(
+            "Using named Modal secrets: 'google-credentials-json', 'project-data-json', 'mysql-credentials', 'artefact-metadata-rds-credentials', 'artefact-blob-b2-credentials'"
+        )
         return [
             modal.Secret.from_name("google-credentials-json"),
+            modal.Secret.from_name("project-data-json"),
             modal.Secret.from_name("mysql-credentials"),
             modal.Secret.from_name("artefact-metadata-rds-credentials"),
             modal.Secret.from_name("artefact-blob-b2-credentials"),
@@ -185,17 +215,22 @@ def get_db() -> SQLDatabase:
     Returns:
         An SQLDatabase instance connected to the MissionOS Hanoi CP03 database.
     """
-    st.toast("Connecting to the MissionOS CP03 database...", icon=":material/build:")
+    st.toast("Connecting to the selected MissionOS database...", icon=":material/build:")
     try:
-        db_host = st.secrets["database"]["db_host"]
-        db_user = st.secrets["database"]["db_user"]
-        db_pass = st.secrets["database"]["db_pass"]
-        db_name = st.secrets["database"]["db_name"]
-        port = st.secrets["database"]["port"]
+        selected_project_key = get_selected_project_key()
+        project_cfg = get_project_config(selected_project_key)
+        db_host = project_cfg["db_host"]
+        db_user = project_cfg["db_user"]
+        db_pass = project_cfg["db_pass"]
+        db_name = project_cfg["db_name"]
+        port = project_cfg["port"]
 
-        db_uri = f"mysql+mysqlconnector://{db_user}:{db_pass}@{db_host}:{port}/{db_name}"
+        logger.info("[DB] Connecting using project=%s host=%s db=%s port=%s user_present=%s", selected_project_key, db_host, db_name, port, bool(db_user))
+        db_uri_actual = f"mysql+mysqlconnector://{db_user}:{db_pass}@{db_host}:{port}/{db_name}"
+        db_uri_log = f"mysql+mysqlconnector://{db_user}:***@{db_host}:{port}/{db_name}"
+        logger.debug("[DB] SQLAlchemy URI (masked): %s", db_uri_log)
         engine = create_engine(
-            url=db_uri,
+            url=db_uri_actual,
             pool_pre_ping=True,
             pool_recycle=3600,
             pool_size=5,
@@ -222,9 +257,11 @@ def get_db() -> SQLDatabase:
         )
         logging.debug(f"Available tables: {db.get_usable_table_names()}")
 
-        st.toast("Connected to the MissionOS CP03 database", icon=":material/plug_connect:")
+        st.toast(
+            f"Connected to: {project_cfg.get('display_name', selected_project_key)}",
+            icon=":material/plug_connect:",
+        )
         return db
-
     except Exception as e:
         raise Exception(f"Failed to connect to database: {str(e)}")
 
@@ -313,15 +350,16 @@ def set_db_env() -> None:
         DB_NAME
         DB_PORT (defaults to 3306 if not provided)
 
-    Values are sourced from st.secrets['database'] mirroring get_db().
+    Values are sourced from st.secrets['project_data.hanoi_clone'] mirroring get_db().
     """
     st.toast("Setting primary DB environment variables...", icon=":material/package_2:")
-    db_dict = st.secrets.get("database", {})
+    selected_project_key = get_selected_project_key()
+    db_dict = get_project_config(selected_project_key)
     required_keys = ["db_host", "db_user", "db_pass", "db_name"]
     missing = [k for k in required_keys if not db_dict.get(k)]
     if missing:
-        logging.error("database secrets missing required keys: %s", ", ".join(missing))
-        raise ValueError("st.secrets['database'] is missing required keys: " + ", ".join(missing))
+        logging.error("database secrets for '%s' missing required keys: %s", selected_project_key, ", ".join(missing))
+        raise ValueError(f"st.secrets['{selected_project_key}'] is missing required keys: " + ", ".join(missing))
 
     os.environ["DB_HOST"] = str(db_dict.get("db_host"))
     os.environ["DB_USER"] = str(db_dict.get("db_user"))
@@ -329,7 +367,8 @@ def set_db_env() -> None:
     os.environ["DB_NAME"] = str(db_dict.get("db_name"))
     os.environ["DB_PORT"] = str(db_dict.get("port", 3306))
     logging.info(
-        "Set DB_* env vars (host=%s db=%s user=%s port=%s)",
+        "Set DB_* env vars for '%s' (host=%s db=%s user=%s port=%s)",
+        selected_project_key,
         os.environ["DB_HOST"],
         os.environ["DB_NAME"],
         os.environ["DB_USER"],

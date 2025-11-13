@@ -53,7 +53,8 @@ def perform_setup():
         remote_sandbox=st.session_state.sandbox_mode == "Remote",
         num_parallel_executions=st.session_state.num_parallel_executions,
         num_completions_before_response=st.session_state.num_completions_before_response,
-        agent_type=st.session_state.agent_type,
+    agent_type=st.session_state.agent_type,
+    selected_project_key=st.session_state.get("selected_project_key"),
     )
 
 def main() -> None:

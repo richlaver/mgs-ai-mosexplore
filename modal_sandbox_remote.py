@@ -12,7 +12,7 @@ from langchain_google_vertexai import ChatVertexAI
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
-from typing import Generator, List, Dict, AsyncGenerator
+from typing import Generator, List, Dict, AsyncGenerator, Optional
 from parameters import include_tables
 from setup import build_modal_secrets
 
@@ -52,6 +52,7 @@ image = (
     .add_local_file("tools/sql_security_toolkit.py", remote_path="/root/tools/sql_security_toolkit.py")
     .add_local_file("artefact_management.py", remote_path="/root/artefact_management.py")
     .add_local_file("setup.py", remote_path="/root/setup.py")
+    .add_local_file("utils/project_selection.py", remote_path="/root/utils/project_selection.py")
 )
 
 @app.cls(
@@ -114,37 +115,22 @@ class SandboxExecutor:
         self.llm = ChatVertexAI(model="gemini-2.0-flash-001", temperature=0.1)
         logger.info("Initialized ChatVertexAI model=%s", "gemini-2.0-flash-001")
 
-        # Set up SQL database (MySQL)
-        required_env = ["DB_HOST", "DB_USER", "DB_PASS", "DB_NAME"]
-        missing_env = [k for k in required_env if k not in os.environ or not os.environ.get(k)]
-        db_port = os.environ.get("DB_PORT", "3306")
-        if missing_env:
-            logger.error("Missing DB env vars: %s", missing_env)
-            raise KeyError("Missing required DB environment variables: " + ", ".join(missing_env))
+        self.project_configs: Dict[str, Dict] = {}
+        pdj = os.environ.get("PROJECT_DATA_JSON")
+        if pdj:
+            try:
+                parsed = json.loads(pdj)
+                if isinstance(parsed, dict):
+                    for key, cfg in parsed.items():
+                        if isinstance(cfg, dict):
+                            self.project_configs[f"project_data.{key}"] = cfg
+                logger.info("Loaded %d project configs from PROJECT_DATA_JSON", len(self.project_configs))
+            except Exception as e:
+                logger.warning("Failed to parse PROJECT_DATA_JSON: %s", e)
+        else:
+            logger.info("PROJECT_DATA_JSON not present; will rely on default DB_* env")
 
-        db_host = os.environ["DB_HOST"]
-        db_user = os.environ["DB_USER"]
-        db_pass = os.environ["DB_PASS"]
-        db_name = os.environ["DB_NAME"]
-
-        db_uri = f"mysql+mysqlconnector://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
-        logger.info("Creating SQLAlchemy engine for MySQL (host=%s port=%s db=%s user=%s)", db_host, db_port, db_name, db_user)
-        engine = create_engine(db_uri, echo=False, pool_pre_ping=True)
-        metadata = MetaData()
-        Table(
-            '3d_condours', metadata,
-            Column('id', Integer, primary_key=True),
-            Column('contour_bound', Geometry)
-        )
-        logger.info("Initialized SQLAlchemy metadata and registered custom Geometry table")
-        self.db = SQLDatabase(
-            engine=engine,
-            metadata=metadata,
-            include_tables=include_tables,
-            sample_rows_in_table_info=3,
-            lazy_table_reflection=True,
-        )
-        logger.info("Created SQLDatabase (include_tables=%s)", include_tables)
+        self._db_cache: Dict[str, SQLDatabase] = {}
 
         sys.path.append("/root")
 
@@ -164,6 +150,7 @@ class SandboxExecutor:
         thread_id: str,
         user_id: int,
         global_hierarchy_access: bool,
+        selected_project_key: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         from tools.artefact_toolkit import WriteArtefactTool
         run_logger = logging.getLogger("modal_sandbox.run")
@@ -198,10 +185,39 @@ class SandboxExecutor:
                 )
                 run_logger.info("Reconnected to PostgreSQL RDS metadata_db")
 
+            def _get_db_for_project(project_key: Optional[str]) -> SQLDatabase:
+                if project_key and project_key in self._db_cache:
+                    return self._db_cache[project_key]
+                cfg = None
+                if project_key and project_key in self.project_configs:
+                    cfg = self.project_configs.get(project_key)
+                if cfg and all(k in cfg for k in ("db_host", "db_user", "db_pass", "db_name")):
+                    host = str(cfg.get("db_host"))
+                    user = str(cfg.get("db_user"))
+                    pwd = str(cfg.get("db_pass"))
+                    name = str(cfg.get("db_name"))
+                    port = str(cfg.get("port", "3306"))
+                    uri = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{name}"
+                    run_logger.info("Creating project SQLAlchemy engine (project=%s host=%s db=%s port=%s)", project_key, host, name, port)
+                    engine = create_engine(uri, echo=False, pool_pre_ping=True)
+                    metadata = MetaData()
+                    Table('3d_condours', metadata, Column('id', Integer, primary_key=True), Column('contour_bound', Geometry))
+                    db = SQLDatabase(
+                        engine=engine,
+                        metadata=metadata,
+                        include_tables=include_tables,
+                        sample_rows_in_table_info=3,
+                        lazy_table_reflection=True,
+                    )
+                    self._db_cache[project_key] = db
+                    return db
+                raise RuntimeError("PROJECT_DATA_JSON missing or project config not found/invalid for key: %s" % project_key)
+
+            db = _get_db_for_project(selected_project_key)
             # Initialize tools
             extraction_tool = extraction_sandbox_agent(
                 llm=self.llm,
-                db=self.db,
+                db=db,
                 table_info=table_info,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
@@ -210,7 +226,7 @@ class SandboxExecutor:
             run_logger.info("Initialized extraction_tool")
 
             general_sql_query_tool = GeneralSQLQueryTool(
-                db=self.db,
+                db=db,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
                 global_hierarchy_access=global_hierarchy_access
@@ -257,7 +273,7 @@ class SandboxExecutor:
                 "timeseries_plot_sandbox_agent": timeseries_plot_sandbox_tool,
                 "map_plot_sandbox_agent": map_plot_sandbox_tool,
                 "llm": self.llm,
-                "db": self.db,
+                "db": db,
                 "datetime": __import__("datetime"),
                 "ainvoke": ainvoke,
                 "asyncio": asyncio,
@@ -340,6 +356,7 @@ def execute_remote_sandbox(
     thread_id: str,
     user_id: int,
     global_hierarchy_access: bool,
+    selected_project_key: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     with modal.enable_output():
         executor_class = modal.Cls.from_name("mgs-code-sandbox", "SandboxExecutor")
@@ -351,6 +368,7 @@ def execute_remote_sandbox(
             thread_id=thread_id,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access,
+            selected_project_key=selected_project_key,
         )
         for output in outputs:
             yield output
