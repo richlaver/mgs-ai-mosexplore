@@ -49,6 +49,7 @@ image = (
     .add_local_file("agents/map_plot_sandbox_agent.py", remote_path="/root/agents/map_plot_sandbox_agent.py")
     .add_local_file("tools/artefact_toolkit.py", remote_path="/root/tools/artefact_toolkit.py")
     .add_local_file("tools/create_output_toolkit.py", remote_path="/root/tools/create_output_toolkit.py")
+    .add_local_file("tools/review_level_toolkit.py", remote_path="/root/tools/review_level_toolkit.py")
     .add_local_file("tools/sql_security_toolkit.py", remote_path="/root/tools/sql_security_toolkit.py")
     .add_local_file("artefact_management.py", remote_path="/root/artefact_management.py")
     .add_local_file("setup.py", remote_path="/root/setup.py")

@@ -374,7 +374,7 @@ def set_db_env() -> None:
         os.environ["DB_USER"],
         os.environ["DB_PORT"],
     )
-
+    
 
 def get_metadata_db() -> psycopg2.extensions.connection:
     """Initialize the PostgreSQL RDS connection for artefact metadata."""

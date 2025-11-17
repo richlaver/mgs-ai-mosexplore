@@ -17,6 +17,11 @@ from pyproj.crs import CRS
 from pyproj.transformer import Transformer
 
 from .sql_security_toolkit import GeneralSQLQueryTool
+from .review_level_toolkit import (
+    GetMapSeriesReviewSnapshotTool,
+    GetMapSeriesReviewChangeTool,
+    GetReviewSchemaTool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,7 @@ class TimeSeriesPlotInput(BaseModel):
     )
     secondary_y_instruments: Optional[List[InstrumentColumnPair]] = Field(
         default_factory=list,
-        description="An optional list of instrument-column pairs to plot on the secondary (right) y-axis. Each pair is an object with 'instrument_id' (a string, e.g., 'INST003') and 'column_name' (a string, e.g., 'data2' or 'calculation2'). If provided, review levels cannot be used. The total number of pairs (primary + secondary) cannot exceed 7. Example: [{'instrument_id': 'INST003', 'column_name': 'data2'}]."
+        description="An optional list of instrument-column pairs to plot on the secondary (right) y-axis. Each pair is an object with 'instrument_id' (a string, e.g., 'INST003') and 'column_name' (a string, e.g., 'data2' or 'calculation2'). The total number of pairs (primary + secondary) cannot exceed 7. Example: [{'instrument_id': 'INST003', 'column_name': 'data2'}]."
     )
     start_time: Union[str, datetime] = Field(
         ...,
@@ -105,10 +110,6 @@ class TimeSeriesPlotInput(BaseModel):
         None,
         description="The unit for the secondary (right) y-axis, displayed in parentheses in the axis title (e.g., 'kPa'). Required if secondary_y_instruments is non-empty, otherwise optional. Example: 'kPa'."
     )
-    review_level_values: Optional[List[float]] = Field(
-        default_factory=list,
-        description="An optional list of float values to plot as horizontal dashed lines on the primary y-axis, representing thresholds or review levels (e.g., [10.0, -5.0]). Maximum 3 positive and 3 negative values allowed. Cannot be used if secondary_y_instruments is non-empty. Example: [10.0, 5.0, -5.0]."
-    )
     highlight_zero: Optional[bool] = Field(
         False,
         description="Whether to highlight the zero line on the primary y-axis with a light grey line. Only applicable if secondary_y_instruments is empty. Set to true to enable, false to disable. Example: true."
@@ -124,7 +125,7 @@ class TimeSeriesPlotInput(BaseModel):
             return parse_datetime(v)
         return v
 
-    @validator('secondary_y_instruments', 'review_level_values', pre=True)
+    @validator('secondary_y_instruments', pre=True)
     def _coerce_none_to_list(cls, v):
         return [] if v is None else v
 
@@ -149,18 +150,17 @@ class TimeSeriesPlotTool(BaseTool, BaseSQLQueryTool):
     """Tool for plotting time series data with Plotly."""
     name: str = "time_series_plot_tool"
     description: str = """
-Creates an interactive Plotly time series plot and CSV file from instrumentation data. Supports multiple time series with different column names, dual y-axes, review levels, and customizable gridlines. Returns a tuple of (content, artefacts) with response_format='content_and_artifact'. The artefacts include the Plotly JSON and CSV file.
+Creates an interactive Plotly time series plot and CSV file from instrumentation data. Supports multiple time series with different column names, dual y-axes and customizable gridlines. Review levels are superposed. Returns a tuple of (content, artefacts) with response_format='content_and_artifact'. The artefacts include the Plotly JSON and CSV file.
 
 Input schema:
 - primary_y_instruments: List of objects with 'instrument_id' (str, e.g., 'INST001') and 'column_name' (str, e.g., 'data1' or 'calculation1'). At least one required. Total instruments (primary + secondary) <= 7.
-- secondary_y_instruments: Optional list of objects with 'instrument_id' and 'column_name'. If provided, review levels cannot be used.
+- secondary_y_instruments: Optional list of objects with 'instrument_id' and 'column_name'.
 - start_time: Datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Required.
 - end_time: Datetime string in same format, later than start_time. Required.
 - primary_y_title: String for primary y-axis title (e.g., 'Temperature'). Required.
 - primary_y_unit: String for primary y-axis unit (e.g., '°C'). Required.
 - secondary_y_title: Optional string for secondary y-axis title, required if secondary_y_instruments non-empty.
 - secondary_y_unit: Optional string for secondary y-axis unit, required if secondary_y_instruments non-empty.
-- review_level_values: Optional list of floats for thresholds on primary y-axis (e.g., [10.0, -5.0]). Max 3 positive, 3 negative. Not allowed with secondary_y_instruments.
 - highlight_zero: Boolean to highlight zero line on primary y-axis. Only if secondary_y_instruments empty.
 
 Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": "data1"}], "start_time": "1 January 2025 12:00:00 AM", "end_time": "31 January 2025 11:59:59 PM", "primary_y_title": "Temperature", "primary_y_unit": "°C", "highlight_zero": true}
@@ -239,11 +239,9 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
         secondary_y_instruments: Optional[List[InstrumentColumnPair]] = None,
         secondary_y_title: Optional[str] = None,
         secondary_y_unit: Optional[str] = None,
-        review_level_values: Optional[List[float]] = None,
         highlight_zero: bool = False
     ) -> Tuple[str, List[Dict]]:
         secondary_y_instruments = secondary_y_instruments or []
-        review_level_values = review_level_values or []
         logger.info(
             f"TimeSeriesPlotTool._run called with {len(primary_y_instruments)} primary and {len(secondary_y_instruments)} secondary instruments"
         )
@@ -252,12 +250,6 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 raise ValueError("start_time must be earlier than end_time. Correct the time range.")
             if secondary_y_instruments and (secondary_y_title is None or secondary_y_unit is None):
                 raise ValueError("secondary_y_title and secondary_y_unit are required when secondary_y_instruments is provided.")
-            if review_level_values and secondary_y_instruments:
-                raise ValueError("review_level_values cannot be used with secondary_y_instruments.")
-            pos_levels = [x for x in review_level_values if x > 0]
-            neg_levels = [x for x in review_level_values if x < 0]
-            if len(pos_levels) > 3 or len(neg_levels) > 3:
-                raise ValueError("Maximum 3 positive and 3 negative review_level_values allowed.")
             total_instr = len(primary_y_instruments) + len(secondary_y_instruments)
             if total_instr == 0:
                 raise ValueError("At least one instrument-column pair required in primary_y_instruments.")
@@ -318,14 +310,6 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 if results == "No data was found in the database matching the specified search criteria.":
                     continue
                 
-                def clean_numeric_string(val_str):
-                    cleaned = str(val_str).strip()
-                    while cleaned.startswith(("'", '"')) and cleaned.endswith(("'", '"')):
-                        cleaned = cleaned[1:-1].strip()
-                    if re.match(r'^-?\d*\.?\d+$', cleaned):
-                        return cleaned
-                    return None
-
                 try:
                     parsed_data: List[dict] = eval(
                         results,
@@ -373,7 +357,6 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             
             # Plot time series for primary y-axis
             y_min, y_max = float('inf'), float('-inf')
-            primary_colors = ['#1f77b4', '#4b9cd3', '#87ceeb', '#add8e6']
             for i, instr in enumerate(primary_y_instruments):
                 instr_id = instr.instrument_id
                 if instr_id not in time_series_data or not time_series_data[instr_id]:
@@ -402,9 +385,131 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 logger.info(f"Added primary trace for {instr_id}")
             logger.info(f"Primary traces added | y_min={y_min}, y_max={y_max}")
 
+            # Add review level horizontal lines
+            try:
+                review_lines_added = False
+                if not secondary_y_instruments and primary_y_instruments:
+                    if len(primary_y_instruments) == 1:
+                        target_column = primary_y_instruments[0].column_name
+                        schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
+                        schema_df = schema_tool._run(primary_y_instruments[0].instrument_id, target_column)
+                        if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
+                            logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
+                        elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
+                            try:
+                                for _, row in schema_df.iterrows():
+                                    try:
+                                        yval = float(row.get('review_value'))
+                                    except Exception:
+                                        continue
+                                    color = str(row.get('review_color') or '#FF0000')
+                                    name = str(row.get('review_name') or '')
+                                    fig.add_hline(
+                                        y=yval,
+                                        line_color=color,
+                                        line_width=2,
+                                        layer='below',
+                                        annotation_text=name,
+                                        annotation_position='top left',
+                                        annotation=dict(font_color='darkgrey')
+                                    )
+                                    review_lines_added = True
+                                if review_lines_added:
+                                    logger.info("Added review level horizontal lines (single-series fast path)")
+                            except Exception as e:
+                                logger.warning(f"Failed adding review level lines: {e}")
+                    else:
+                        primary_columns = {p.column_name for p in primary_y_instruments}
+                        if len(primary_columns) == 1:
+                            target_column = next(iter(primary_columns))
+                            instr_ids = [p.instrument_id for p in primary_y_instruments]
+                            instr_ids_str = ",".join(f"'{i}'" for i in instr_ids)
+                            meta_query = f"""
+                            SELECT instr_id, type1, subtype1
+                            FROM instrum
+                            WHERE instr_id IN ({instr_ids_str});
+                            """
+                            logger.info(f"Executing instrument metadata query: {meta_query}")
+                            meta_result = self.sql_tool._run(meta_query)
+                            logger.info(f"Instrument metadata query result: {meta_result}")
+                            def _safe_parse(raw: Any) -> List[Dict[str, Any]]:
+                                if raw is None:
+                                    return []
+                                if isinstance(raw, list):
+                                    return [dict(r) if isinstance(r, dict) else r for r in raw]
+                                s = str(raw)
+                                try:
+                                    parsed = json.loads(s)
+                                    if isinstance(parsed, list):
+                                        return [dict(r) if isinstance(r, dict) else r for r in parsed]
+                                except Exception:
+                                    pass
+                                try:
+                                    parsed = eval(s, {"__builtins__": {}})
+                                    if isinstance(parsed, list):
+                                        return [dict(r) if isinstance(r, dict) else r for r in parsed]
+                                except Exception:
+                                    return []
+                                return []
+                            meta_rows = _safe_parse(meta_result)
+                            id_to_meta: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+                            for r in meta_rows:
+                                if isinstance(r, dict):
+                                    rid = r.get('instr_id') or r.get('i.instr_id') or r.get('INSTR_ID')
+                                    t = r.get('type1') or r.get('i.type1') or r.get('TYPE1')
+                                    st = r.get('subtype1') or r.get('i.subtype1') or r.get('SUBTYPE1')
+                                elif isinstance(r, (list, tuple)) and len(r) >= 3:
+                                    rid, t, st = r[0], r[1], r[2]
+                                else:
+                                    continue
+                                if rid is not None:
+                                    id_to_meta[str(rid)] = (None if t is None else str(t), None if st is None else str(st))
+                            types = set(); subtypes = set()
+                            for pid in instr_ids:
+                                t, st = id_to_meta.get(pid, (None, None))
+                                if t is None or st is None:
+                                    types.add(None); subtypes.add(None)
+                                else:
+                                    types.add(t); subtypes.add(st)
+                            if len(types) == 1 and None not in types and len(subtypes) == 1 and None not in subtypes:
+                                schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
+                                schema_df = schema_tool._run(primary_y_instruments[0].instrument_id, target_column)
+                                if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
+                                    logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
+                                elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
+                                    try:
+                                        for _, row in schema_df.iterrows():
+                                            try:
+                                                yval = float(row.get('review_value'))
+                                            except Exception:
+                                                continue
+                                            color = str(row.get('review_color') or '#FF0000')
+                                            name = str(row.get('review_name') or '')
+                                            fig.add_hline(
+                                                y=yval,
+                                                line_color=color,
+                                                line_width=2,
+                                                layer='below',
+                                                annotation_text=name,
+                                                annotation_position='top left',
+                                                annotation=dict(font_color='darkgrey')
+                                            )
+                                            review_lines_added = True
+                                        if review_lines_added:
+                                            logger.info("Added review level horizontal lines beneath data traces")
+                                    except Exception as e:
+                                        logger.warning(f"Failed adding review level lines: {e}")
+                            else:
+                                logger.info("Skipping review lines: primary series do not share the same type/subtype or metadata missing")
+                        else:
+                            logger.info("Skipping review lines: primary series have differing database field names")
+                else:
+                    logger.info("Skipping review lines: secondary axis present or no primary series")
+            except Exception as e:
+                logger.warning(f"Review lines section failed: {e}")
+
             # Plot time series for secondary y-axis
             secondary_y_min, secondary_y_max = float('inf'), float('-inf')
-            secondary_colors = ['#ff69b4', '#ff85c0', '#ffb6c1', '#ffc1cc']
             for i, instr in enumerate(secondary_y_instruments):
                 instr_id = instr.instrument_id
                 if instr_id not in time_series_data or not time_series_data[instr_id]:
@@ -427,24 +532,6 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 ))
                 logger.info(f"Added secondary trace for {instr_id}")
             logger.info(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
-
-            # Plot review levels if provided
-            if review_level_values:
-                pos_levels = sorted([x for x in review_level_values if x > 0], reverse=True)
-                neg_levels = sorted([x for x in review_level_values if x < 0])
-                colors = ['#8B0000', '#FF4500', '#006400']
-                for i, level in enumerate(pos_levels + neg_levels):
-                    color_idx = min(i % 3, 2)
-                    fig.add_hline(
-                        y=level,
-                        line_dash="dash",
-                        line_color=colors[color_idx],
-                        annotation_text=f"Review Level {level}",
-                        annotation_position="top right"
-                    )
-                    y_min = min(y_min, level)
-                    y_max = max(y_max, level)
-                logger.info(f"Added {len(pos_levels + neg_levels)} review level hlines")
 
             # Highlight zero line
             if highlight_zero and not secondary_y_instruments:
@@ -591,7 +678,6 @@ class TimeSeriesPlotWrapperInput(BaseModel):
         - 'primary_y_unit': A string for the primary y-axis unit (e.g., '°C').
         - 'secondary_y_title': An optional string for the secondary y-axis title, required if secondary_y_instruments is non-empty (e.g., 'Pressure').
         - 'secondary_y_unit': An optional string for the secondary y-axis unit, required if secondary_y_instruments is non-empty (e.g., 'kPa').
-        - 'review_level_values': An optional list of floats for review level lines on the primary y-axis (e.g., [10.0, -5.0]). Max 3 positive and 3 negative values. Cannot be used with secondary_y_instruments.
         - 'highlight_zero': An optional boolean to highlight the zero line on the primary y-axis (default: false). Only used if secondary_y_instruments is empty.
         The total number of instrument-column pairs (primary + secondary) cannot exceed 7. Example JSON:
         ```json
@@ -604,7 +690,6 @@ class TimeSeriesPlotWrapperInput(BaseModel):
             "primary_y_unit": "°C",
             "secondary_y_title": "Pressure",
             "secondary_y_unit": "kPa",
-            "review_level_values": [],
             "highlight_zero": false
         }
         The JSON string must be valid and properly formatted."""
@@ -668,7 +753,6 @@ class TimeSeriesPlotWrapperTool(BaseTool):
                 primary_y_unit=input_dict['primary_y_unit'],
                 secondary_y_title=input_dict.get('secondary_y_title'),
                 secondary_y_unit=input_dict.get('secondary_y_unit'),
-                review_level_values=input_dict.get('review_level_values', []),
                 highlight_zero=input_dict.get('highlight_zero', False)
             )
             logger.info(f"Plot tool result: {plot_tool_result}")
@@ -680,192 +764,6 @@ class TimeSeriesPlotWrapperTool(BaseTool):
             content = f"Error processing input: {str(e)}"
             result = {'content': content, 'artifacts': []}
             return json.dumps(result)
-
-# Hanoi local coordinate system: HN-72, approximated with EPSG:4147 for zone
-hn72_crs = CRS.from_epsg(4147)  # HN-72
-wgs84_crs = CRS.from_epsg(4326)  # WGS84
-transformer = Transformer.from_crs(hn72_crs, wgs84_crs, always_xy=True)
-
-def easting_northing_to_lat_lon(easting: float, northing: float) -> Tuple[float, float]:
-    """Convert easting and northing from HN-72 to latitude and longitude using WGS84."""
-    lon, lat = transformer.transform(easting, northing)
-    return lat, lon
-
-class SeriesDict(BaseModel):
-    """Model for specifying a data series to plot on the map.
-    
-    This defines one type of instrument data to include in the map plot, represented as a dictionary.
-    
-    Examples:
-    - {"instrument_type": "VWP", "instrument_subtype": "DEFAULT", "database_field_name": "calculation1", "measured_quantity_name": "Pore Pressure", "abbreviated_unit": "kPa"}
-    
-    Constraints:
-    - All fields must be non-empty strings.
-    - database_field_name must be in format 'dataN' or 'calculationN' where N is integer.
-    """
-    instrument_type: str = Field(
-        ...,
-        description="The type of instrument, corresponding to 'type1' in instrum table (e.g., 'VWP' for Vibrating Wire Piezometer). Must match existing types in the database."
-    )
-    instrument_subtype: str = Field(
-        ...,
-        description="The subtype of instrument, corresponding to 'subtype1' in instrum table (e.g., 'DEFAULT'). Must match existing subtypes."
-    )
-    database_field_name: str = Field(
-        ...,
-        description="The field name in mydata table to plot, e.g., 'data1' for raw data or 'calculation1' for computed values. For 'calculationN', value is extracted from custom_fields JSON."
-    )
-    measured_quantity_name: str = Field(
-        ...,
-        description="Descriptive name for the quantity being measured, used in legend (e.g., 'Settlement')."
-    )
-    abbreviated_unit: str = Field(
-        ...,
-        description="Abbreviated unit for the quantity, used in legend (e.g., 'mm')."
-    )
-
-    @validator('database_field_name')
-    def validate_field_name(cls, v):
-        if not re.match(r'^(data|calculation)\d+$', v):
-            raise ValueError("database_field_name must be 'dataN' or 'calculationN'")
-        return v
-
-class MapPlotInput(BaseModel):
-    """Input schema for the map plotting tool.
-    
-    Use this tool to create a geospatial plot of instrument data on a map using Plotly's Mapbox.
-    The tool extracts data via SQL queries, converts local coordinates to lat/lon, filters spatially, and plots markers colored by values or review statuses.
-    
-    When to use:
-    - When the user wants a map view of instrument readings or review levels.
-    - For visualizing spatial patterns, clusters, or changes over time in a geographic context.
-    - Supports up to 3 series (instrument type/subtype/field combinations).
-    - For 'readings': Plots numerical values or changes, with sequential or divergent colormaps.
-    - For 'review_levels': Plots breach statuses as colors (green/amber/red/grey), or worsened statuses.
-    
-    Input formatting:
-    - Times as datetime objects, but in wrapper, parse from strings like '1 January 2025 12:00:00 PM'.
-    - series as list of dicts in JSON, e.g., [{"instrument_type": "VWP", "instrument_subtype": "DEFAULT", ...}]
-    - Center: Either instrument_id or easting+northing.
-    
-    Constraints:
-    - Max 3 series.
-    - buffer_period_hours <= half the period for changes, no limit for single time.
-    - radius_meters > 0.
-    - For review_levels, max 3 levels per side (pos/neg).
-    
-    Output:
-    - Returns (content str, list of artifacts: Plotly JSON and CSV).
-    - Content includes any suggested outliers for exclusion (for readings only).
-    """
-    data_type: str = Field(
-        ...,
-        description="Type of data: 'review_levels' for breach statuses, 'readings' for numerical values. Determines coloring and data extraction logic."
-    )
-    plot_type: str = Field(
-        ...,
-        description=" 'value_at_time' for snapshot at end_time, 'change_over_period' for delta or worsened status between start_time and end_time."
-    )
-    start_time: Optional[datetime] = Field(
-        None,
-        description="Start datetime for 'change_over_period'. Required for changes, ignored for 'value_at_time'. Format in wrapper: 'D Month YYYY H:MM:SS AM/PM'."
-    )
-    end_time: datetime = Field(
-        ...,
-        description="End datetime (or single time for 'value_at_time'). Must be after start_time if provided."
-    )
-    buffer_period_hours: int = Field(
-        default=72,
-        description="Hours before specified times to search for nearest reading. Max half period for changes. Example: 72 for three days."
-    )
-    series: List[SeriesDict] = Field(
-        ...,
-        description="List of up to 3 series to plot. Each specifies instrument type/subtype/field and legend info."
-    )
-    center_instrument_id: Optional[str] = Field(
-        None,
-        description="Instrument ID to center map on (fetches its location). Alternative to easting/northing."
-    )
-    center_easting: Optional[float] = Field(
-        None,
-        description="Easting coordinate for map center (local system). Required if no center_instrument_id."
-    )
-    center_northing: Optional[float] = Field(
-        None,
-        description="Northing coordinate for map center. Required if no center_instrument_id."
-    )
-    radius_meters: float = Field(
-        ...,
-        description="Radius for spatial filter (square bounding box of side 2*radius). Data outside ignored. >0."
-    )
-    exclude_instrument_ids: List[str] = Field(
-        default_factory=list,
-        description="List of instrument IDs to exclude from plot and data extraction."
-    )
-
-    @validator('buffer_period_hours')
-    def validate_buffer(cls, v, values):
-        if 'plot_type' in values and values['plot_type'] == 'change_over_period' and 'start_time' in values and 'end_time' in values:
-            period_hours = (values['end_time'] - values['start_time']).total_seconds() / 3600
-            if v > period_hours / 2:
-                raise ValueError("Buffer cannot exceed half the period for changes")
-        return v
-
-    @validator('data_type')
-    def validate_data_type(cls, v):
-        if v not in ['review_levels', 'readings']:
-            raise ValueError("data_type must be 'review_levels' or 'readings'")
-        return v
-
-    @validator('plot_type')
-    def validate_plot_type(cls, v):
-        if v not in ['value_at_time', 'change_over_period']:
-            raise ValueError("plot_type must be 'value_at_time' or 'change_over_period'")
-        return v
-
-    @validator('series')
-    def validate_series(cls, v):
-        if len(v) == 0 or len(v) > 3:
-            raise ValueError("1-3 series required")
-        return v
-
-class BaseSQLQueryTool(BaseModel):
-    sql_tool: GeneralSQLQueryTool = Field(exclude=True)
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-import json
-import logging
-import math
-import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Type
-
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.colors as pc
-from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
-from pyproj import Proj, transform
-
-from .sql_security_toolkit import GeneralSQLQueryTool
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
-
-def clean_numeric_string(val):
-    if not isinstance(val, (str, int, float)):
-        return None
-    cleaned = str(val).strip()
-    while cleaned.startswith(("'", '"')) and cleaned.endswith(("'", '"')):
-        cleaned = cleaned[1:-1].strip()
-    if re.match(r'^-?\d*\.?\d+(?:[eE][-+]?\d+)?$', cleaned):
-        return cleaned
-    return None
 
 hn72_crs = CRS.from_epsg(3405)  # VN-2000 / Vietnam TM-3 zone 105-45
 wgs84_crs = CRS.from_epsg(4326)  # WGS84
@@ -1012,23 +910,22 @@ class MapPlotInput(BaseModel):
             raise ValueError("radius_meters must be positive")
         return v
 
-class BaseSQLQueryTool(BaseModel):
-    sql_tool: GeneralSQLQueryTool = Field(exclude=True)
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+ 
 
 class MapPlotTool(BaseTool, BaseSQLQueryTool):
     """Tool for plotting instrument readings or review status on a map with Plotly."""
     name: str = "map_plot_tool"
     description: str = """
-Creates an interactive Plotly map plot and CSV file from instrumentation data. Supports readings (instrument values) or reviews (review status), plotted as value at a specific time or change over a period. Returns a dictionary with 'content' and 'artefacts'. The artefacts include the Plotly JSON and CSV file.
+Creates an interactive Plotly map plot and CSV file from instrumentation data. Supports readings (instrument values) or review_levels (breach statuses), plotted as value at a specific time or change over a period. Returns a dictionary with 'content' and 'artefacts'. The artefacts include the Plotly JSON and CSV file.
 
 Input schema:
-- data_type: String, either 'readings' or 'reviews'.
+- data_type: String, either 'readings' or 'review_levels'.
 - plot_type: String, either 'value_at_time' or 'change_over_period'.
 - start_time: Optional datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 August 2025 12:00:00 AM'), required for 'change_over_period'.
 - end_time: Datetime string in same format (e.g., '31 August 2025 11:59:59 PM'). Required.
 - buffer_period_hours: Optional integer, buffer period in hours (default 72).
 - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa').
+ - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa'). NOTE: When data_type='review_levels' ONLY the FIRST series element is used to derive and plot review statuses; additional series entries are ignored.
 - center_instrument_id: Optional string, instrument ID to center the map.
 - center_easting: Optional float, easting coordinate to center the map if center_instrument_id not provided.
 - center_northing: Optional float, northing coordinate to center the map if center_instrument_id not provided.
@@ -1105,15 +1002,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         logger.info(f"Bounds: min_e={min_e}, max_e={max_e}, min_n={min_n}, max_n={max_n}")
         return min_e, max_e, min_n, max_n
 
-    def _get_review_config(self, field: str) -> Dict:
-        logger.info(f"Getting review config for field={field}")
-        pos_values = [100, 50, 20]
-        neg_values = [-20, -50, -100]
-        severity_map = {100: 3, 50: 2, 20: 1, -20: 1, -50: 2, -100: 3}
-        color_map = {100: 'red', 50: 'orange', 20: 'yellow', -20: 'yellow', -50: 'orange', -100: 'red'}
-        config = {'pos_values': pos_values, 'neg_values': neg_values, 'severity_map': severity_map, 'color_map': color_map}
-        logger.info(f"Review config: {config}")
-        return config
+    
 
     def _extract_numeric(self, v: Any) -> Optional[str]:
         """Return a cleaned numeric string from various DB-returned value forms.
@@ -1177,15 +1066,527 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             return row[0], row[1]
         return None
 
+    def _render_review_levels(
+        self,
+        inputs: MapPlotInput,
+        center_e: float,
+        center_n: float,
+        min_e: float,
+        max_e: float,
+        min_n: float,
+        max_n: float,
+    ) -> Dict[str, Any]:
+        s0 = inputs.series[0]
+        if inputs.plot_type == 'value_at_time':
+            snap_tool = GetMapSeriesReviewSnapshotTool(sql_tool=self.sql_tool)
+            df = snap_tool._run(
+                instrument_type=s0.instrument_type,
+                instrument_subtype=s0.instrument_subtype,
+                db_field_name=s0.database_field_name,
+                timestamp=inputs.end_time.isoformat() if isinstance(inputs.end_time, datetime) else str(inputs.end_time),
+                min_e=min_e,
+                max_e=max_e,
+                min_n=min_n,
+                max_n=max_n,
+                exclude_instrument_ids=inputs.exclude_instrument_ids or None,
+            )
+            if isinstance(df, str) and df.startswith("ERROR"):
+                return {"content": f"Error: {df}", "artefacts": []}
+        else:
+            ch_tool = GetMapSeriesReviewChangeTool(sql_tool=self.sql_tool)
+            df = ch_tool._run(
+                instrument_type=s0.instrument_type,
+                instrument_subtype=s0.instrument_subtype,
+                db_field_name=s0.database_field_name,
+                start_timestamp=inputs.start_time.isoformat() if isinstance(inputs.start_time, datetime) else str(inputs.start_time),
+                end_timestamp=inputs.end_time.isoformat() if isinstance(inputs.end_time, datetime) else str(inputs.end_time),
+                min_e=min_e,
+                max_e=max_e,
+                min_n=min_n,
+                max_n=max_n,
+                exclude_instrument_ids=inputs.exclude_instrument_ids or None,
+            )
+            if isinstance(df, str) and df.startswith("ERROR"):
+                return {"content": f"Error: {df}", "artefacts": []}
+
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
+
+        chosen_instr_id: Optional[str] = None
+        try:
+            if inputs.center_instrument_id:
+                chosen_instr_id = inputs.center_instrument_id
+            else:
+                if 'review_status' in df.columns and df['review_status'].notna().any():
+                    chosen_instr_id = str(df.loc[df['review_status'].notna(), 'instrument_id'].iloc[0])
+                elif 'end_review_status' in df.columns and df['end_review_status'].notna().any():
+                    chosen_instr_id = str(df.loc[df['end_review_status'].notna(), 'instrument_id'].iloc[0])
+                else:
+                    chosen_instr_id = str(df['instrument_id'].iloc[0])
+        except Exception:
+            chosen_instr_id = inputs.center_instrument_id or None
+
+        schema_map: Dict[str, Dict[str, Any]] = {}
+        schema_order: List[str] = []
+        if chosen_instr_id:
+            schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
+            schema_df = schema_tool._run(chosen_instr_id, s0.database_field_name)
+            if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
+                schema_df = None
+            if schema_df is not None and not schema_df.empty:
+                values = [float(v) for v in schema_df['review_value'].tolist() if pd.notna(v)]
+                if values:
+                    dec_places = 0
+                    for v in values:
+                        s = f"{v:.6f}".rstrip('0').rstrip('.')
+                        if '.' in s:
+                            dec_places = max(dec_places, min(3, len(s.split('.')[-1])))
+                    fmt = f"{{:.{dec_places}f}}"
+                else:
+                    fmt = "{:.0f}"
+                for _, r in schema_df.iterrows():
+                    name = str(r.get('review_name'))
+                    direction = str(r.get('review_direction') or '').lower()
+                    color = str(r.get('review_color') or '#FF0000')
+                    val = float(r.get('review_value') or 0.0)
+                    sign = '>' if direction == 'upper' else '<'
+                    legend = f"{name} {sign} {fmt.format(val)}"
+                    key = f"{name}::{direction}" if direction else name
+                    schema_map[key] = {
+                        'name': name,
+                        'color': color,
+                        'legend': legend,
+                        'direction': direction,
+                        'value': val,
+                    }
+                    if key not in schema_order:
+                        schema_order.append(key)
+
+        if not schema_map:
+            fallback_colors = ['#f9c74f', '#f9844a', '#f94144', '#577590', '#43aa8b', '#90be6d']
+            status_col = 'review_status' if inputs.plot_type == 'value_at_time' else 'end_review_status'
+            value_col = 'db_field_value' if inputs.plot_type == 'value_at_time' else 'end_db_field_value'
+            thresh_col = 'review_value' if inputs.plot_type == 'value_at_time' else 'end_review_value'
+            fmt = "{:.0f}"
+            try:
+                vals_for_fmt = [float(v) for v in df.get(thresh_col, pd.Series(dtype=float)).dropna().tolist()]
+                if vals_for_fmt:
+                    dec_places = 0
+                    for v in vals_for_fmt:
+                        s = f"{v:.6f}".rstrip('0').rstrip('.')
+                        if '.' in s:
+                            dec_places = max(dec_places, min(3, len(s.split('.')[-1])))
+                    fmt = f"{{:.{dec_places}f}}"
+            except Exception:
+                pass
+            seen: set = set()
+            for _, r in df.iterrows():
+                name = r.get(status_col)
+                if pd.isna(name):
+                    continue
+                try:
+                    fv = float(r.get(value_col)) if r.get(value_col) is not None else None
+                    tv = float(r.get(thresh_col)) if r.get(thresh_col) is not None else None
+                except Exception:
+                    fv, tv = None, None
+                # Infer direction when possible
+                direction = None
+                if fv is not None and tv is not None:
+                    if fv > tv:
+                        direction = 'upper'
+                    elif fv < tv:
+                        direction = 'lower'
+                name_s = str(name)
+                key = f"{name_s}::{direction}" if direction else name_s
+                if key in seen:
+                    continue
+                seen.add(key)
+                idx = len(schema_map)
+                color = fallback_colors[idx % len(fallback_colors)]
+                sign = '>' if direction == 'upper' else '<' if direction == 'lower' else ''
+                legend = f"{name_s} {sign} {fmt.format(tv)}" if (direction and tv is not None) else name_s
+                schema_map[key] = {
+                    'name': name_s,
+                    'color': color,
+                    'legend': legend,
+                    'direction': direction or 'unknown',
+                    'value': tv,
+                }
+                schema_order.append(key)
+
+        no_breach_color = '#888888'
+        groups: Dict[str, Dict[str, Any]] = {}
+        for k in schema_order:
+            groups[k] = {'rows': [], 'color': schema_map[k]['color'], 'legend': schema_map[k]['legend']}
+        groups['__NO__'] = {'rows': [], 'color': no_breach_color, 'legend': 'No breach'}
+
+        def _infer_direction_row(row: Any, at_time: bool) -> Optional[str]:
+            try:
+                if at_time:
+                    fv = row.get('db_field_value')
+                    tv = row.get('review_value')
+                else:
+                    fv = row.get('end_db_field_value')
+                    tv = row.get('end_review_value')
+                fv = float(fv) if fv is not None else None
+                tv = float(tv) if tv is not None else None
+            except Exception:
+                return None
+            if fv is None or tv is None:
+                return None
+            if fv > tv:
+                return 'upper'
+            if fv < tv:
+                return 'lower'
+            return None
+
+        if inputs.plot_type == 'value_at_time':
+            for _, r in df.iterrows():
+                status = r.get('review_status')
+                if pd.isna(status):
+                    groups['__NO__']['rows'].append(r)
+                    continue
+                direction = _infer_direction_row(r, True)
+                base = str(status)
+                comp_key = f"{base}::{direction}" if direction else base
+                key_to_use = comp_key if comp_key in groups else (base if base in groups else '__NO__')
+                groups[key_to_use]['rows'].append(r)
+        else:
+            for _, r in df.iterrows():
+                status = r.get('end_review_status')
+                if pd.isna(status):
+                    groups['__NO__']['rows'].append(r)
+                    continue
+                direction = _infer_direction_row(r, False)
+                base = str(status)
+                comp_key = f"{base}::{direction}" if direction else base
+                key_to_use = comp_key if comp_key in groups else (base if base in groups else '__NO__')
+                groups[key_to_use]['rows'].append(r)
+
+        center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
+        fig = go.Figure()
+        all_data: List[Dict[str, Any]] = []
+
+        def _to_latlon(e, n) -> Tuple[float, float]:
+            try:
+                return easting_northing_to_lat_lon(float(e), float(n))
+            except Exception:
+                return None, None
+
+        def severity_key(name: str) -> float:
+            meta = schema_map.get(name, {})
+            val = meta.get('value')
+            direction = meta.get('direction')
+            if val is None:
+                return -1e12
+            if direction == 'upper':
+                return val
+            elif direction == 'lower':
+                return -val
+            return -1e12
+        try:
+            sortable = [k for k in schema_map.keys()]
+            sortable.sort(key=severity_key)
+            ordered_keys = (['__NO__'] if groups['__NO__']['rows'] else []) + sortable
+        except Exception:
+            ordered_keys = (['__NO__'] if groups['__NO__']['rows'] else []) + list(schema_map.keys())
+        added_signatures: set = set()
+        for key in ordered_keys:
+            g = groups.get(key)
+            if not g or not g['rows']:
+                continue
+            lats: List[float] = []
+            lons: List[float] = []
+            texts: List[str] = []
+            ids: List[str] = []
+            series_name = g['legend']
+            color = g['color']
+            for _, r in pd.DataFrame(g['rows']).iterrows():
+                ids.append(str(r.get('instrument_id')))
+                lat, lon = _to_latlon(r.get('easting'), r.get('northing'))
+                if lat is None or lon is None:
+                    continue
+                lats.append(lat)
+                lons.append(lon)
+                if inputs.plot_type == 'value_at_time':
+                    status_txt = str(r.get('review_status')) if pd.notna(r.get('review_status')) else 'No breach'
+                    val = r.get('db_field_value')
+                    ts = r.get('db_field_value_timestamp')
+                    id_str = str(r.get('instrument_id'))
+                    try:
+                        val_str = f"{float(val):.3f} {s0.abbreviated_unit}"
+                    except Exception:
+                        val_str = f"{val} {s0.abbreviated_unit}"
+                    texts.append(f"<b>{id_str}</b><br><b>{status_txt}</b><br>{val_str}<br>at {ts}")
+                    all_data.append({
+                        'Instrument ID': ids[-1],
+                        'Latitude': lat,
+                        'Longitude': lon,
+                        'Value/Color': color,
+                        'Series': series_name,
+                        'Unit': s0.abbreviated_unit
+                    })
+                else:
+                    end_status = str(r.get('end_review_status')) if pd.notna(r.get('end_review_status')) else 'No breach'
+                    start_status = str(r.get('start_review_status')) if pd.notna(r.get('start_review_status')) else 'No breach'
+                    ev = r.get('end_db_field_value'); sv = r.get('start_db_field_value')
+                    et = r.get('end_db_field_value_timestamp'); st = r.get('start_db_field_value_timestamp')
+                    id_str = str(r.get('instrument_id'))
+                    try:
+                        ev_str = f"{float(ev):.3f} {s0.abbreviated_unit}"
+                    except Exception:
+                        ev_str = f"{ev} {s0.abbreviated_unit}"
+                    try:
+                        sv_str = f"{float(sv):.3f} {s0.abbreviated_unit}"
+                    except Exception:
+                        sv_str = f"{sv} {s0.abbreviated_unit}"
+                    texts.append(
+                        f"<b>{id_str}</b><br>Changed to:<br><b>{end_status}</b><br>{ev_str}<br>at {et}<br>From:<br><b>{start_status}</b><br>{sv_str}<br>at {st}"
+                    )
+                    all_data.append({
+                        'Instrument ID': ids[-1],
+                        'Latitude': lat,
+                        'Longitude': lon,
+                        'Value/Color': color,
+                        'Series': series_name,
+                        'Unit': s0.abbreviated_unit
+                    })
+
+            if not lats:
+                continue
+            signature = (series_name, tuple(sorted(ids)))
+            if signature in added_signatures:
+                continue
+            added_signatures.add(signature)
+            hoverlabel_cfg = {"font": {"color": "white"}, "bordercolor": "white"} if key == '__NO__' else None
+            fig.add_trace(go.Scattermapbox(
+                lat=lats,
+                lon=lons,
+                mode='markers',
+                marker=go.scattermapbox.Marker(size=10, color=color, showscale=False),
+                text=texts,
+                hovertemplate="%{text}<extra></extra>",
+                name=series_name,
+                hoverlabel=hoverlabel_cfg
+            ))
+
+        if inputs.plot_type == 'value_at_time':
+            title_txt = f"Review status at {format_datetime(inputs.end_time)}"
+        else:
+            title_txt = f"Review status changes between {format_datetime(inputs.start_time)} and {format_datetime(inputs.end_time)}"
+
+        fig.update_layout(
+            title=title_txt,
+            mapbox_style="open-street-map",
+            mapbox_center={"lat": center_lat, "lon": center_lon},
+            mapbox_zoom=15,
+            showlegend=True,
+        )
+
+        if not all_data:
+            return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
+        df_out = pd.DataFrame(all_data)
+        csv_content = df_out.to_csv(index=False)
+
+        plotly_filename = f"map_plot_{uuid.uuid4()}.json"
+        try:
+            plotly_json = fig.to_json()
+        except Exception as e:
+            return {"content": f"Error: Failed to serialize Plotly figure: {str(e)}", "artefacts": []}
+
+        artefacts = [
+            {
+                'artifact_id': str(uuid.uuid4()),
+                'filename': plotly_filename,
+                'type': 'Plotly object',
+                'description': 'Map plot JSON',
+                'content': plotly_json
+            },
+            {
+                'artifact_id': str(uuid.uuid4()),
+                'filename': f"map_data_{uuid.uuid4()}.csv",
+                'type': 'CSV',
+                'description': 'Map data CSV',
+                'content': csv_content
+            }
+        ]
+
+        content = f"Generated map plot and CSV for review_levels."
+        return {"content": content, "artefacts": artefacts}
+
+    def _render_readings(
+        self,
+        inputs: MapPlotInput,
+        center_e: float,
+        center_n: float,
+        min_e: float,
+        max_e: float,
+        min_n: float,
+        max_n: float,
+        exclude_clause: str,
+        start_time_str: Optional[str],
+        end_time_str: str,
+        buffer_start: Optional[str],
+        buffer_end: str,
+    ) -> Dict[str, Any]:
+        data: Dict[str, List[Tuple[str, float, float, float]]] = {}
+        suggestions: List[str] = []
+        for s in inputs.series:
+            key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
+            logger.info(f"Processing series: {key}")
+            points: List[Tuple[str, float, float, float]] = []
+            if inputs.data_type == 'readings':
+                points = self._get_readings(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
+                if points:
+                    vals = [v for _, _, _, v in points]
+                    logger.info(f"Values for outlier detection: {vals}")
+                    mean = np.mean(vals)
+                    std = np.std(vals)
+                    outliers = [id for id, _, _, v in points if abs(v - mean) > 3 * std]
+                    logger.info(f"Outliers detected: {outliers}")
+                    suggestions.extend(outliers)
+            data[key] = []
+            for p in points:
+                id, e, n, v = p
+                try:
+                    lat, lon = easting_northing_to_lat_lon(e, n)
+                    data[key].append((id, lat, lon, v))
+                    logger.info(f"Converted coords for {id}: lat={lat}, lon={lon}, value={v}")
+                except Exception as e:
+                    logger.warning(f"Failed to convert coords for {id}: easting={e}, northing={n}, error: {str(e)}")
+                    continue
+            logger.info(f"Collected {len(data[key])} points for series {key}")
+
+        if not any(data.values()):
+            logger.warning("No data found for any series")
+            return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
+
+        center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
+        logger.info(f"Center lat/lon: {center_lat}, {center_lon}")
+        fig = go.Figure()
+        logger.info("Plotly figure initialized")
+        for i, s in enumerate(inputs.series):
+            key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
+            points2 = data.get(key, [])
+            if not points2:
+                logger.info(f"No points for series {key}")
+                continue
+            instr_ids, lats, lons, vals = zip(*points2)
+            logger.info(f"Adding readings trace for series {key}")
+            max_abs = max(abs(max(vals)), abs(min(vals))) if vals else 1
+            if inputs.plot_type == 'change_over_period':
+                cmap = pc.diverging.PiYG
+                norm = [(v / max_abs) for v in vals]
+                colors = [cmap[int(((nv + 1) / 2) * (len(cmap)-1))] for nv in norm]
+                colorscale = [[(nv + 1) / 2, cmap[int(((nv + 1) / 2) * (len(cmap)-1))]] for nv in np.linspace(-1, 1, len(cmap))]
+                colorbar_title = f"{s.measured_quantity_name} ({s.abbreviated_unit})"
+                tickvals = [min(vals), 0, max(vals)] if min(vals) < 0 < max(vals) else [min(vals), max(vals)]
+                ticktext = [f"{v:.2f}" for v in tickvals]
+            else:
+                cmap = pc.sequential.Reds if i==0 else pc.sequential.Blues if i==1 else pc.sequential.Greens
+                min_v, max_v = min(vals), max(vals)
+                norm = [(v - min_v) / (max_v - min_v) if max_v > min_v else 0.5 for v in vals]
+                colors = [cmap[int(n * (len(cmap)-1))] for n in norm]
+                colorscale = [[n, cmap[int(n * (len(cmap)-1))]] for n in np.linspace(0, 1, len(cmap))]
+                colorbar_title = f"{s.measured_quantity_name} ({s.abbreviated_unit})"
+                tickvals = [min(vals), max(vals)]
+                ticktext = [f"{min(vals):.2f}", f"{max(vals):.2f}"]
+            text = [f"{id}: {v:.2f} {s.abbreviated_unit}" for id, v in zip(instr_ids, vals)]
+            customdata = list(zip(instr_ids, vals))
+            fig.add_trace(go.Scattermapbox(
+                lat=lats, lon=lons, mode='markers',
+                marker=go.scattermapbox.Marker(
+                    size=10,
+                    color=vals,
+                    colorscale=colorscale,
+                    showscale=True,
+                    colorbar=dict(
+                        title=colorbar_title,
+                        x=1 + 0.15 * i,
+                        xanchor="left",
+                        len=0.3,
+                        y=0.5 - 0.15 * i,
+                        yanchor="middle",
+                        tickvals=tickvals,
+                        ticktext=ticktext
+                    )
+                ),
+                text=text,
+                customdata=customdata,
+                hovertemplate="%{customdata[0]}<br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
+                name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
+            ))
+            logger.info(f"Added readings trace")
+
+        time_str = f"at {format_datetime(inputs.end_time)}" if inputs.plot_type == 'value_at_time' else f"change from {format_datetime(inputs.start_time)} to {format_datetime(inputs.end_time)}"
+        logger.info(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
+        fig.update_layout(
+            title=f"{inputs.data_type.capitalize()} {time_str}",
+            mapbox_style="open-street-map",
+            mapbox_center={"lat": center_lat, "lon": center_lon},
+            mapbox_zoom=15,
+            showlegend=False
+        )
+        logger.info("Figure layout updated")
+
+        all_data: List[Dict[str, Any]] = []
+        for s in inputs.series:
+            key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
+            for id, lat, lon, val in data.get(key, []):
+                all_data.append({
+                    'Instrument ID': id,
+                    'Latitude': lat,
+                    'Longitude': lon,
+                    'Value/Color': val,
+                    'Series': s.measured_quantity_name,
+                    'Unit': s.abbreviated_unit
+                })
+        logger.info(f"all_data populated with {len(all_data)} entries")
+        if not all_data:
+            logger.error("No data for CSV generation")
+            raise ValueError("No data available for CSV generation")
+        df = pd.DataFrame(all_data)
+        logger.info(f"DataFrame created with shape {df.shape}")
+        csv_content = df.to_csv(index=False)
+        logger.info(f"CSV content generated (length: {len(csv_content)})")
+
+        plotly_filename = f"map_plot_{uuid.uuid4()}.json"
+        try:
+            plotly_json = fig.to_json()
+            logger.info(f"Plotly JSON generated (length: {len(plotly_json)})")
+        except Exception as e:
+            logger.error(f"Failed to serialize Plotly figure: {str(e)}")
+            raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
+
+        artefacts = [
+            {
+                'artifact_id': str(uuid.uuid4()),
+                'filename': plotly_filename,
+                'type': 'Plotly object',
+                'description': 'Map plot JSON',
+                'content': plotly_json
+            },
+            {
+                'artifact_id': str(uuid.uuid4()),
+                'filename': f"map_data_{uuid.uuid4()}.csv",
+                'type': 'CSV',
+                'description': 'Map data CSV',
+                'content': csv_content
+            }
+        ]
+        logger.info(f"Artefacts list created with {len(artefacts)} items")
+
+        content = f"Generated map plot and CSV for {inputs.data_type} {time_str}." + (f" Suggested outliers to exclude: {', '.join(set(suggestions))}" if suggestions and inputs.data_type == 'readings' else "")
+        logger.info(f"Returning content: {content}, artefacts count: {len(artefacts)}")
+        return {"content": content, "artefacts": artefacts}
+
     def _get_readings(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
                       start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
         field = s.database_field_name
         logger.info(f"Getting readings for field={field}")
         is_data = field.startswith('data')
         
-        # Define value extraction logic
         if is_data:
-            field_extract = field
             value_extract = field
             extra_conditions = f"AND {field} != ''"
         else:
@@ -1340,175 +1741,6 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             logger.info(f"Collected {len(data)} change data points")
             return data
 
-    def _get_review_status(self, value: float, review_config: Dict) -> Tuple[int, str]:
-        logger.info(f"Getting review status for value={value}")
-        pos = review_config['pos_values']
-        neg = review_config['neg_values']
-        abs_thresh = 0
-        if value > 0:
-            for t in pos:
-                if value > t:
-                    abs_thresh = max(abs_thresh, t)
-        elif value < 0:
-            for t in neg:
-                if value < t:
-                    abs_thresh = max(abs_thresh, abs(t))
-        severity = review_config['severity_map'].get(abs_thresh, 0)
-        color = review_config['color_map'].get(abs_thresh, 'grey')
-        logger.info(f"Status: severity={severity}, color={color}")
-        return severity, color
-
-    def _get_reviews(self, inputs: MapPlotInput, s: SeriesDict, min_e: float, max_e: float, min_n: float, max_n: float, exclude_clause: str, 
-                     start_time_str: Optional[str], end_time_str: str, buffer_start: Optional[str], buffer_end: str) -> List[Tuple]:
-        review_config = self._get_review_config(s.database_field_name)
-        field = s.database_field_name
-        logger.info(f"Getting reviews for field={field}")
-        is_data = field.startswith('data')
-        field_extract = field if is_data else f"JSON_EXTRACT(m.custom_fields, '$.{field}')"
-        extra_conditions = f"AND {field_extract} != ''" if is_data else f"AND m.custom_fields IS NOT NULL AND JSON_VALID(m.custom_fields) AND {field_extract} IS NOT NULL AND {field_extract} != 'null' AND {field_extract} != ''"
-        safe_eval = lambda s: eval(s, {"__builtins__": {}}, {
-            "datetime": datetime_module,
-            "date": datetime_module.date,
-            "time": datetime_module.time,
-            "Decimal": decimal.Decimal,
-            "bytes": bytes,
-            "bytearray": bytearray
-        }) if s != "No data was found in the database matching the specified search criteria." else []
-
-        if inputs.plot_type == 'value_at_time':
-            query = f"""
-            SELECT i.instr_id, l.easting, l.northing, {field_extract} as value
-            FROM instrum i
-            JOIN location l ON i.location_id = l.id
-            JOIN mydata m ON i.instr_id = m.instr_id
-            JOIN review_instruments ri ON i.instr_id = ri.instr_id
-            WHERE i.type1 = '{s.instrument_type}' AND i.subtype1 = '{s.instrument_subtype}'
-            AND l.easting BETWEEN {min_e} AND {max_e}
-            AND l.northing BETWEEN {min_n} AND {max_n}
-            {exclude_clause}
-            AND ri.review_field = '{s.database_field_name}'
-            AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
-            AND {field_extract} IS NOT NULL {extra_conditions};
-            """
-            logger.info(f"Executing reviews query for value_at_time: {query}")
-            raw_result = self.sql_tool._run(query)
-            raw_data = safe_eval(raw_result)
-            data = []
-            for row in raw_data:
-                norm = self._extract_row_reading(row)
-                if not norm:
-                    continue
-                id_, e, n, v = norm
-                e_clean = self._extract_numeric(e)
-                n_clean = self._extract_numeric(n)
-                v_clean = self._extract_numeric(v)
-                if None in (e_clean, n_clean, v_clean):
-                    continue
-                try:
-                    v_float = float(v_clean)
-                    data.append((id_, float(e_clean), float(n_clean), self._get_review_status(v_float, review_config)[1]))
-                except ValueError:
-                    continue
-            logger.info(f"Collected {len(data)} review data points")
-            return data
-        else:
-            query_end = f"""
-            SELECT i.instr_id, {field_extract} as value_end
-            FROM instrum i JOIN location l ON i.location_id = l.id JOIN mydata m ON i.instr_id = m.instr_id
-            JOIN review_instruments ri ON i.instr_id = ri.instr_id
-            WHERE i.type1 = '{s.instrument_type}' AND i.subtype1 = '{s.instrument_subtype}'
-            AND l.easting BETWEEN {min_e} AND {max_e} AND l.northing BETWEEN {min_n} AND {max_n}
-            {exclude_clause}
-            AND ri.review_field = '{s.database_field_name}'
-            AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_end}' AND '{end_time_str}')
-            AND {field_extract} IS NOT NULL {extra_conditions};
-            """
-            logger.info(f"Executing end reviews query for change_over_period: {query_end}")
-            raw_end = safe_eval(self.sql_tool._run(query_end))
-            result_end = []
-            for row in raw_end:
-                norm = self._extract_row_change(row, 'value_end')
-                if not norm:
-                    continue
-                instr_id, val_end = norm
-                val_end_clean = self._extract_numeric(val_end)
-                if val_end_clean is None:
-                    continue
-                try:
-                    result_end.append((instr_id, float(val_end_clean)))
-                except ValueError:
-                    continue
-
-            query_start = f"""
-            SELECT i.instr_id, {field_extract} as value_start
-            FROM instrum i JOIN location l ON i.location_id = l.id JOIN mydata m ON i.instr_id = m.instr_id
-            JOIN review_instruments ri ON i.instr_id = ri.instr_id
-            WHERE i.type1 = '{s.instrument_type}' AND i.subtype1 = '{s.instrument_subtype}'
-            AND l.easting BETWEEN {min_e} AND {max_e} AND l.northing BETWEEN {min_n} AND {max_n}
-            {exclude_clause}
-            AND ri.review_field = '{s.database_field_name}'
-            AND m.date1 = (SELECT MAX(date1) FROM mydata WHERE instr_id = i.instr_id AND date1 BETWEEN '{buffer_start}' AND '{start_time_str}')
-            AND {field_extract} IS NOT NULL {extra_conditions};
-            """
-            logger.info(f"Executing start reviews query for change_over_period: {query_start}")
-            raw_start = safe_eval(self.sql_tool._run(query_start))
-            result_start = []
-            for row in raw_start:
-                norm = self._extract_row_change(row, 'value_start')
-                if not norm:
-                    continue
-                instr_id, val_start = norm
-                val_start_clean = self._extract_numeric(val_start)
-                if val_start_clean is None:
-                    continue
-                try:
-                    result_start.append((instr_id, float(val_start_clean)))
-                except ValueError:
-                    continue
-
-            statuses = {}
-            for instr_id, val_end in result_end:
-                val_start = next((v for id_, v in result_start if id_ == instr_id), None)
-                if val_start is not None:
-                    sev_start, _ = self._get_review_status(val_start, review_config)
-                    sev_end, color_end = self._get_review_status(val_end, review_config)
-                    if sev_end > sev_start:
-                        statuses[instr_id] = color_end
-                    else:
-                        statuses[instr_id] = 'grey'
-            if not statuses:
-                logger.info("No statuses found")
-                return []
-            instr_ids_str = ','.join(f"'{id_}'" for id_ in statuses)
-            loc_query = f"""
-            SELECT i.instr_id, l.easting, l.northing
-            FROM instrum i JOIN location l ON i.location_id = l.id
-            WHERE i.instr_id IN ({instr_ids_str});
-            """
-            logger.info(f"Executing location query for reviews: {loc_query}")
-            raw_locs = safe_eval(self.sql_tool._run(loc_query))
-            loc_dict = {}
-            for row in raw_locs:
-                if isinstance(row, dict):
-                    id_ = row.get('instr_id') or row.get('id')
-                    e = row.get('easting') or row.get('east')
-                    n = row.get('northing') or row.get('north')
-                elif isinstance(row, (list, tuple)) and len(row) == 3:
-                    id_, e, n = row
-                else:
-                    continue
-                e_clean = self._extract_numeric(e)
-                n_clean = self._extract_numeric(n)
-                if None in (e_clean, n_clean) or id_ is None:
-                    continue
-                try:
-                    loc_dict[id_] = (float(e_clean), float(n_clean))
-                except ValueError:
-                    continue
-            data = [(id_, loc_dict.get(id_, (0,0))[0], loc_dict.get(id_, (0,0))[1], statuses[id_]) for id_ in statuses if id_ in loc_dict]
-            logger.info(f"Collected {len(data)} review change data points")
-            return data
-
     def _run(
         self,
         data_type: str,
@@ -1569,189 +1801,9 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             buffer_start = (inputs.start_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
             logger.info(f"Time strings: start_time_str={start_time_str}, end_time_str={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
 
-            data = {}
-            suggestions = []
-            for s in inputs.series:
-                key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
-                logger.info(f"Processing series: {key}")
-                if inputs.data_type == 'readings':
-                    points = self._get_readings(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
-                    if points:
-                        vals = [v for _, _, _, v in points]
-                        logger.info(f"Values for outlier detection: {vals}")
-                        mean = np.mean(vals)
-                        std = np.std(vals)
-                        outliers = [id for id, _, _, v in points if abs(v - mean) > 3 * std]
-                        logger.info(f"Outliers detected: {outliers}")
-                        suggestions.extend(outliers)
-                else:
-                    points = self._get_reviews(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
-                data[key] = []
-                for p in points:
-                    id, e, n, v = p
-                    try:
-                        lat, lon = easting_northing_to_lat_lon(e, n)
-                        data[key].append((id, lat, lon, v))
-                        logger.info(f"Converted coords for {id}: lat={lat}, lon={lon}, value={v}")
-                    except Exception as e:
-                        logger.warning(f"Failed to convert coords for {id}: easting={e}, northing={n}, error: {str(e)}")
-                        continue
-                logger.info(f"Collected {len(data[key])} points for series {key}")
-
-            if not any(data.values()):
-                logger.warning("No data found for any series")
-                return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
-
-            center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
-            logger.info(f"Center lat/lon: {center_lat}, {center_lon}")
-            fig = go.Figure()
-            logger.info("Plotly figure initialized")
-            for i, s in enumerate(inputs.series):
-                key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
-                points = data.get(key, [])
-                if not points:
-                    logger.info(f"No points for series {key}")
-                    continue
-                instr_ids, lats, lons, vals = zip(*points)
-                if inputs.data_type == 'readings':
-                    logger.info(f"Adding readings trace for series {key}")
-                    max_abs = max(abs(max(vals)), abs(min(vals))) if vals else 1
-                    if inputs.plot_type == 'change_over_period':
-                        cmap = pc.diverging.PiYG
-                        norm = [(v / max_abs) for v in vals]
-                        colors = [cmap[int(((nv + 1) / 2) * (len(cmap)-1))] for nv in norm]
-                        colorscale = [[(nv + 1) / 2, cmap[int(((nv + 1) / 2) * (len(cmap)-1))]] for nv in np.linspace(-1, 1, len(cmap))]
-                        colorbar_title = f"{s.measured_quantity_name} ({s.abbreviated_unit})"
-                        tickvals = [min(vals), 0, max(vals)] if min(vals) < 0 < max(vals) else [min(vals), max(vals)]
-                        ticktext = [f"{v:.2f}" for v in tickvals]
-                    else:
-                        cmap = pc.sequential.Reds if i==0 else pc.sequential.Blues if i==1 else pc.sequential.Greens
-                        min_v, max_v = min(vals), max(vals)
-                        norm = [(v - min_v) / (max_v - min_v) if max_v > min_v else 0.5 for v in vals]
-                        colors = [cmap[int(n * (len(cmap)-1))] for n in norm]
-                        colorscale = [[n, cmap[int(n * (len(cmap)-1))]] for n in np.linspace(0, 1, len(cmap))]
-                        colorbar_title = f"{s.measured_quantity_name} ({s.abbreviated_unit})"
-                        tickvals = [min(vals), max(vals)]
-                        ticktext = [f"{min(vals):.2f}", f"{max(vals):.2f}"]
-                    text = [f"{id}: {v:.2f} {s.abbreviated_unit}" for id, v in zip(instr_ids, vals)]
-                    customdata = list(zip(instr_ids, vals))
-                    fig.add_trace(go.Scattermapbox(
-                        lat=lats, lon=lons, mode='markers',
-                        marker=go.scattermapbox.Marker(
-                            size=10, 
-                            color=vals, 
-                            colorscale=colorscale, 
-                            showscale=True,
-                            colorbar=dict(
-                                title=colorbar_title,
-                                x=1 + 0.15 * i,  
-                                xanchor="left",
-                                len=0.3,
-                                y=0.5 - 0.15 * i,
-                                yanchor="middle",
-                                tickvals=tickvals,
-                                ticktext=ticktext
-                            )
-                        ),
-                        text=text,
-                        customdata=customdata,
-                        hovertemplate="%{customdata[0]}<br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
-                        name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
-                    ))
-                    logger.info(f"Added readings trace")
-                else:
-                    logger.info(f"Adding reviews trace for series {key}")
-                    colors = vals
-                    text = [f"{id}: {v}" for id, v in zip(instr_ids, vals)]
-                    unique_colors = list(set(vals))
-                    colorscale = [[0, 'grey'], [0.33, 'yellow'], [0.66, 'orange'], [1, 'red']] if len(unique_colors) > 1 else [[0, colors[0]], [1, colors[0]]]
-                    colorbar_title = f"{s.measured_quantity_name} Status"
-                    tickvals = unique_colors
-                    ticktext = unique_colors
-                    fig.add_trace(go.Scattermapbox(
-                        lat=lats, lon=lons, mode='markers',
-                        marker=go.scattermapbox.Marker(
-                            size=10, 
-                            color=vals, 
-                            colorscale=colorscale, 
-                            showscale=True,
-                            colorbar=dict(
-                                title=colorbar_title,
-                                x=1 + 0.15 * i,
-                                xanchor="left",
-                                len=0.3,
-                                y=0.5 - 0.15 * i,
-                                yanchor="middle",
-                                tickvals=tickvals,
-                                ticktext=ticktext
-                            )
-                        ),
-                        text=text,
-                        name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
-                    ))
-                    logger.info(f"Added reviews trace")
-
-            time_str = f"at {format_datetime(inputs.end_time)}" if inputs.plot_type == 'value_at_time' else f"change from {format_datetime(inputs.start_time)} to {format_datetime(inputs.end_time)}"
-            logger.info(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
-            fig.update_layout(
-                title=f"{inputs.data_type.capitalize()} {time_str}",
-                mapbox_style="open-street-map",
-                mapbox_center={"lat": center_lat, "lon": center_lon},
-                mapbox_zoom=15,
-                showlegend=False  
-            )
-            logger.info("Figure layout updated")
-
-            all_data = []
-            for s in inputs.series:
-                key = f"{s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}"
-                for id, lat, lon, val in data.get(key, []):
-                    all_data.append({
-                        'Instrument ID': id,
-                        'Latitude': lat,
-                        'Longitude': lon,
-                        'Value/Color': val,
-                        'Series': s.measured_quantity_name,
-                        'Unit': s.abbreviated_unit
-                    })
-            logger.info(f"all_data populated with {len(all_data)} entries")
-            if not all_data:
-                logger.error("No data for CSV generation")
-                raise ValueError("No data available for CSV generation")
-            df = pd.DataFrame(all_data)
-            logger.info(f"DataFrame created with shape {df.shape}")
-            csv_content = df.to_csv(index=False)
-            logger.info(f"CSV content generated (length: {len(csv_content)})")
-
-            plotly_filename = f"map_plot_{uuid.uuid4()}.json"
-            try:
-                plotly_json = fig.to_json()
-                logger.info(f"Plotly JSON generated (length: {len(plotly_json)})")
-            except Exception as e:
-                logger.error(f"Failed to serialize Plotly figure: {str(e)}")
-                raise ValueError(f"Failed to serialize Plotly figure: {str(e)}")
-
-            artefacts = [
-                {
-                    'artifact_id': str(uuid.uuid4()),
-                    'filename': plotly_filename,
-                    'type': 'Plotly object',
-                    'description': 'Map plot JSON',
-                    'content': plotly_json
-                },
-                {
-                    'artifact_id': str(uuid.uuid4()),
-                    'filename': f"map_data_{uuid.uuid4()}.csv",
-                    'type': 'CSV',
-                    'description': 'Map data CSV',
-                    'content': csv_content
-                }
-            ]
-            logger.info(f"Artefacts list created with {len(artefacts)} items")
-
-            content = f"Generated map plot and CSV for {inputs.data_type} {time_str}." + (f" Suggested outliers to exclude: {', '.join(set(suggestions))}" if suggestions and inputs.data_type == 'readings' else "")
-            logger.info(f"Returning content: {content}, artefacts count: {len(artefacts)}")
-            return {"content": content, "artefacts": artefacts}
+            if inputs.data_type == 'review_levels':
+                return self._render_review_levels(inputs, center_e, center_n, min_e, max_e, min_n, max_n)
+            return self._render_readings(inputs, center_e, center_n, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
         
         except ValueError as e:
             logger.error(f"ValueError in MapPlotTool._run: {str(e)}")

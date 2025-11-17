@@ -247,6 +247,7 @@ class MapPlotSandboxAgentTool(BaseTool):
     - Instrument types, subtypes, fields, names, units to plot e.g. 'plot calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series.'
     - Centre (instrument ID or easting/northing) and radius.
     - Optional: instruments to exclude, number of hours within which to search for readings.
+    NOTE: When data_type='review_levels' ONLY the FIRST series provided (instrument_type/subtype/field/name/unit) is used to derive and plot review statuses; any additional series are ignored.
     Returns: String artefact_id of the stored Plotly JSON or None if failed.
     """
     args_schema: type[BaseModel] = MapPlotSandboxAgentInput
