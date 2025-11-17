@@ -24,7 +24,6 @@ Natural language description of the time series plot including:
 - Instruments and database field names (e.g., 'plot data1 from INST001 and calculation1 from INST002 on primary axis').
 - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
 - Axis titles/units (e.g., 'primary: Temperature in °C; secondary: Pressure in kPa').
-- Optional: Review levels (e.g., 'review levels at 10.0, -5.0'), whether to add line representing zero on value axis (useful when differentiating between positive and negative values).
                         """)
 
 class TimeSeriesPlotSandboxAgentState(TypedDict):
@@ -53,7 +52,6 @@ def create_timeseries_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: Ge
     - primary_y_unit: Str unit.
     - secondary_y_title: Optional str, required if secondary instruments.
     - secondary_y_unit: Optional str, required if secondary instruments.
-    - review_level_values: Optional list of floats (max 3 pos, 3 neg), not with secondary.
     - highlight_zero: Optional bool.
 
     User prompt:
@@ -242,7 +240,6 @@ class TimeSeriesPlotSandboxAgentTool(BaseTool):
     - Instruments and database field names (e.g., 'plot data1 from INST001 and calculation1 from INST002 on primary axis').
     - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM').
     - Axis titles/units (e.g., 'primary: Temperature in °C; secondary: Pressure in kPa').
-    - Optional: Review levels (e.g., 'review levels at 10.0, -5.0'), whether to add line representing zero on value axis (useful when differentiating between positive and negative values).
     Returns: String artefact_id of the stored Plotly JSON or None if failed.
     """
     args_schema: type[BaseModel] = TimeSeriesPlotSandboxAgentInput

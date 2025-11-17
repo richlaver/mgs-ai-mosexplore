@@ -149,6 +149,7 @@ def warm_up_container():
                 thread_id=MOCK_THREAD_ID,
                 user_id=MOCK_USER_ID,
                 global_hierarchy_access=MOCK_GLOBAL_ACCESS,
+                selected_project_key=st.session_state.get("selected_project_key"),
             ):
                 logger.info(f"Container output from warm_up_container: {output}")
                 if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
