@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta
 import datetime as datetime_module
 import decimal
+import math
 from typing import Dict, List, Optional, Tuple, Type, Union, Any
 
 import numpy as np
@@ -201,14 +202,56 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
         time_delta = (end_time - start_time).total_seconds()
         for threshold, settings in grid_settings:
             if time_delta > threshold:
-                settings['major_dtick'] = settings['major_spacing'] * 1000  # Plotly uses milliseconds
-                settings['minor_dtick'] = settings['minor_spacing'] * 1000
+                start_unit = settings.get('start_unit')
+                major_spacing = settings['major_spacing']
+                minor_spacing = settings['minor_spacing']
+
+                tickmode = 'linear'
+                tick0_dt = start_time
+
+                if start_unit == 'year':
+                    tick0_dt = datetime(start_time.year, 1, 1)
+                    months = max(1, int(round(major_spacing / month_seconds)))
+                    settings['major_dtick'] = f"M{months}"
+                    minor_months = int(round(minor_spacing / month_seconds))
+                    if minor_months >= 1:
+                        settings['minor_dtick'] = f"M{minor_months}"
+                    else:
+                        settings['minor_dtick'] = int(minor_spacing * 1000)
+                elif start_unit == 'month':
+                    tick0_dt = datetime(start_time.year, start_time.month, 1)
+                    months = max(1, int(round(major_spacing / month_seconds)))
+                    settings['major_dtick'] = f"M{months}"
+                    minor_months = int(round(minor_spacing / month_seconds))
+                    if minor_months >= 1:
+                        settings['minor_dtick'] = f"M{minor_months}"
+                    else:
+                        settings['minor_dtick'] = int(minor_spacing * 1000)
+                elif start_unit in ('day', 'midnight'):
+                    tick0_dt = datetime(start_time.year, start_time.month, start_time.day)
+                    settings['major_dtick'] = int(major_spacing * 1000)
+                    settings['minor_dtick'] = int(minor_spacing * 1000)
+                elif start_unit == 'hour':
+                    tick0_dt = datetime(start_time.year, start_time.month, start_time.day, start_time.hour)
+                    settings['major_dtick'] = int(major_spacing * 1000)
+                    settings['minor_dtick'] = int(minor_spacing * 1000)
+                elif start_unit == 'minute':
+                    tick0_dt = datetime(start_time.year, start_time.month, start_time.day, start_time.hour, start_time.minute)
+                    settings['major_dtick'] = int(major_spacing * 1000)
+                    settings['minor_dtick'] = int(minor_spacing * 1000)
+                else:
+                    settings['major_dtick'] = int(major_spacing * 1000)
+                    settings['minor_dtick'] = int(minor_spacing * 1000)
+
+                settings['tickmode'] = tickmode
+                settings['tick0'] = tick0_dt.strftime("%Y-%m-%d %H:%M:%S")
                 return settings
         return grid_settings[-1][1]
 
     def _get_y_grid_settings(self, y_min: float, y_max: float) -> Dict:
         """Determine y-axis grid settings."""
         y_range = y_max - y_min
+        logger.info(f"Calculating y-grid settings for range: {y_min} to {y_max} (range={y_range})")
         if y_range == 0:
             return {'major_step': 1, 'minor_step': 0.5}
         
@@ -219,6 +262,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             if 4 <= n_grids <= 7:
                 major_step = step
                 break
+        logger.info(f"Determined major_step: {major_step}")
         
         if major_step in [0.2, 2, 20, 200]:
             minor_step = major_step / 2
@@ -226,6 +270,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             minor_step = major_step / 5
         else:
             minor_step = major_step / 2
+        logger.info(f"Determined minor_step: {minor_step}")
         
         return {'major_step': major_step, 'minor_step': minor_step}
 
@@ -385,10 +430,59 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 logger.info(f"Added primary trace for {instr_id}")
             logger.info(f"Primary traces added | y_min={y_min}, y_max={y_max}")
 
+            # Plot time series for secondary y-axis
+            secondary_y_min, secondary_y_max = float('inf'), float('-inf')
+            for i, instr in enumerate(secondary_y_instruments):
+                instr_id = instr.instrument_id
+                if instr_id not in time_series_data or not time_series_data[instr_id]:
+                    logger.info(f"No data for secondary instrument {instr_id}")
+                    continue
+                times, values = zip(*time_series_data[instr_id])
+                logger.info(f"Secondary instrument {instr_id}: {len(times)} data points")
+                secondary_y_min = min(secondary_y_min, min(values))
+                secondary_y_max = max(secondary_y_max, max(values))
+                sec_suffix_title = (secondary_y_title or "").lower()
+                display_name = f"{instr_id} {sec_suffix_title}" if sec_suffix_title else f"{instr_id}"
+                fig.add_trace(go.Scatter(
+                    x=times,
+                    y=values,
+                    mode='lines+markers',
+                    name=display_name,
+                    line=dict(color=secondary_colors[i % len(secondary_colors)]),
+                    yaxis='y2',
+                    hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {secondary_y_unit if secondary_y_unit is not None else ''}<extra></extra>"
+                ))
+                logger.info(f"Added secondary trace for {instr_id}")
+            logger.info(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
+
+            # Highlight zero line
+            if highlight_zero and not secondary_y_instruments:
+                fig.add_hline(
+                    y=0,
+                    line_color='#607164',
+                    line_width=1
+                )
+                y_min = min(y_min, 0)
+                y_max = max(y_max, 0)
+                logger.info("Added zero highlight hline")
+
+            # Set axis properties
+            x_grid = self._get_x_grid_settings(start_time, end_time)
+            logger.info(f"x_grid calculated: {x_grid}")
+            primary_y_grid = self._get_y_grid_settings(y_min, y_max)
+            logger.info(f"primary_y_grid calculated: {primary_y_grid}")
+
+            if primary_y_grid['major_step'] <= 0 or primary_y_grid['minor_step'] <= 0:
+                logger.error(f"Invalid primary y-grid steps: major={primary_y_grid['major_step']}, minor={primary_y_grid['minor_step']}")
+                raise ValueError("Invalid y-axis grid steps calculated")
+            
             # Add review level horizontal lines
             try:
                 review_lines_added = False
                 if not secondary_y_instruments and primary_y_instruments:
+                    major_step = primary_y_grid.get('major_step', 1)
+                    y_grid_min = math.floor(y_min / major_step) * major_step
+                    y_grid_max = math.ceil(y_max / major_step) * major_step
                     if len(primary_y_instruments) == 1:
                         target_column = primary_y_instruments[0].column_name
                         schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
@@ -396,28 +490,25 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                         if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
                             logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
                         elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
-                            try:
-                                for _, row in schema_df.iterrows():
-                                    try:
-                                        yval = float(row.get('review_value'))
-                                    except Exception:
-                                        continue
-                                    color = str(row.get('review_color') or '#FF0000')
-                                    name = str(row.get('review_name') or '')
-                                    fig.add_hline(
-                                        y=yval,
-                                        line_color=color,
-                                        line_width=2,
-                                        layer='below',
-                                        annotation_text=name,
-                                        annotation_position='top left',
-                                        annotation=dict(font_color='darkgrey')
-                                    )
-                                    review_lines_added = True
-                                if review_lines_added:
-                                    logger.info("Added review level horizontal lines (single-series fast path)")
-                            except Exception as e:
-                                logger.warning(f"Failed adding review level lines: {e}")
+                            for _, row in schema_df.iterrows():
+                                try:
+                                    yval = float(row.get('review_value'))
+                                except Exception:
+                                    continue
+                                color = str(row.get('review_color') or '#FF0000')
+                                name = str(row.get('review_name') or '')
+                                fig.add_hline(
+                                    y=yval,
+                                    line_color=color,
+                                    line_width=2,
+                                    layer='below',
+                                    annotation_text=name,
+                                    annotation_position='top left',
+                                    annotation=dict(font_color='#607164')
+                                )
+                                review_lines_added = True
+                            if review_lines_added:
+                                logger.info("Added review level horizontal lines (single-series fast path)")
                     else:
                         primary_columns = {p.column_name for p in primary_y_instruments}
                         if len(primary_columns) == 1:
@@ -477,28 +568,25 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                                 if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
                                     logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
                                 elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
-                                    try:
-                                        for _, row in schema_df.iterrows():
-                                            try:
-                                                yval = float(row.get('review_value'))
-                                            except Exception:
-                                                continue
-                                            color = str(row.get('review_color') or '#FF0000')
-                                            name = str(row.get('review_name') or '')
-                                            fig.add_hline(
-                                                y=yval,
-                                                line_color=color,
-                                                line_width=2,
-                                                layer='below',
-                                                annotation_text=name,
-                                                annotation_position='top left',
-                                                annotation=dict(font_color='darkgrey')
-                                            )
-                                            review_lines_added = True
-                                        if review_lines_added:
-                                            logger.info("Added review level horizontal lines beneath data traces")
-                                    except Exception as e:
-                                        logger.warning(f"Failed adding review level lines: {e}")
+                                    for _, row in schema_df.iterrows():
+                                        try:
+                                            yval = float(row.get('review_value'))
+                                        except Exception:
+                                            continue
+                                        color = str(row.get('review_color') or '#FF0000')
+                                        name = str(row.get('review_name') or '')
+                                        fig.add_hline(
+                                            y=yval,
+                                            line_color=color,
+                                            line_width=2,
+                                            layer='below',
+                                            annotation_text=name,
+                                            annotation_position='top left',
+                                            annotation=dict(font_color='#607164')
+                                        )
+                                        review_lines_added = True
+                                    if review_lines_added:
+                                        logger.info("Added review level horizontal lines beneath data traces")
                             else:
                                 logger.info("Skipping review lines: primary series do not share the same type/subtype or metadata missing")
                         else:
@@ -507,68 +595,39 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     logger.info("Skipping review lines: secondary axis present or no primary series")
             except Exception as e:
                 logger.warning(f"Review lines section failed: {e}")
-
-            # Plot time series for secondary y-axis
-            secondary_y_min, secondary_y_max = float('inf'), float('-inf')
-            for i, instr in enumerate(secondary_y_instruments):
-                instr_id = instr.instrument_id
-                if instr_id not in time_series_data or not time_series_data[instr_id]:
-                    logger.info(f"No data for secondary instrument {instr_id}")
-                    continue
-                times, values = zip(*time_series_data[instr_id])
-                logger.info(f"Secondary instrument {instr_id}: {len(times)} data points")
-                secondary_y_min = min(secondary_y_min, min(values))
-                secondary_y_max = max(secondary_y_max, max(values))
-                sec_suffix_title = (secondary_y_title or "").lower()
-                display_name = f"{instr_id} {sec_suffix_title}" if sec_suffix_title else f"{instr_id}"
-                fig.add_trace(go.Scatter(
-                    x=times,
-                    y=values,
-                    mode='lines+markers',
-                    name=display_name,
-                    line=dict(color=secondary_colors[i % len(secondary_colors)]),
-                    yaxis='y2',
-                    hovertemplate=f"%{{x|%-d %b %Y %-I:%M%p}}<br>%{{y:.5f}} {secondary_y_unit if secondary_y_unit is not None else ''}<extra></extra>"
-                ))
-                logger.info(f"Added secondary trace for {instr_id}")
-            logger.info(f"Secondary traces added | y_min={secondary_y_min}, y_max={secondary_y_max}")
-
-            # Highlight zero line
-            if highlight_zero and not secondary_y_instruments:
-                fig.add_hline(
-                    y=0,
-                    line_color='lightgrey',
-                    line_width=1
-                )
-                y_min = min(y_min, 0)
-                y_max = max(y_max, 0)
-                logger.info("Added zero highlight hline")
-
-            # Set axis properties
-            x_grid = self._get_x_grid_settings(start_time, end_time)
-            logger.info(f"x_grid calculated: {x_grid}")
-            primary_y_grid = self._get_y_grid_settings(y_min, y_max)
-            logger.info(f"primary_y_grid calculated: {primary_y_grid}")
-
-            if primary_y_grid['major_step'] <= 0 or primary_y_grid['minor_step'] <= 0:
-                logger.error(f"Invalid primary y-grid steps: major={primary_y_grid['major_step']}, minor={primary_y_grid['minor_step']}")
-                raise ValueError("Invalid y-axis grid steps calculated")
             
+            major_step = primary_y_grid['major_step']
+            minor_step = primary_y_grid['minor_step']
+            y_grid_min = math.floor(y_min / major_step) * major_step
+            y_grid_max = math.ceil(y_max / major_step) * major_step
+
+            yaxis_config = {
+                'title': {'text': f"{primary_y_title} ({primary_y_unit})", 'font': {'color': '#607164'}},
+                'dtick': major_step,
+                'minor': {'dtick': minor_step, 'showgrid': True, 'gridcolor': '#D8DEDA'},
+                'showgrid': True,
+                'gridcolor': '#B2BEB5',
+                'tickfont': {'color': '#607164'}
+            }
+            if y_min <= 0 <= y_max:
+                yaxis_config.update({
+                    'tickmode': 'linear',
+                    'tick0': 0,
+                    'range': [y_grid_min, y_grid_max]
+                })
+
             layout = {
                 'xaxis': {
                     'tickformat': x_grid['major_format'],
                     'dtick': x_grid['major_dtick'],
-                    'minor': {'dtick': x_grid['minor_dtick'], 'showgrid': True, 'gridcolor': 'lightgrey'},
+                    'tickmode': x_grid.get('tickmode', 'linear'),
+                    'tick0': x_grid.get('tick0'),
+                    'minor': {'dtick': x_grid['minor_dtick'], 'showgrid': True, 'gridcolor': '#D8DEDA'},
                     'showgrid': True,
-                    'gridcolor': 'grey'
+                    'gridcolor': '#B2BEB5',
+                    'tickfont': {'color': '#607164'}
                 },
-                'yaxis': {
-                    'title': f"{primary_y_title} ({primary_y_unit})",
-                    'dtick': primary_y_grid['major_step'],
-                    'minor': {'dtick': primary_y_grid['minor_step'], 'showgrid': True, 'gridcolor': 'lightgrey'},
-                    'showgrid': True,
-                    'gridcolor': 'grey'
-                }
+                'yaxis': yaxis_config
             }
             
             if secondary_y_instruments:
@@ -578,22 +637,25 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     logger.error(f"Invalid secondary y-grid steps: major={secondary_y_grid['major_step']}, minor={secondary_y_grid['minor_step']}")
                     raise ValueError("Invalid secondary y-axis grid steps calculated")
                 layout['yaxis2'] = {
-                    'title': f"{secondary_y_title} ({secondary_y_unit})",
+                    'title': {'text': f"{secondary_y_title} ({secondary_y_unit})", 'font': {'color': '#607164'}},
                     'overlaying': 'y',
                     'side': 'right',
                     'dtick': secondary_y_grid['major_step'],
                     'minor': {
                         'dtick': secondary_y_grid['minor_step'],
                         'showgrid': True,
-                        'gridcolor': 'lightgrey'
+                        'gridcolor': '#D8DEDA'
                     },
                     'showgrid': True,
-                    'gridcolor': 'grey'
+                    'gridcolor': '#B2BEB5',
+                    'tickfont': {'color': '#607164'}
                 }
             
             fig.update_layout(
                 showlegend=True,
                 template="plotly_white",
+                font={'color': '#607164'},
+                legend={'font': {'color': '#607164'}},
                 **layout
             )
             logger.info("Figure layout updated")
