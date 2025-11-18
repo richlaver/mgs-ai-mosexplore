@@ -171,7 +171,6 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
 
     def _get_x_grid_settings(self, start_time: datetime, end_time: datetime) -> Dict:
         """Determine x-axis grid settings and formatting."""
-        time_delta_days = (end_time - start_time).total_seconds() / (24 * 3600)
         year_seconds = 365.25 * 24 * 3600
         month_seconds = year_seconds / 12
         day_seconds = 24 * 3600
@@ -836,6 +835,178 @@ def easting_northing_to_lat_lon(easting: float, northing: float) -> Tuple[float,
     lon, lat = transformer.transform(easting, northing)
     return lat, lon
 
+def get_projection_from_db(sql_tool):
+    """
+    Fetch projection definition from the crs_configuration table.
+    Returns a projection string (PROJ4 or WKT format) for coordinate transformation.
+    
+    Parameters:
+    sql_tool: GeneralSQLQueryTool instance for database access
+    
+    Returns:
+    str: Projection definition string from the database
+    
+    Raises:
+    Exception: If no projection is found or database query fails
+    """
+    try:
+        query = """
+            SELECT projection_definition, projection_name, projection_type
+            FROM crs_configuration
+            WHERE is_deleted = 0
+            AND projection_definition IS NOT NULL
+            AND projection_definition != ''
+            LIMIT 1;
+        """
+        result = sql_tool._run(query)
+        logger.debug(f"Raw SQL result for CRS configuration: {result}")
+
+        if result == "No data was found in the database matching the specified search criteria.":
+            logger.warning("No CRS configuration found in database")
+            raise ValueError("No CRS configuration found in crs_configuration table. Please add a projection definition.")
+
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+                logger.debug("Parsed CRS configuration result using json.loads")
+            except Exception:
+                try:
+                    parsed = eval(result, {"__builtins__": {}})
+                    logger.debug("Parsed CRS configuration result using eval with restricted environment")
+                except Exception as e:
+                    logger.error(f"Failed to parse CRS configuration result: {e}")
+                    raise ValueError(f"Unparseable result from crs_configuration query: {e}")
+        else:
+            parsed = result
+
+        if parsed is None:
+            raise ValueError("Empty result from crs_configuration table")
+
+        if isinstance(parsed, (list, tuple)):
+            rows = list(parsed)
+        elif isinstance(parsed, dict):
+            rows = [parsed]
+        else:
+            raise ValueError(
+                f"Unexpected result type for crs_configuration query; got {type(parsed).__name__}, expected list/tuple/dict"
+            )
+
+        if not rows:
+            raise ValueError("Empty result from crs_configuration table")
+
+        first = rows[0]
+        if isinstance(first, dict):
+            projection_definition = first.get('projection_definition')
+            projection_name = first.get('projection_name')
+            projection_type = first.get('projection_type')
+        elif isinstance(first, (list, tuple)):
+            if len(first) < 3:
+                raise ValueError("Result row has fewer than 3 columns: expected (projection_definition, projection_name, projection_type)")
+            projection_definition, projection_name, projection_type = first[0], first[1], first[2]
+        else:
+            raise ValueError(f"Unsupported row type from crs_configuration: {type(first).__name__}")
+
+        if not projection_definition or projection_definition.strip() == "":
+            raise ValueError("Projection definition is empty in crs_configuration table")
+
+        logger.info(f"Successfully fetched projection: {projection_name} ({projection_type})")
+        logger.debug(f"Projection definition: {projection_definition}")
+
+        return projection_definition
+        
+    except Exception as e:
+        logger.error(f"Error fetching projection from database: {e}")
+        raise Exception(f"Failed to fetch projection definition from database: {e}")
+
+def create_coordinate_converter(sql_tool):
+    """
+    Create a coordinate conversion function using projection string from database.
+    Uses pyproj to transform local coordinates to WGS84 lat/lon.
+
+    Parameters:
+    sql_tool: GeneralSQLQueryTool instance for database access
+
+    Returns:
+    function: A function that takes a list of (id, easting, northing) tuples and
+              returns a list of (id, lat, lon) tuples in WGS84, transformed in one pass.
+
+    Usage:
+    converter = create_coordinate_converter(sql_tool)
+    out = converter([("INST001", 123456.7, 234567.8), ("INST002", 123400.0, 234500.0)])
+    # out -> [("INST001", lat1, lon1), ("INST002", lat2, lon2)]
+    """
+    try:
+        from pyproj import Transformer
+    except ImportError:
+        logger.error("pyproj library not found. Please install it: pip install pyproj")
+        raise ImportError("pyproj library is required for coordinate conversion. Install with: pip install pyproj")
+    
+    proj_string = get_projection_from_db(sql_tool)
+    logger.info(f"Using projection string from database: {proj_string}")
+    
+    try:
+        transformer = Transformer.from_proj(
+            proj_string,
+            "+proj=longlat +datum=WGS84 +no_defs",
+            always_xy=True
+        )
+        logger.info("Successfully created coordinate transformer using projection from database")
+    except Exception as e:
+        logger.error(f"Failed to create transformer with projection string: {e}")
+        raise Exception(f"Invalid projection definition in database: {e}")
+
+    def convert_coordinates(points: List[Tuple[Any, Any, Any]]) -> List[Tuple[str, float, float]]:
+        """
+        Batch-convert a list of (id, easting, northing) to (id, lat, lon) in WGS84.
+
+        - Accepts any iterable of 3-tuples; id is preserved as string
+        - Invalid rows (non-numeric easting/northing) are skipped with a warning
+        - Performed in one transformer call for performance
+        """
+        if not points:
+            return []
+
+        ids: List[str] = []
+        eastings: List[float] = []
+        northings: List[float] = []
+
+        for row in points:
+            try:
+                rid, e, n = row
+            except Exception:
+                logger.warning(f"Skipping row with unexpected shape: {row!r}")
+                continue
+            try:
+                fe = float(e)
+                fn = float(n)
+            except Exception:
+                logger.warning(f"Skipping row with non-numeric coordinates for id={rid!r}: easting={e!r}, northing={n!r}")
+                continue
+            ids.append(str(rid))
+            eastings.append(fe)
+            northings.append(fn)
+
+        if not ids:
+            return []
+
+        try:
+            lons, lats = transformer.transform(eastings, northings)
+        except Exception as e:
+            logger.error(f"Batch coordinate transformation failed: {e}")
+            raise Exception(f"Failed to transform coordinates batch: {e}")
+
+        converted: List[Tuple[str, float, float]] = []
+        for rid, lat, lon in zip(ids, lats, lons):
+            try:
+                converted.append((rid, float(lat), float(lon)))
+            except Exception:
+                logger.warning(f"Skipping converted row due to non-float outputs for id={rid!r}: lat={lat!r}, lon={lon!r}")
+                continue
+
+        return converted
+
+    return convert_coordinates
+
 class SeriesDict(BaseModel):
     """Model for specifying a data series to plot on the map."""
     instrument_type: str = Field(
@@ -1137,6 +1308,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         max_e: float,
         min_n: float,
         max_n: float,
+        converter,
     ) -> Dict[str, Any]:
         s0 = inputs.series[0]
         if inputs.plot_type == 'value_at_time':
@@ -1325,15 +1497,16 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 key_to_use = comp_key if comp_key in groups else (base if base in groups else '__NO__')
                 groups[key_to_use]['rows'].append(r)
 
-        center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
+        try:
+            center_conv = converter([("__CENTER__", center_e, center_n)])
+            if not center_conv:
+                raise ValueError("Center coordinate conversion failed")
+            _, center_lat, center_lon = center_conv[0]
+        except Exception as e:
+            return {"content": f"Error: Failed to convert center coordinate: {str(e)}", "artefacts": []}
         fig = go.Figure()
         all_data: List[Dict[str, Any]] = []
 
-        def _to_latlon(e, n) -> Tuple[float, float]:
-            try:
-                return easting_northing_to_lat_lon(float(e), float(n))
-            except Exception:
-                return None, None
 
         def severity_key(name: str) -> float:
             meta = schema_map.get(name, {})
@@ -1363,37 +1536,35 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             ids: List[str] = []
             series_name = g['legend']
             color = g['color']
-            for _, r in pd.DataFrame(g['rows']).iterrows():
-                ids.append(str(r.get('instrument_id')))
-                lat, lon = _to_latlon(r.get('easting'), r.get('northing'))
-                if lat is None or lon is None:
+            df_grp = pd.DataFrame(g['rows'])
+            for _, r in df_grp.iterrows():
+                id_str = str(r.get('instrument_id'))
+                try:
+                    e_val = float(r.get('easting'))
+                    n_val = float(r.get('northing'))
+                except Exception:
                     continue
-                lats.append(lat)
-                lons.append(lon)
+                try:
+                    conv = converter([(id_str, e_val, n_val)])
+                except Exception:
+                    continue
+                if not conv:
+                    continue
+                _, lat, lon = conv[0]
                 if inputs.plot_type == 'value_at_time':
                     status_txt = str(r.get('review_status')) if pd.notna(r.get('review_status')) else 'No breach'
                     val = r.get('db_field_value')
                     ts = r.get('db_field_value_timestamp')
-                    id_str = str(r.get('instrument_id'))
                     try:
                         val_str = f"{float(val):.3f} {s0.abbreviated_unit}"
                     except Exception:
                         val_str = f"{val} {s0.abbreviated_unit}"
-                    texts.append(f"<b>{id_str}</b><br><b>{status_txt}</b><br>{val_str}<br>at {ts}")
-                    all_data.append({
-                        'Instrument ID': ids[-1],
-                        'Latitude': lat,
-                        'Longitude': lon,
-                        'Value/Color': color,
-                        'Series': series_name,
-                        'Unit': s0.abbreviated_unit
-                    })
+                    txt = f"<b>{id_str}</b><br><b>{status_txt}</b><br>{val_str}<br>at {ts}"
                 else:
                     end_status = str(r.get('end_review_status')) if pd.notna(r.get('end_review_status')) else 'No breach'
                     start_status = str(r.get('start_review_status')) if pd.notna(r.get('start_review_status')) else 'No breach'
                     ev = r.get('end_db_field_value'); sv = r.get('start_db_field_value')
                     et = r.get('end_db_field_value_timestamp'); st = r.get('start_db_field_value_timestamp')
-                    id_str = str(r.get('instrument_id'))
                     try:
                         ev_str = f"{float(ev):.3f} {s0.abbreviated_unit}"
                     except Exception:
@@ -1402,17 +1573,22 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         sv_str = f"{float(sv):.3f} {s0.abbreviated_unit}"
                     except Exception:
                         sv_str = f"{sv} {s0.abbreviated_unit}"
-                    texts.append(
-                        f"<b>{id_str}</b><br>Changed to:<br><b>{end_status}</b><br>{ev_str}<br>at {et}<br>From:<br><b>{start_status}</b><br>{sv_str}<br>at {st}"
+                    txt = (
+                        f"<b>{id_str}</b><br>Changed to:<br><b>{end_status}</b><br>{ev_str}<br>at {et}"
+                        f"<br>From:<br><b>{start_status}</b><br>{sv_str}<br>at {st}"
                     )
-                    all_data.append({
-                        'Instrument ID': ids[-1],
-                        'Latitude': lat,
-                        'Longitude': lon,
-                        'Value/Color': color,
-                        'Series': series_name,
-                        'Unit': s0.abbreviated_unit
-                    })
+                ids.append(id_str)
+                lats.append(lat)
+                lons.append(lon)
+                texts.append(txt)
+                all_data.append({
+                    'Instrument ID': id_str,
+                    'Latitude': lat,
+                    'Longitude': lon,
+                    'Value/Color': color,
+                    'Series': series_name,
+                    'Unit': s0.abbreviated_unit
+                })
 
             if not lats:
                 continue
@@ -1439,7 +1615,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
 
         fig.update_layout(
             title=title_txt,
-            mapbox_style="open-street-map",
+            mapbox_style="carto-darkmatter",
             mapbox_center={"lat": center_lat, "lon": center_lon},
             mapbox_zoom=15,
             showlegend=True,
@@ -1490,6 +1666,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         end_time_str: str,
         buffer_start: Optional[str],
         buffer_end: str,
+        converter,
     ) -> Dict[str, Any]:
         data: Dict[str, List[Tuple[str, float, float, float]]] = {}
         suggestions: List[str] = []
@@ -1508,22 +1685,29 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                     logger.info(f"Outliers detected: {outliers}")
                     suggestions.extend(outliers)
             data[key] = []
-            for p in points:
-                id, e, n, v = p
-                try:
-                    lat, lon = easting_northing_to_lat_lon(e, n)
+            if points:
+                for (id, e, n, v) in points:
+                    try:
+                        conv = converter([(id, e, n)])
+                    except Exception:
+                        continue
+                    if not conv:
+                        continue
+                    _, lat, lon = conv[0]
                     data[key].append((id, lat, lon, v))
-                    logger.info(f"Converted coords for {id}: lat={lat}, lon={lon}, value={v}")
-                except Exception as e:
-                    logger.warning(f"Failed to convert coords for {id}: easting={e}, northing={n}, error: {str(e)}")
-                    continue
-            logger.info(f"Collected {len(data[key])} points for series {key}")
 
         if not any(data.values()):
             logger.warning("No data found for any series")
             return {"content": "No data found for any series in the specified criteria. Check parameters or database.", "artefacts": []}
 
-        center_lat, center_lon = easting_northing_to_lat_lon(center_e, center_n)
+        try:
+            center_conv = converter([("__CENTER__", center_e, center_n)])
+            if not center_conv:
+                raise ValueError("Center coordinate conversion failed")
+            _, center_lat, center_lon = center_conv[0]
+        except Exception as e:
+            logger.error(f"Failed to convert center coordinate: {e}")
+            return {"content": f"Error: Failed to convert center coordinate: {str(e)}", "artefacts": []}
         logger.info(f"Center lat/lon: {center_lat}, {center_lon}")
         fig = go.Figure()
         logger.info("Plotly figure initialized")
@@ -1584,7 +1768,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         logger.info(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
         fig.update_layout(
             title=f"{inputs.data_type.capitalize()} {time_str}",
-            mapbox_style="open-street-map",
+            mapbox_style="carto-darkmatter",
             mapbox_center={"lat": center_lat, "lon": center_lon},
             mapbox_zoom=15,
             showlegend=False
@@ -1863,9 +2047,15 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             buffer_start = (inputs.start_time - timedelta(hours=inputs.buffer_period_hours)).strftime("%Y-%m-%d %H:%M:%S") if inputs.start_time else None
             logger.info(f"Time strings: start_time_str={start_time_str}, end_time_str={end_time_str}, buffer_start={buffer_start}, buffer_end={buffer_end}")
 
+            try:
+                converter = create_coordinate_converter(self.sql_tool)
+            except Exception as e:
+                logger.error(f"Failed to instantiate coordinate converter: {e}")
+                return {"content": f"Error: Failed to set up coordinate conversion: {str(e)}", "artefacts": []}
+
             if inputs.data_type == 'review_levels':
-                return self._render_review_levels(inputs, center_e, center_n, min_e, max_e, min_n, max_n)
-            return self._render_readings(inputs, center_e, center_n, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
+                return self._render_review_levels(inputs, center_e, center_n, min_e, max_e, min_n, max_n, converter)
+            return self._render_readings(inputs, center_e, center_n, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end, converter)
         
         except ValueError as e:
             logger.error(f"ValueError in MapPlotTool._run: {str(e)}")
