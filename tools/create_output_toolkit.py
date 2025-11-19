@@ -26,6 +26,16 @@ from tools.review_level_toolkit import (
 
 logger = logging.getLogger(__name__)
 
+def apply_general_layout(fig: go.Figure) -> None:
+    """Apply general layout properties to a Plotly figure."""
+    fig.update_layout(
+        font=dict(
+            family="Verdana, sans-serif",
+            size=12,
+            color="#607164",
+        )
+    )
+
 def parse_datetime(dt_str: str) -> datetime:
     """Parse datetime string in format 'D Month YYYY H:MM:SS AM/PM'."""
     # Try Windows format (no leading zeros)
@@ -49,6 +59,16 @@ def parse_datetime(dt_str: str) -> datetime:
 def format_datetime(dt: datetime) -> str:
     """Format datetime object to string in format 'D Month YYYY H:MM:SS AM/PM'."""
     return dt.strftime("%d %B %Y %I:%M:%S %p").lstrip("0").replace(" 0", " ")
+
+def format_datetime_minute(dt: datetime) -> str:
+    """Format datetime rounded to nearest minute, without seconds (e.g., '2 August 2025 2:30 PM')."""
+    if not isinstance(dt, datetime):
+        return str(dt)
+    # Round to nearest minute
+    rounded = dt.replace(second=0, microsecond=0)
+    if dt.second >= 30 or (dt.second == 29 and dt.microsecond >= 500_000):
+        rounded += timedelta(minutes=1)
+    return rounded.strftime("%d %B %Y %I:%M %p").lstrip("0").replace(" 0", " ")
 
 def clean_numeric_string(val):
     if not isinstance(val, (str, int, float)):
@@ -502,8 +522,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                                     line_width=2,
                                     layer='below',
                                     annotation_text=name,
-                                    annotation_position='top left',
-                                    annotation=dict(font_color='#607164')
+                                    annotation_position='top left'
                                 )
                                 review_lines_added = True
                             if review_lines_added:
@@ -580,8 +599,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                                             line_width=2,
                                             layer='below',
                                             annotation_text=name,
-                                            annotation_position='top left',
-                                            annotation=dict(font_color='#607164')
+                                            annotation_position='top left'
                                         )
                                         review_lines_added = True
                                     if review_lines_added:
@@ -601,12 +619,11 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
             y_grid_max = math.ceil(y_max / major_step) * major_step
 
             yaxis_config = {
-                'title': {'text': f"{primary_y_title} ({primary_y_unit})", 'font': {'color': '#607164'}},
+                'title': {'text': f"{primary_y_title} ({primary_y_unit})"},
                 'dtick': major_step,
                 'minor': {'dtick': minor_step, 'showgrid': True, 'gridcolor': '#D8DEDA'},
                 'showgrid': True,
-                'gridcolor': '#B2BEB5',
-                'tickfont': {'color': '#607164'}
+                'gridcolor': '#B2BEB5'
             }
             if y_min <= 0 <= y_max:
                 yaxis_config.update({
@@ -623,8 +640,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     'tick0': x_grid.get('tick0'),
                     'minor': {'dtick': x_grid['minor_dtick'], 'showgrid': True, 'gridcolor': '#D8DEDA'},
                     'showgrid': True,
-                    'gridcolor': '#B2BEB5',
-                    'tickfont': {'color': '#607164'}
+                    'gridcolor': '#B2BEB5'
                 },
                 'yaxis': yaxis_config
             }
@@ -636,7 +652,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     logger.error(f"Invalid secondary y-grid steps: major={secondary_y_grid['major_step']}, minor={secondary_y_grid['minor_step']}")
                     raise ValueError("Invalid secondary y-axis grid steps calculated")
                 layout['yaxis2'] = {
-                    'title': {'text': f"{secondary_y_title} ({secondary_y_unit})", 'font': {'color': '#607164'}},
+                    'title': {'text': f"{secondary_y_title} ({secondary_y_unit})",},
                     'overlaying': 'y',
                     'side': 'right',
                     'dtick': secondary_y_grid['major_step'],
@@ -646,15 +662,13 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                         'gridcolor': '#D8DEDA'
                     },
                     'showgrid': True,
-                    'gridcolor': '#B2BEB5',
-                    'tickfont': {'color': '#607164'}
+                    'gridcolor': '#B2BEB5'
                 }
             
+            apply_general_layout(fig)
             fig.update_layout(
                 showlegend=True,
                 template="plotly_white",
-                font={'color': '#607164'},
-                legend={'font': {'color': '#607164'}},
                 **layout
             )
             logger.info("Figure layout updated")
@@ -1559,7 +1573,30 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         val_str = f"{float(val):.3f} {s0.abbreviated_unit}"
                     except Exception:
                         val_str = f"{val} {s0.abbreviated_unit}"
-                    txt = f"<b>{id_str}</b><br><b>{status_txt}</b><br>{val_str}<br>at {ts}"
+                    def _fmt_min(ts_val):
+                        try:
+                            if isinstance(ts_val, datetime):
+                                return format_datetime_minute(ts_val)
+                            s_val = str(ts_val)
+                            for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d %B %Y %I:%M:%S %p", "%d %B %Y %I:%M %p"):
+                                try:
+                                    return format_datetime_minute(datetime.strptime(s_val, _fmt))
+                                except Exception:
+                                    pass
+                            try:
+                                from_iso = s_val.replace("T", " ").replace("Z", "")
+                                return format_datetime_minute(datetime.fromisoformat(from_iso))
+                            except Exception:
+                                return s_val
+                        except Exception:
+                            return str(ts_val)
+                    ts_fmt = _fmt_min(ts)
+                    txt = (
+                        f"<b>{id_str}</b><br><br>"
+                        f"<b>{status_txt}</b><br>"
+                        f"{val_str}<br>"
+                        f"at {ts_fmt}"
+                    )
                 else:
                     end_status = str(r.get('end_review_status')) if pd.notna(r.get('end_review_status')) else 'No breach'
                     start_status = str(r.get('start_review_status')) if pd.notna(r.get('start_review_status')) else 'No breach'
@@ -1573,9 +1610,35 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                         sv_str = f"{float(sv):.3f} {s0.abbreviated_unit}"
                     except Exception:
                         sv_str = f"{sv} {s0.abbreviated_unit}"
+                    def _fmt_min(ts_val):
+                        try:
+                            if isinstance(ts_val, datetime):
+                                return format_datetime_minute(ts_val)
+                            s_val = str(ts_val)
+                            for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d %B %Y %I:%M:%S %p", "%d %B %Y %I:%M %p"):
+                                try:
+                                    return format_datetime_minute(datetime.strptime(s_val, _fmt))
+                                except Exception:
+                                    pass
+                            try:
+                                from_iso = s_val.replace("T", " ").replace("Z", "")
+                                return format_datetime_minute(datetime.fromisoformat(from_iso))
+                            except Exception:
+                                return s_val
+                        except Exception:
+                            return str(ts_val)
+                    et_fmt = _fmt_min(et)
+                    st_fmt = _fmt_min(st)
                     txt = (
-                        f"<b>{id_str}</b><br>Changed to:<br><b>{end_status}</b><br>{ev_str}<br>at {et}"
-                        f"<br>From:<br><b>{start_status}</b><br>{sv_str}<br>at {st}"
+                        f"<b>{id_str}</b><br><br>"
+                        f"<i>Changed to:</i><br>"
+                        f"<b>{end_status}</b><br>"
+                        f"{ev_str}<br>"
+                        f"at {et_fmt}<br><br>"
+                        f"<i>From:</i><br>"
+                        f"<b>{start_status}</b><br>"
+                        f"{sv_str}<br>"
+                        f"at {st_fmt}"
                     )
                 ids.append(id_str)
                 lats.append(lat)
@@ -1609,10 +1672,17 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             ))
 
         if inputs.plot_type == 'value_at_time':
-            title_txt = f"Review status at {format_datetime(inputs.end_time)}"
+            title_txt = (
+                f'Review status for {s0.measured_quantity_name.lower()}<br>'
+                f'<span style="font-size: 14px;">{format_datetime_minute(inputs.end_time)}</span>'
+            )
         else:
-            title_txt = f"Review status changes between {format_datetime(inputs.start_time)} and {format_datetime(inputs.end_time)}"
+            title_txt = (
+                f'Change in review status for {s0.measured_quantity_name.lower()}<br>'
+                f'<span style="font-size: 14px;">{format_datetime_minute(inputs.start_time)} – {format_datetime_minute(inputs.end_time)}</span>'
+            )
 
+        apply_general_layout(fig)
         fig.update_layout(
             title=title_txt,
             mapbox_style="carto-darkmatter",
@@ -1759,18 +1829,29 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 ),
                 text=text,
                 customdata=customdata,
-                hovertemplate="%{customdata[0]}<br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
+                hovertemplate="%<b>{customdata[0]}</b><br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
                 name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
             ))
             logger.info(f"Added readings trace")
 
         time_str = f"at {format_datetime(inputs.end_time)}" if inputs.plot_type == 'value_at_time' else f"change from {format_datetime(inputs.start_time)} to {format_datetime(inputs.end_time)}"
-        logger.info(f"Updating layout with title: {inputs.data_type.capitalize()} {time_str}")
+        if inputs.plot_type == 'value_at_time':
+            title_txt = (
+                f'Readings for {inputs.series[0].measured_quantity_name.lower()}<br>'
+                f'<span style="font-size: 14px;">{format_datetime_minute(inputs.end_time)}</span>'
+            )
+        else:
+            title_txt = (
+                f'Change in readings for {inputs.series[0].measured_quantity_name.lower()}<br>'
+                f'<span style="font-size: 14px;">{format_datetime_minute(inputs.start_time)} – {format_datetime_minute(inputs.end_time)}</span>'
+            )
+        logger.info(f"Updating layout with title: {title_txt}")
+        apply_general_layout(fig)
         fig.update_layout(
-            title=f"{inputs.data_type.capitalize()} {time_str}",
+            title=title_txt,
             mapbox_style="carto-darkmatter",
             mapbox_center={"lat": center_lat, "lon": center_lon},
-            mapbox_zoom=15,
+            mapbox_zoom=16,
             showlegend=False
         )
         logger.info("Figure layout updated")
