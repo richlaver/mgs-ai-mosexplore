@@ -55,6 +55,7 @@ class Context(BaseModel):
     unverif_IDs: Optional[List[str]] = Field(description="Instrument IDs in query not found in database", default=None)
     word_context: Optional[List[QueryWords]] = Field(description="How query words relate to where to get data and background info to answer", default=None)
     edge_case: Optional[bool] = Field(description="Indicates whether the user query is an edge case", default=None)
+    project_specific_context: Optional[str] = Field(description="Project-specific context", default=None)
     relevant_date_ranges: Optional[List[RelevantDateRange]] = Field(description="Date ranges relevant to user query", default=None)
     review_level_context: Optional[str] = Field(description="Context on anything to do with review levels mentioned in query", default=None)
     relevant_place_coordinates: Optional[RelevantPlaceCoordinates] = Field(description="Geographical coordinates relevant to user query", default=None)
@@ -132,6 +133,7 @@ class ContextState(BaseModel):
     instruments_validated: Annotated[bool, operator.or_] = False
     db_context_provided: Annotated[bool, operator.or_] = False
     period_deduced: Annotated[bool, operator.or_] = False
+    project_specifics_retrieved: Annotated[bool, operator.or_] = False
 
 AgentState.model_rebuild()
 Context.model_rebuild()

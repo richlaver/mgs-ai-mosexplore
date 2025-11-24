@@ -7,6 +7,7 @@ from langgraph.types import Command, Send
 from agents.instrument_validator import instrument_validator
 from agents.database_expert import database_expert
 from agents.period_expert import period_expert
+from agents.project_insider import project_insider
 from classes import ContextState
 
 def create_handoff_tool(*, agent_name: str, description: str | None = None):
@@ -34,8 +35,13 @@ transfer_to_period_expert = create_handoff_tool(
     description="Transfer to period expert for deducing relevant date ranges from the query."
 )
 
-def get_context_graph(llm: BaseLanguageModel, db: any) -> any:
-    tools = [transfer_to_instrument_validator, transfer_to_database_expert, transfer_to_period_expert]
+transfer_to_project_insider = create_handoff_tool(
+    agent_name="project_insider",
+    description="Transfer to project insider for retrieving ad-hoc insights specific to the project."
+)
+
+def get_context_graph(llm: BaseLanguageModel, db: any, selected_project_key: str | None) -> any:
+    tools = [transfer_to_instrument_validator, transfer_to_database_expert, transfer_to_period_expert, transfer_to_project_insider]
 
     def supervisor_node(state: ContextState):
         has_clar_reqs = False
@@ -64,6 +70,8 @@ def get_context_graph(llm: BaseLanguageModel, db: any) -> any:
             scratch_lines.append("INTERNAL: Instrument validation completed.")
         if state.db_context_provided:
             scratch_lines.append("INTERNAL: Database context retrieval completed.")
+        if state.project_specifics_retrieved:
+            scratch_lines.append("INTERNAL: Project-specific insights retrieval completed.")
         agent_scratchpad = "\n".join(scratch_lines)
 
         system_content = f"""
@@ -76,9 +84,11 @@ STRICT ROUTING CONTRACT (follow exactly, highest precedence first):
     - period_deduced == true
     - instruments_validated == true
     - db_context_provided == true
+    - project_specifics_retrieved == true
 3) Otherwise (has_clarification_requests is false):
     - If period_deduced == false, call transfer_to_period_expert.
     - If instruments_validated == false, call transfer_to_instrument_validator.
+    - If project_specifics_retrieved == false, call transfer_to_project_insider.
     - If instruments_validated == true AND db_context_provided == false, call transfer_to_database_expert.
 
 Notes:
@@ -90,6 +100,7 @@ Current status:
 - period_deduced={state.period_deduced}
 - instruments_validated={state.instruments_validated}
 - db_context_provided={state.db_context_provided}
+- project_specifics_retrieved={state.project_specifics_retrieved}
 - has_clarification_requests={has_clar_reqs}
 {agent_scratchpad}
 """
@@ -115,12 +126,16 @@ Current status:
                     requested_targets.append("database_expert")
                 elif tool_name == "transfer_to_period_expert":
                     requested_targets.append("period_expert")
+                elif tool_name == "transfer_to_project_insider":
+                    requested_targets.append("project_insider")
 
         allowed_targets = set()
         if not state.period_deduced:
             allowed_targets.add("period_expert")
         if not state.instruments_validated:
             allowed_targets.add("instrument_validator")
+        if not state.project_specifics_retrieved:
+            allowed_targets.add("project_insider")
         if state.instruments_validated and not state.db_context_provided:
             allowed_targets.add("database_expert")
 
@@ -136,8 +151,10 @@ Current status:
     graph.add_node("instrument_validator", lambda state: instrument_validator(state, llm, db))
     graph.add_node("database_expert", lambda state: database_expert(state, llm, db))
     graph.add_node("period_expert", lambda state: period_expert(state, llm, db))
+    graph.add_node("project_insider", lambda state: project_insider(state, selected_project_key))
     graph.add_edge(START, "supervisor")
     graph.add_edge("instrument_validator", "supervisor")
     graph.add_edge("database_expert", "supervisor")
     graph.add_edge("period_expert", "supervisor")
+    graph.add_edge("project_insider", "supervisor")
     return graph.compile()

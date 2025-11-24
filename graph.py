@@ -152,7 +152,7 @@ def build_graph(
         }
         logger.info(f'Starting context in context_orchestrator_node with context: {state.context}')
 
-        sub_graph = get_context_graph(llm, db)
+        sub_graph = get_context_graph(llm, db, selected_project_key)
         accumulated_context = base_context_dict
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
             logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')

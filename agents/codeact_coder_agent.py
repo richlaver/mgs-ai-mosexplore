@@ -18,6 +18,7 @@ codeact_coder_prompt = PromptTemplate(
         "verified_instrument_info_json",
         "word_context_json",
         "relevant_date_ranges_json",
+        "project_specific_context",
         "tools_str",
         "previous_attempts_summary",
     ],
@@ -38,6 +39,8 @@ Generate code to answer the following user query plus an optional extension that
 {word_context_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
+- Additional context on database:
+{project_specific_context}
 - Tools available to your code:
 {tools_str}
 - Summary of previous failed coding attempts:
@@ -322,6 +325,7 @@ def codeact_coder_agent(
     relevant_date_ranges_json = json.dumps([
         r.model_dump() for r in (context.relevant_date_ranges or [])
     ], indent=2) if context else "[]"
+    project_specific_context = context.project_specific_context or ""
 
     current_date = datetime.now().strftime('%B %d, %Y')
 
@@ -347,6 +351,7 @@ def codeact_coder_agent(
             "verified_instrument_info_json": verified_instrument_info_json,
             "word_context_json": word_context_json,
             "relevant_date_ranges_json": relevant_date_ranges_json,
+            "project_specific_context": project_specific_context,
             "tools_str": tools_str,
             "previous_attempts_summary": previous_attempts_summary,
         })

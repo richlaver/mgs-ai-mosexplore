@@ -33,6 +33,7 @@ def react_agent(
     relevant_date_ranges_json = json.dumps(
         [r.model_dump() for r in (context.relevant_date_ranges or [])], indent=2
     )
+    project_specific_context = context.project_specific_context or ""
 
     current_date = datetime.now().strftime('%B %d, %Y')
 
@@ -56,6 +57,8 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 {word_context_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
+- Additional context on database:
+{project_specific_context}
 - Summary of previous failed attempts:
 {previous_attempts_summary}
 

@@ -1,4 +1,56 @@
 from langchain_core.messages import AIMessage
+missionos_context = [
+    {
+        'name': 'review_levels',
+        'query_keywords': [
+            'review', 'exceedance', 'threshold', 'level', 'status', 'breach', 'exceed', 'trigger', 'AAA', 'alert', 'action', 'alarm', 'limit'
+        ],
+        'context': """
+Readings are compared with thresholds called **review levels** to indicate unexpected or unsafe behaviour.
+Other names for *review* include **AAA** (abbreviation of Alert, Action, Alarm) and **trigger**.
+Other names for *level* include **threshold**.
+When a reading surpasses a review level, it is called a review level **exceedance**, **breach** or similar.
+In a set of review levels, each level represents a degree of severity in exceedance.
+The name of the level which a reading is said to exceed is the most severe level that has been surpassed by the reading.
+This name is also referred to as **review status** or **exceedance level**.
+For example if a set comprises three progressive levels called *alert*, *action* and *alarm* in order of increasing severity, a reading is said to:
+- “exceed the *alert* level” (review status: *alert*) if the reading lies between the *alert* and *action* levels
+- “exceed the *action* level” (review status: *action*) if the reading lies between the *action* and *alarm* levels
+- “exceed the *alarm* level” (review status: *alarm*) if the reading surpasses the *alarm* level.
+A reading not surpassing any review level has a review status of **not exceeded**, **not breached** or similar.
+A set of review levels can be either **upper** or **lower**.
+An upper review level is surpassed if a reading is **greater than** the review level.
+A lower review level is surpassed if a reading **less than** the review level.
+A reading field can be assigned with upper review levels, lower review levels, both or none.
+Database table `review_instruments` lists reading fields assigned with review levels:
+- The name of the reading field in the database is in column `review_field` e.g. “data1”, “calculation1”
+- The instrument ID to which the reading field belongs is in column `instr_id`
+- To filter by instrument type and/or subtype: join column `instr_id` to {{table: `instrum`, column: `instr_id`}} and reference {{table: `instrum`, columns: [`type1`, `subtype1`]}}
+- To filter by location coordinates: join column `instr_id` to {{table: `instrum`, column: `instr_id`}} then join {{table: `instrum`, column: `location_id`}} to {{table: `location`, column: `id`}} and reference {{table: `location`, columns: [`easting`, `northing`]}}
+- To filter by project, contract, site or zone: join column `instr_id` to {{table: `instrum`, column: `instr_id`}} then join {{table: `instrum`, column: `location_id`}} to {{table: `location`, column: `id`}} and reference {{table: `location`, columns: [`project_id`, `contract_id`, `site_id`, `zone_id`]}}
+The value for each review level is listed in database table `review_instruments_values`:
+- Column `review_direction` indicates whether the level is *upper* or *lower*
+- Column `review_value` gives the value of the level
+- Column `review_instr_id` joins to {{table: `review_instruments`, column: `id`}}
+- Review status can be evaluated by using table joins to compare readings in table `mydata` to the `review_value` column
+The name for each review level is listed in the database in {{table: `review_levels`, column: `review_name`}}. Column `id` joins to {{table: `review_instruments_values`, column: `review_level_id`}}
+"""
+    }
+]
+project_specific_context = [
+    {
+        'database_keys': [
+            'project_data.hanoi_clone',
+            'project_data.hanoi_live'
+        ],
+        'context': """
+Review levels for any `calculation` database field will be stored in the corresponding `data` field.
+Thus review levels for `calculationN` are stored in `dataN`.
+Database field values will still be stored in the `calculation` field.
+For example, to check the review status for `calculation3`, retrieve review levels for `data3` and compare with values from `calculation3`.
+"""
+    }
+]
 progress_messages = {
     'context_orchestrator_node': AIMessage(
         name="ContextOrchestrator",
