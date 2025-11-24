@@ -6,6 +6,12 @@ from classes import AgentState, Context, Execution
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.map_plot_sandbox_agent import map_plot_sandbox_agent
+from agents.review_level_agents import (
+    review_by_time_agent,
+    review_by_value_agent,
+    review_schema_agent,
+    breach_instr_agent
+)
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.artefact_toolkit import WriteArtefactTool
 from agents.context_orchestrator import get_context_graph
@@ -84,6 +90,34 @@ def build_graph(
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
+    )
+    review_by_value_tool = review_by_value_agent(
+        llm=llm,
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access
+    )
+    review_by_time_tool = review_by_time_agent(
+        llm=llm,
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access
+    )
+    review_schema_tool = review_schema_agent(
+        llm=llm,
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access
+    )
+    breach_instr_tool = breach_instr_agent(
+        llm=llm,
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access
     )
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
@@ -224,7 +258,15 @@ def build_graph(
             if ex.agent_type == "CodeAct":
                 coder_result = codeact_coder_agent(
                     llm=llm,
-                    tools=[extraction_tool, timeseries_plot_tool, map_plot_tool],
+                    tools=[
+                        extraction_tool,
+                        timeseries_plot_tool,
+                        map_plot_tool,
+                        review_by_value_tool,
+                        review_by_time_tool,
+                        review_schema_tool,
+                        breach_instr_tool
+                    ],
                     context=state.context,
                     previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
                 )
@@ -295,7 +337,15 @@ def build_graph(
                     payload["messages"] = messages
 
             elif ex.agent_type == "ReAct":
-                tools = [extraction_tool, timeseries_plot_tool, map_plot_tool]
+                tools = [
+                    extraction_tool,
+                    timeseries_plot_tool,
+                    map_plot_tool,
+                    review_by_value_tool,
+                    review_by_time_tool,
+                    review_schema_tool,
+                    breach_instr_tool
+                ]
                 result = react_agent(
                     llm=llm,
                     tools=tools,
@@ -314,7 +364,15 @@ def build_graph(
                     payload["messages"] = msgs
 
             elif ex.agent_type == "Tool-Calling":
-                tools = [extraction_tool, timeseries_plot_tool, map_plot_tool]
+                tools = [
+                    extraction_tool,
+                    timeseries_plot_tool,
+                    map_plot_tool,
+                    review_by_value_tool,
+                    review_by_time_tool,
+                    review_schema_tool,
+                    breach_instr_tool
+                ]
                 result = tool_calling_agent(
                     llm=llm,
                     tools=tools,

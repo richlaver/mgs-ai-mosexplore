@@ -47,6 +47,7 @@ image = (
     .add_local_file("agents/extraction_sandbox_agent.py", remote_path="/root/agents/extraction_sandbox_agent.py")
     .add_local_file("agents/timeseries_plot_sandbox_agent.py", remote_path="/root/agents/timeseries_plot_sandbox_agent.py")
     .add_local_file("agents/map_plot_sandbox_agent.py", remote_path="/root/agents/map_plot_sandbox_agent.py")
+    .add_local_file("agents/review_level_agents.py", remote_path="/root/agents/review_level_agents.py")
     .add_local_file("tools/artefact_toolkit.py", remote_path="/root/tools/artefact_toolkit.py")
     .add_local_file("tools/create_output_toolkit.py", remote_path="/root/tools/create_output_toolkit.py")
     .add_local_file("tools/review_level_toolkit.py", remote_path="/root/tools/review_level_toolkit.py")
@@ -162,6 +163,12 @@ class SandboxExecutor:
         from agents.extraction_sandbox_agent import extraction_sandbox_agent
         from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
         from agents.map_plot_sandbox_agent import map_plot_sandbox_agent
+        from agents.review_level_agents import (
+            review_by_value_agent,
+            review_by_time_agent,
+            review_schema_agent,
+            breach_instr_agent
+        )
         from tools.sql_security_toolkit import GeneralSQLQueryTool
 
         try:
@@ -249,7 +256,35 @@ class SandboxExecutor:
                 thread_id=thread_id,
                 user_id=user_id
             )
-            run_logger.info("Initialized plotting tools")
+            review_by_value_tool = review_by_value_agent(
+                llm=self.llm,
+                db=db,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            )
+            review_by_time_tool = review_by_time_agent(
+                llm=self.llm,
+                db=db,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            )
+            review_schema_tool = review_schema_agent(
+                llm=self.llm,
+                db=db,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            )
+            breach_instr_tool = breach_instr_agent(
+                llm=self.llm,
+                db=db,
+                table_relationship_graph=table_relationship_graph,
+                user_id=user_id,
+                global_hierarchy_access=global_hierarchy_access
+            )
+            run_logger.info("Initialized tools")
 
             async def ainvoke(tool, prompt: str, timeout: float | None = None):
                 try:
@@ -273,6 +308,10 @@ class SandboxExecutor:
                 "extraction_sandbox_agent": extraction_tool,
                 "timeseries_plot_sandbox_agent": timeseries_plot_sandbox_tool,
                 "map_plot_sandbox_agent": map_plot_sandbox_tool,
+                "review_by_value_agent": review_by_value_tool,
+                "review_by_time_agent": review_by_time_tool,
+                "review_schema_agent": review_schema_tool,
+                "breach_instr_agent": breach_instr_tool,
                 "llm": self.llm,
                 "db": db,
                 "datetime": __import__("datetime"),

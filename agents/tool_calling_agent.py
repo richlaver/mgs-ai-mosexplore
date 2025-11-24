@@ -174,6 +174,64 @@ You are an expert in answering queries on instrumentation monitoring data via qu
   * Label: Settlement
   * Unit: mm
 
+## `review_by_value_agent`
+### How to Use
+- Use to get review status for a known measurement value with `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
+- Prompt is natural language description of review status request that MUST include:
+  * Instrument ID
+  * Database field name
+  * Database field value
+- Returns breached review level name (str) or `None` or `ERROR: <error message>`.
+### Example Prompt
+"Find review status:
+- Instrument ID: INST045
+- Database field name: data3
+- Database field value: 12.7"
+
+## `review_by_time_agent`
+### How to Use
+- Use to get review status of the latest reading before a given timestamp with `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
+- Prompt is natural language description of review status request that MUST include:
+  * Instrument ID
+  * Database field name
+  * Timestamp
+- Returns `pandas.DataFrame` with columns (`review_status`, `db_field_value`, `db_field_value_timestamp`) or `None` or `ERROR: <error message>`.
+### Example Prompt
+"Find review status:
+- Instrument ID: INST045
+- Database field name: data3
+- Timestamp: 14 May 2025 12:00:00 PM"
+
+## `review_schema_agent`
+### How to Use
+- Use to get full schema (names, values, direction, color) of active review levels for a specific instrument field with `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
+- Prompt is natural language description of review schema request that MUST include:
+  * Instrument ID
+  * Database field name
+- Returns `pandas.DataFrame` with columns (`review_name`, `review_value`, `review_direction`, `review_color`) or `None` or `ERROR: <error message>`.
+### Example Prompt
+"List review levels for:
+- Instrument ID: INST088
+- Database field name: calculation2"
+
+## `breach_instr_agent`
+### How to Use
+- Use to get instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels) with `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Prompt is natural language description of review status enquiry that MUST include:
+  * Review level name
+  * Instrument type
+  * Instrument subtype (optional)
+  * Database field name
+  * Timestamp cut-off
+- Returns `pandas.DataFrame` with columns (`instrument_id`, `field_value`, `field_value_timestamp`, `review_value`) or `None` or `ERROR: <error message>`.
+### Example Prompt
+"List breaches for:
+- Review level name: ALERT
+- Instrument type: LP
+- Instrument subtype: MOVEMENT
+- Database field name: calculation1
+- Timestamp: 14 May 2025 12:00:00 PM"
+
 # Instructions
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
@@ -229,7 +287,12 @@ Begin by analyzing the query.
         return _fn
 
     for t in tools:
-        if t.name == "extraction_sandbox_agent":
+        if t.name in [
+            "extraction_sandbox_agent",
+            "review_by_time_agent",
+            "review_schema_agent",
+            "breach_instr_agent"
+        ]:
             tool_obj = Tool.from_function(
                 func=make_extraction_wrapper(t),
                 name=t.name,

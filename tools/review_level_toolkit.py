@@ -56,6 +56,8 @@ def _parse_rows(result: Union[str, List[Dict[str, Any]], None]) -> List[Dict[str
     text = str(result).strip()
     if _is_no_data(text):
         return []
+    if text.startswith("Error:"):
+        return []
 
     try:
         parsed = json.loads(text)
@@ -218,7 +220,8 @@ class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
             "WHERE ri.instr_id = %(instrument_id)s "
             "AND ri.review_field = %(review_field)s "
             "AND ri.review_status = 'ON' "
-            "ORDER BY CASE WHEN riv.review_direction = 1 THEN -riv.review_value ELSE riv.review_value END"
+            "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+            "ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END"
         )
         rendered = sql % {k: _quote(v) for k, v in params.items()}
         try:
@@ -279,18 +282,22 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
             params = {"json_path": json_path, "instrument_id": instrument_id, "review_field": db_field_name, "ts": timestamp}
             sql = (
                 "WITH latest_reading AS ( "
-                "SELECT m.date1 AS reading_time, CAST(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s)) AS DECIMAL(20,6)) AS field_value "
+                "SELECT m.date1 AS reading_time, "
+                "CASE WHEN JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END AS field_value "
                 "FROM mydata m WHERE m.instr_id = %(instrument_id)s AND m.date1 < %(ts)s "
-                "AND m.custom_fields IS NOT NULL AND JSON_VALID(m.custom_fields) "
-                "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
                 "ORDER BY m.date1 DESC LIMIT 1), "
                 "breached AS ( SELECT rl.review_name, riv.review_value, riv.review_direction FROM review_instruments ri "
                 "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
                 "JOIN review_levels rl ON riv.review_level_id = rl.id "
                 "WHERE ri.instr_id = %(instrument_id)s AND ri.review_field = %(review_field)s AND ri.review_status='ON' "
-                "AND ((riv.review_direction = 1 AND (SELECT field_value FROM latest_reading) > riv.review_value) "
-                "OR (riv.review_direction = -1 AND (SELECT field_value FROM latest_reading) < riv.review_value)) "
-                "ORDER BY CASE WHEN riv.review_direction = 1 THEN -riv.review_value ELSE riv.review_value END LIMIT 1) "
+                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                "AND ((riv.review_direction = 1 AND (SELECT field_value FROM latest_reading) > CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
+                "OR (riv.review_direction = -1 AND (SELECT field_value FROM latest_reading) < CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) "
+                "ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END LIMIT 1) "
                 "SELECT lr.reading_time, lr.field_value, (SELECT review_name FROM breached) AS review_name FROM latest_reading lr"
             )
         else:
@@ -301,16 +308,20 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
             params = {"instrument_id": instrument_id, "review_field": valid_col, "ts": timestamp}
             sql = (
                 "WITH latest_reading AS ( "
-                f"SELECT m.date1 AS reading_time, m.{valid_col} AS field_value FROM mydata m "
-                "WHERE m.instr_id = %(instrument_id)s AND m.date1 < %(ts)s AND m." + valid_col + " IS NOT NULL "
+                f"SELECT m.date1 AS reading_time, "
+                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END AS field_value "
+                f"FROM mydata m "
+                f"WHERE m.instr_id = %(instrument_id)s AND m.date1 < %(ts)s AND REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
                 "ORDER BY m.date1 DESC LIMIT 1), "
                 "breached AS ( SELECT rl.review_name, riv.review_value, riv.review_direction FROM review_instruments ri "
                 "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
                 "JOIN review_levels rl ON riv.review_level_id = rl.id "
                 "WHERE ri.instr_id = %(instrument_id)s AND ri.review_field = %(review_field)s AND ri.review_status='ON' "
-                "AND ((riv.review_direction = 1 AND (SELECT field_value FROM latest_reading) > riv.review_value) "
-                "OR (riv.review_direction = -1 AND (SELECT field_value FROM latest_reading) < riv.review_value)) "
-                "ORDER BY CASE WHEN riv.review_direction = 1 THEN -riv.review_value ELSE riv.review_value END LIMIT 1) "
+                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                "AND ((riv.review_direction = 1 AND (SELECT field_value FROM latest_reading) > CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
+                "OR (riv.review_direction = -1 AND (SELECT field_value FROM latest_reading) < CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) "
+                "ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END LIMIT 1) "
                 "SELECT lr.reading_time, lr.field_value, (SELECT review_name FROM breached) AS review_name FROM latest_reading lr"
             )
 
