@@ -45,7 +45,7 @@ from modal_sandbox_local import execute_local_sandbox
 logger = logging.getLogger(__name__)
 
 def build_graph(
-    llm: BaseLanguageModel,
+    llms: Dict[str, BaseLanguageModel],
     db: SQLDatabase,
     blob_db: b2.Bucket,
     metadata_db: psycopg2.extensions.connection,
@@ -63,7 +63,7 @@ def build_graph(
     st.toast("Building graph...", icon=":material/account_tree:")
 
     extraction_tool = extraction_sandbox_agent(
-        llm=llm,
+        llm=llms['THINKING'],
         db=db,
         table_info=table_info,
         table_relationship_graph=table_relationship_graph,
@@ -78,42 +78,42 @@ def build_graph(
     )
     _write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
     timeseries_plot_tool = timeseries_plot_sandbox_agent(
-        llm=llm,
+        llm=llms['THINKING'],
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
     )
     map_plot_tool = map_plot_sandbox_agent(
-        llm=llm,
+        llm=llms['THINKING'],
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
     )
     review_by_value_tool = review_by_value_agent(
-        llm=llm,
+        llm=llms['BALANCED'],
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     review_by_time_tool = review_by_time_agent(
-        llm=llm,
+        llm=llms['BALANCED'],
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     review_schema_tool = review_schema_agent(
-        llm=llm,
+        llm=llms['BALANCED'],
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     breach_instr_tool = breach_instr_agent(
-        llm=llm,
+        llm=llms['BALANCED'],
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
@@ -134,7 +134,7 @@ def build_graph(
     def history_summariser_node(state: AgentState) -> dict:
         retrospective_query = history_summariser(
             messages=state.messages,
-            llm=llm
+            llm=llms['BALANCED']
         )
         new_context = state.context.model_copy(update={"retrospective_query": retrospective_query})
         return {"context": new_context}
@@ -152,7 +152,7 @@ def build_graph(
         }
         logger.info(f'Starting context in context_orchestrator_node with context: {state.context}')
 
-        sub_graph = get_context_graph(llm, db, selected_project_key)
+        sub_graph = get_context_graph(llms['BALANCED'], db, selected_project_key)
         accumulated_context = base_context_dict
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
             logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')
@@ -193,7 +193,7 @@ def build_graph(
         return "continue_execution"
     
     def query_classifier_node(state: AgentState) -> dict:
-        classified_agent_type = query_classifier_agent(llm=llm, messages=state.messages, context=state.context) if agent_type == "Auto" else agent_type
+        classified_agent_type = query_classifier_agent(llm=llms['BALANCED'], messages=state.messages, context=state.context) if agent_type == "Auto" else agent_type
         logger.info(f"Classified agent type: {classified_agent_type}")
 
         new_executions = []
@@ -215,7 +215,7 @@ def build_graph(
     def query_clarifier_node(state: AgentState) -> dict:
         clarification_requests = state.context.clarification_requests if state.context else []
         chat_history = filter_messages_only_final(state.messages)
-        message = query_clarifier_agent(llm=llm, clarification_requests=clarification_requests, chat_history=chat_history)
+        message = query_clarifier_agent(llm=llms['BALANCED'], clarification_requests=clarification_requests, chat_history=chat_history)
         return {"messages": [message]}
     
     def enter_parallel_execution_node(state: AgentState):
@@ -228,13 +228,13 @@ def build_graph(
         return {}
     
     def response_selector_node(state: AgentState) -> dict:
-        updated_executions = response_selector(llm=llm, executions=state.executions, context=state.context)
+        updated_executions = response_selector(llm=llms['THINKING'], executions=state.executions, context=state.context)
         return {"executions": updated_executions}
         
     def reporter_node(state: AgentState) -> Dict[str, List]:
         base_len = len(state.messages)
         updated_messages_full = reporter_agent(
-            llm=llm,
+            llm=llms['THINKING'],
             context=state.context,
             messages=state.messages,
             executions=state.executions
@@ -257,7 +257,7 @@ def build_graph(
 
             if ex.agent_type == "CodeAct":
                 coder_result = codeact_coder_agent(
-                    llm=llm,
+                    llm=llms['THINKING'],
                     tools=[
                         extraction_tool,
                         timeseries_plot_tool,
@@ -347,7 +347,7 @@ def build_graph(
                     breach_instr_tool
                 ]
                 result = react_agent(
-                    llm=llm,
+                    llm=llms['THINKING'],
                     tools=tools,
                     context=state.context,
                     previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
@@ -374,7 +374,7 @@ def build_graph(
                     breach_instr_tool
                 ]
                 result = tool_calling_agent(
-                    llm=llm,
+                    llm=llms['THINKING'],
                     tools=tools,
                     context=state.context,
                     previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],

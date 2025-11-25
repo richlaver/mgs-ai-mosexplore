@@ -41,6 +41,7 @@ def tool_calling_agent(
     relevant_date_ranges_json = json.dumps(
         [r.model_dump() for r in (context.relevant_date_ranges or [])], indent=2
     )
+    platform_context = context.platform_context or ""
     project_specific_context = context.project_specific_context or ""
 
     current_date = datetime.now().strftime('%B %d, %Y')
@@ -65,15 +66,17 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 {word_context_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
+- Platform-specific terminology and semantics:
+{platform_context}
 - Additional context on database:
 {project_specific_context}
 - Summary of previous failed attempts:
 {previous_attempts_summary}
 
 # Available Tools
-## extraction_sandbox_agent
+## `extraction_sandbox_agent`
 ### How to Use
-- You MUST use this tool if you need to extract data from the database.
+- Use to extract data from database strictly following `extraction_sandbox_agent.invoke(prompt)` or in async code `await ainvoke(extraction_sandbox_agent, prompt)`.
 - Prompt is natural language description of data to extract.
 - Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
 - Always include `Output columns` in prompt to specify DataFrame column names.
@@ -93,9 +96,9 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 - Filter: settlement < -10 mm
 - Output columns: [Timestamp, Settlement (mm)]"
 
-## timeseries_plot_sandbox_agent
+## `timeseries_plot_sandbox_agent`
 ### How to Use
-- You MUST use this tool to create time series plots.
+- Use to display change of data with time for one or more series strictly following `timeseries_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(timeseries_plot_sandbox_agent, prompt)` if async).
 - Prompt is natural language description of plot which MUST include:
   * Instrument IDs for each series
   * Database field names for extracting data
@@ -123,9 +126,9 @@ You are an expert in answering queries on instrumentation monitoring data via qu
   * Axis label: Settlement
   * Axis unit: (mm)
 
-## map_plot_sandbox_agent
+## `map_plot_sandbox_agent`
 ### How to Use
-- You MUST use this tool to create spatial distributions of readings or review statuses.
+- Use to display spatial distribution of readings or review status strictly following `map_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(map_plot_sandbox_agent, prompt)` if async).
 - Readings or review status can be plotted as at single time or as change over period.
 - Can plot multiple series with different instrument types, subtypes and database fields.
 - Prompt is natural language description of plot which MUST include:
@@ -175,11 +178,11 @@ You are an expert in answering queries on instrumentation monitoring data via qu
   * Instrument subtype: MOVEMENT
   * Database field name: data1
   * Label: Settlement
-  * Unit: mm
+  * Unit: mm"
 
 ## `review_by_value_agent`
 ### How to Use
-- Use to get review status for a known measurement value with `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
+- Use to get review status for a known measurement value strictly following `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
 - Prompt is natural language description of review status request that MUST include:
   * Instrument ID
   * Database field name
@@ -193,7 +196,7 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `review_by_time_agent`
 ### How to Use
-- Use to get review status of the latest reading before a given timestamp with `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
+- Use to get review status of the latest reading before a given timestamp strictly following `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
 - Prompt is natural language description of review status request that MUST include:
   * Instrument ID
   * Database field name
@@ -207,7 +210,7 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `review_schema_agent`
 ### How to Use
-- Use to get full schema (names, values, direction, color) of active review levels for a specific instrument field with `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
+- Use to get full schema (names, values, direction, color) of active review levels for a specific instrument field strictly following `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
 - Prompt is natural language description of review schema request that MUST include:
   * Instrument ID
   * Database field name
@@ -219,7 +222,7 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels) with `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Use to get instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels) strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
 - Prompt is natural language description of review status enquiry that MUST include:
   * Review level name
   * Instrument type

@@ -270,7 +270,7 @@ def render_initial_ui() -> None:
             ),
         )
         st.session_state.graph = build_graph(
-            llm=st.session_state.llm,
+            llms=st.session_state.llms,
             db=st.session_state.db,
             blob_db=st.session_state.blob_db,
             metadata_db=st.session_state.metadata_db,
@@ -318,11 +318,11 @@ def render_initial_ui() -> None:
                         st.session_state.table_relationship_graph = setup.build_relationship_graph()
                     except Exception:
                         pass
-                    if all(k in st.session_state for k in ["llm", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "agent_type", "num_parallel_executions"]):
+                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "agent_type", "num_parallel_executions"]):
                         try:
                             logger.info("[Project Switch] Rebuilding agent graph (remote_sandbox=%s) for project=%s", st.session_state.sandbox_mode == "Remote", selected_key)
                             st.session_state.graph = build_graph(
-                                llm=st.session_state.llm,
+                                llms=st.session_state.llms,
                                 db=st.session_state.db,
                                 blob_db=st.session_state.blob_db,
                                 metadata_db=st.session_state.metadata_db,
@@ -512,7 +512,7 @@ def render_message_content(message: AIMessage):
                     blob = artefact['blob'].decode('utf-8')
                     desc = artefact['metadata']['description_text']
                     prompt = f"Generate a short, descriptive filename for this CSV based on the description: {desc}. Do not include the .csv extension."
-                    filename_response = st.session_state.llm.invoke(prompt)
+                    filename_response = st.session_state.llms['FAST'].invoke(prompt)
                     filename = filename_response.content.strip() + '.csv'
                     with st.container():
                         st.download_button(

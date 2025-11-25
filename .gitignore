@@ -9,8 +9,13 @@ table_info.py
 test_coder_node.py
 test_graph.py
 test_planner_coder_node.py
+parameters_with_tcn_table.py
+run_coordinate_converter_test.py
 run_extraction_sandbox_test.py
 run_map_plot_sandbox_test.py
+run_map_plot_sandbox_agent.py
+run_review_level_agents_test.py
+run_review_level_tools.py
 run_sandbox_test.py
 run_timeseries_plot_sandbox_test.py
 tools/create_output_toolkit_ananthu.py

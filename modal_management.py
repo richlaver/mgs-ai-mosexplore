@@ -27,7 +27,7 @@ def make_local_sandbox_mode():
     if current_sandbox_mode != "Local":
         st.session_state.sandbox_mode = "Local"
         st.session_state.update({'graph': build_graph(
-            llm=st.session_state.llm,
+            llms=st.session_state.llms,
             db=st.session_state.db,
             blob_db=st.session_state.blob_db,
             metadata_db=st.session_state.metadata_db,

@@ -11,8 +11,8 @@ import uuid
 def setup_session() -> None:
     """Initializes Streamlit session state variables with default values."""
     # Initialize core components
-    if "llm" not in st.session_state:
-        st.session_state.llm = False
+    if "llms" not in st.session_state:
+        st.session_state.llms = {}
     if "db" not in st.session_state:
         st.session_state.db = False
     if "metadata_db" not in st.session_state:

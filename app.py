@@ -31,7 +31,7 @@ def perform_setup():
     setup.set_metadata_db_env()
     setup.set_db_env()
     
-    st.session_state.llm = setup.get_llm()
+    st.session_state.llms = setup.get_llms()
     st.session_state.metadata_db = setup.get_metadata_db()
     st.session_state.blob_db = setup.get_blob_db()
     st.session_state.table_relationship_graph = setup.build_relationship_graph()
@@ -41,7 +41,7 @@ def perform_setup():
 
     import graph
     st.session_state.graph = graph.build_graph(
-        llm=st.session_state.llm,
+        llms=st.session_state.llms,
         db=st.session_state.db,
         blob_db=st.session_state.blob_db,
         metadata_db=st.session_state.metadata_db,

@@ -78,25 +78,25 @@ def _should_retry(result: Any) -> bool:
 
 
 def _parse_consistency_result(raw: str) -> Dict[str, Any]:
-        """Parse the LLM consistency checker output.
-        Implements robust parsing rules:
-            - Trim whitespace.
-            - If any line (case-sensitive) startswith 'ERROR:' treat as error and
-                use the FIRST such line as the canonical message.
-            - Else if the first non-empty line equals exactly 'OK' treat as success.
-            - Otherwise treat the whole output as an error (unexpected format) so the agent will regenerate, prefixing with 'ERROR:' for consistency.
-        Returns dict: {'is_error': bool, 'message': str}
-        """
-        lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-        if not lines:
-                return {"is_error": True, "message": "ERROR: empty consistency output"}
-        for l in lines:
-                if l.startswith("ERROR:"):
-                        return {"is_error": True, "message": l}
-        first = lines[0]
-        if first == "OK":
-                return {"is_error": False, "message": "OK"}
-        return {"is_error": True, "message": f"ERROR: unexpected consistency format -> {first}"}
+    """Parse the LLM consistency checker output.
+    Implements robust parsing rules:
+        - Trim whitespace.
+        - If any line (case-sensitive) startswith 'ERROR:' treat as error and
+            use the FIRST such line as the canonical message.
+    - Else if the first or last non-empty line equals exactly 'OK' treat as success.
+        - Otherwise treat the whole output as an error (unexpected format) so the agent will regenerate, prefixing with 'ERROR:' for consistency.
+    Returns dict: {'is_error': bool, 'message': str}
+    """
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return {"is_error": True, "message": "ERROR: empty consistency output"}
+    for l in lines:
+        if l.startswith("ERROR:"):
+            return {"is_error": True, "message": l}
+    first = lines[0]
+    if first == "OK" or lines[-1] == "OK":
+        return {"is_error": False, "message": "OK"}
+    return {"is_error": True, "message": f"ERROR: unexpected consistency format -> {first}"}
 
 
 def _build_generation_prompt(
@@ -164,9 +164,10 @@ def _build_consistency_check_prompt(
         prompt (instrument IDs, review level names, field names, numeric values, timestamps, types).
 
         Output rules:
-            - If ALL facts are consistent: output exactly 'OK'.
+            - If ALL facts are consistent: output only 'OK'.
             - If ANY mismatch or ambiguity that would change meaning: output a single line starting
                 with 'ERROR:' followed by a clear explanation of each discrepancy (do not propose fixes).
+            - Do not output anything else including your thought process.
             - No markdown, no JSON, no additional prose beyond one line.
         """
         optional_fields = optional_fields or []

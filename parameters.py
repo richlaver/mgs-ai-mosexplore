@@ -1,11 +1,12 @@
 from langchain_core.messages import AIMessage
-missionos_context = [
+platform_context = [
     {
         'name': 'review_levels',
         'query_keywords': [
             'review', 'exceedance', 'threshold', 'level', 'status', 'breach', 'exceed', 'trigger', 'AAA', 'alert', 'action', 'alarm', 'limit'
         ],
         'context': """
+# Review Levels
 Readings are compared with thresholds called **review levels** to indicate unexpected or unsafe behaviour.
 Other names for *review* include **AAA** (abbreviation of Alert, Action, Alarm) and **trigger**.
 Other names for *level* include **threshold**.
@@ -44,10 +45,10 @@ project_specific_context = [
             'project_data.hanoi_live'
         ],
         'context': """
-Review levels for any `calculation` database field will be stored in the corresponding `data` field.
-Thus review levels for `calculationN` are stored in `dataN`.
-Database field values will still be stored in the `calculation` field.
-For example, to check the review status for `calculation3`, retrieve review levels for `data3` and compare with values from `calculation3`.
+**IMPORTANT**:
+You MUST ensure that whenever you call review level tools or extract review levels ALWAYS specify a `data` field in the tool prompt.
+If you want to check review levels for a `calculation` field, you MUST convert it to the corresponding `data` field first.
+For example, if you want to check review levels for `calculation2`, you MUST specify `data2` in the tool prompt instead.
 """
     }
 ]

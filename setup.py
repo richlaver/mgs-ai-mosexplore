@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import modal
 import logging
 from utils.project_selection import (
@@ -195,18 +195,18 @@ def set_google_credentials() -> None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
 
 
-def get_llm() -> ChatVertexAI:
-    """Initialize the Grok 3 Beta language model.
+def get_llms() -> Dict[str, ChatVertexAI]:
+    """Initialize the Gemini language models.
 
     Returns:
-        A ChatOpenAI instance configured with xAI API.
+        A dictionary of ChatVertexAI instances configured with Google Vertex API.
     """
-    st.toast("Setting up the Gemini 2.0 Flash LLM...", icon=":material/build:")
-    return ChatVertexAI(
-        model="gemini-2.0-flash-001",
-        temperature = 0.1
-        # model="gemini-2.5-pro-preview-05-06"        
-    )
+    st.toast("Setting up Gemini LLMs...", icon=":material/build:")
+    return {
+        "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1),
+        "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1),
+        "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1),
+    }
 
 
 def get_db() -> SQLDatabase:

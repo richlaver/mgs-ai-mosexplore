@@ -69,7 +69,7 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
     Task:
     1. Consider 3 to 5 possible SQL queries to achieve the desired outcome.
-    2. If the prompt requires extraction from a JSON string, use IS NOT NULL and JSON_VALID to filter non-JSON and finally JSON_EXTRACT.
+    2. If the prompt requires extraction from a JSON string, ALWAYS use CASE WHEN JSON_VALID(column) THEN JSON_EXTRACT(column, '$.path') ELSE NULL END to avoid errors with empty strings or invalid JSON.
     3. If the prompt requests time series data, extract with timestamp as first column.
     4. Evaluate each for:
        - Correctness: Does it accurately retrieve the requested data?
