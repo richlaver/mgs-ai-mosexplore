@@ -113,9 +113,13 @@ class SandboxExecutor:
         self.blob_db = b2_api.get_bucket_by_name(os.environ["ARTEFACT_BLOB_B2_BUCKET"])
         logger.info("Authorized and got B2 bucket: %s", os.environ["ARTEFACT_BLOB_B2_BUCKET"])
 
-        # Initialize LLM
-        self.llm = ChatVertexAI(model="gemini-2.0-flash-001", temperature=0.1)
-        logger.info("Initialized ChatVertexAI model=%s", "gemini-2.0-flash-001")
+        # Initialize LLMs
+        self.llms = {
+            "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1),
+            "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1),
+            "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1),
+        }
+        logger.info("Initialized ChatVertexAI models: FAST, BALANCED, THINKING")
 
         self.project_configs: Dict[str, Dict] = {}
         pdj = os.environ.get("PROJECT_DATA_JSON")
@@ -224,7 +228,7 @@ class SandboxExecutor:
             db = _get_db_for_project(selected_project_key)
             # Initialize tools
             extraction_tool = extraction_sandbox_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 db=db,
                 table_info=table_info,
                 table_relationship_graph=table_relationship_graph,
@@ -243,42 +247,42 @@ class SandboxExecutor:
             write_artefact_tool = WriteArtefactTool(blob_db=self.blob_db, metadata_db=self.metadata_db)
 
             timeseries_plot_sandbox_tool = timeseries_plot_sandbox_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 sql_tool=general_sql_query_tool,
                 write_artefact_tool=write_artefact_tool,
                 thread_id=thread_id,
                 user_id=user_id
             )
             map_plot_sandbox_tool = map_plot_sandbox_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 sql_tool=general_sql_query_tool,
                 write_artefact_tool=write_artefact_tool,
                 thread_id=thread_id,
                 user_id=user_id
             )
             review_by_value_tool = review_by_value_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 db=db,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
                 global_hierarchy_access=global_hierarchy_access
             )
             review_by_time_tool = review_by_time_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 db=db,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
                 global_hierarchy_access=global_hierarchy_access
             )
             review_schema_tool = review_schema_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 db=db,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
                 global_hierarchy_access=global_hierarchy_access
             )
             breach_instr_tool = breach_instr_agent(
-                llm=self.llm,
+                llm=self.llms['BALANCED'],
                 db=db,
                 table_relationship_graph=table_relationship_graph,
                 user_id=user_id,
@@ -312,7 +316,7 @@ class SandboxExecutor:
                 "review_by_time_agent": review_by_time_tool,
                 "review_schema_agent": review_schema_tool,
                 "breach_instr_agent": breach_instr_tool,
-                "llm": self.llm,
+                "llm": self.llms['BALANCED'],
                 "db": db,
                 "datetime": __import__("datetime"),
                 "ainvoke": ainvoke,

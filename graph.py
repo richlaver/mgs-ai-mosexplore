@@ -63,7 +63,7 @@ def build_graph(
     st.toast("Building graph...", icon=":material/account_tree:")
 
     extraction_tool = extraction_sandbox_agent(
-        llm=llms['THINKING'],
+        llm=llms['BALANCED'],
         db=db,
         table_info=table_info,
         table_relationship_graph=table_relationship_graph,
@@ -78,14 +78,14 @@ def build_graph(
     )
     _write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
     timeseries_plot_tool = timeseries_plot_sandbox_agent(
-        llm=llms['THINKING'],
+        llm=llms['BALANCED'],
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
     )
     map_plot_tool = map_plot_sandbox_agent(
-        llm=llms['THINKING'],
+        llm=llms['BALANCED'],
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
