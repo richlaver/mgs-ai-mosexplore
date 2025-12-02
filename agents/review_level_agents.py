@@ -21,6 +21,7 @@ import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, Union
+from itertools import product
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -43,6 +44,18 @@ from tools.sql_security_toolkit import GeneralSQLQueryTool
 
 logger = logging.getLogger(__name__)
 
+_JSON_STRIP_RE = re.compile(r"^```json\n|```$", re.IGNORECASE)
+
+def _clean_json_blocks(text: str) -> str:
+    """Remove markdown fences if present."""
+    return _JSON_STRIP_RE.sub("", text).strip()
+
+def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
 class _GenericReviewAgentState(TypedDict, total=False):
     prompt: str
     attempt_count: int
@@ -53,19 +66,60 @@ class _GenericReviewAgentState(TypedDict, total=False):
     tool_result: Any
     next_path: Optional[str]
 
-_JSON_STRIP_RE = re.compile(r"^```json\n|```$", re.IGNORECASE)
+    
+def _listify_str(val: Any) -> List[str]:
+    """Normalize a value into a list of strings.
+
+    Accepts a single string (comma-separated or single), a list of strings (each may be comma-separated),
+    or other scalars. Deduplicates while preserving order. Empty/None yields [].
+    """
+    if val is None:
+        return []
+    if isinstance(val, list):
+        out: List[str] = []
+        for v in val:
+            if isinstance(v, str) and "," in v:
+                out.extend([s for s in (x.strip() for x in v.split(",")) if s])
+            else:
+                s = str(v).strip()
+                if s:
+                    out.append(s)
+        seen = set()
+        dedup: List[str] = []
+        for s in out:
+            if s not in seen:
+                seen.add(s)
+                dedup.append(s)
+        return dedup
+    if isinstance(val, str):
+        parts = [s for s in (x.strip() for x in val.split(",")) if s]
+        return parts or ([val.strip()] if val.strip() else [])
+    s = str(val).strip()
+    return [s] if s else []
 
 
-def _clean_json_blocks(text: str) -> str:
-    """Remove markdown fences if present."""
-    return _JSON_STRIP_RE.sub("", text).strip()
+def _listify_float(val: Any) -> List[float]:
+    """Normalize a value into a list of floats.
 
-
-def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
-    try:
-        return json.loads(s)
-    except Exception:
-        return None
+    Accepts a single number/string (optionally comma-separated) or a list of such values.
+    """
+    if val is None:
+        return []
+    def to_float(x: Any) -> float:
+        if isinstance(x, (int, float)):
+            return float(x)
+        return float(str(x).strip())
+    if isinstance(val, list):
+        out: List[float] = []
+        for v in val:
+            if isinstance(v, str) and "," in v:
+                out.extend([to_float(x) for x in (s for s in (y.strip() for y in v.split(",")) if s)])
+            else:
+                out.append(to_float(v))
+        return out
+    if isinstance(val, str) and "," in val:
+        return [to_float(s) for s in (x.strip() for x in val.split(",")) if s]
+    return [to_float(val)]
 
 
 def _should_retry(result: Any) -> bool:
@@ -221,11 +275,11 @@ class ReviewByValueAgentInput(BaseModel):
     prompt: str = Field(
         ..., 
         description=(
-            "Natural language prompt to determine the review status (most severe breached review level) of a specified reading value recorded in a specified database field at a specified instrument. Prompt must include:\n"
-            "- Instrument ID (instrum.instr_id), e.g. 'INST001'.\n"
-            "- Database field name exactly as stored (e.g. 'data1', 'data5', 'calculation2').\n"
-            "- The numeric value to test (e.g. 12.7).\n"
-            "Example: 'For instrument INST045 check if the value 12.7 on data3 breaches any review levels.'"
+            "Natural language prompt to determine one or more review statuses (most severe breached review level) of one or more specified reading values recorded in a specified database field at a specified instrument. Prompt must include:\n"
+            "- Instrument IDs (instrum.instr_id), e.g. 'INST001'.\n"
+            "- Database field names exactly as stored (e.g. 'data1', 'data5', 'calculation2').\n"
+            "- The numeric values to test (e.g. 12.7).\n"
+            "Example: 'For instrument INST045 check if the value 12.7 on data3 breaches any review levels. Also check for breaches for instrument INST078 with value 5.3 on calculation1.'\n"
         )
     )
 
@@ -271,7 +325,30 @@ class BaseGenericReviewAgentTool(BaseTool):
             previous_errors = state.get("previous_errors", [])
             try:
                 tool_inputs = _invoke_llm(generate_chain, state["prompt"], previous_errors, state.get("previous_failed_inputs", []))
+                try:
+                    logger.info("LLM-generated inputs (pre post_process): %s", json.dumps(tool_inputs, ensure_ascii=False))
+                except Exception:
+                    logger.info("LLM-generated inputs (pre post_process) [non-JSON-serializable]: %s", str(tool_inputs))
+
+                _pre_pp_inputs = dict(tool_inputs) if isinstance(tool_inputs, dict) else tool_inputs
+
                 tool_inputs = self.post_process_inputs(tool_inputs)
+
+                try:
+                    logger.info("Inputs after post_process: %s", json.dumps(tool_inputs, ensure_ascii=False))
+                except Exception:
+                    logger.info("Inputs after post_process [non-JSON-serializable]: %s", str(tool_inputs))
+
+                try:
+                    if isinstance(_pre_pp_inputs, dict) and isinstance(tool_inputs, dict) and _pre_pp_inputs != tool_inputs:
+                        before_keys = set(_pre_pp_inputs.keys())
+                        after_keys = set(tool_inputs.keys())
+                        added = sorted(list(after_keys - before_keys))
+                        removed = sorted(list(before_keys - after_keys))
+                        changed = sorted([k for k in (before_keys & after_keys) if _pre_pp_inputs.get(k) != tool_inputs.get(k)])
+                        logger.info("post_process_inputs changes -> added: %s, removed: %s, changed: %s", added, removed, changed)
+                except Exception:
+                    pass
                 messages.append(AIMessage(name=agent_label, content=f"Generated inputs: {tool_inputs}", additional_kwargs={"stage": "intermediate", "process": "observation"}))
                 return {"tool_inputs": tool_inputs, "messages": messages}
             except Exception as e:
@@ -283,9 +360,28 @@ class BaseGenericReviewAgentTool(BaseTool):
             messages = state.get("messages", [])
             tool_inputs = state.get("tool_inputs", {})
             messages.append(AIMessage(name=agent_label, content="Checking for missing required fields...", additional_kwargs={"stage": "intermediate", "process": "action"}))
-            missing = [f for f in self.required_fields if f not in tool_inputs]
+            if isinstance(tool_inputs.get("items"), list) and tool_inputs["items"]:
+                items = tool_inputs["items"]
+                per_item_required = list(self.required_fields)
+                if "timestamp" in per_item_required and "timestamp" in tool_inputs:
+                    per_item_required.remove("timestamp")
+                missing_details = []
+                for idx, it in enumerate(items):
+                    missing_keys = [f for f in per_item_required if f not in it]
+                    if missing_keys:
+                        missing_details.append(f"item[{idx}] missing: {', '.join(missing_keys)}")
+                if missing_details:
+                    missing = missing_details
+                else:
+                    root_missing = [f for f in self.required_fields if f not in per_item_required and f not in tool_inputs]
+                    missing = root_missing
+            else:
+                missing = [f for f in self.required_fields if f not in tool_inputs]
             if missing:
-                err = f"ERROR: missing required fields in generated inputs: {', '.join(missing)}"
+                err = (
+                    "ERROR: missing required fields in generated inputs: "
+                    + (", ".join(missing) if isinstance(missing, list) else str(missing))
+                )
                 previous_errors = state.get("previous_errors", [])
                 previous_failed_inputs = state.get("previous_failed_inputs", [])
                 previous_errors.append(err)
@@ -398,14 +494,14 @@ class BaseGenericReviewAgentTool(BaseTool):
 class ReviewByValueAgentTool(BaseGenericReviewAgentTool):
     name: str = "review_by_value_agent"
     description: str = (
-        "Determines the review status (most severe breached review level) of a specified reading value recorded in a specified database field at a specified instrument described in a natural language prompt.\n"
+        "Determines the review status (most severe breached review level) of one or more specified reading values recorded in one or more specified database fields at one or more specified instruments described in a natural language prompt.\n"
         "Use when you already know a measurement value and need to know which review level it breaches.\n"
         "Prompt must include:\n"
         "- Instrument ID (instrum.instr_id), e.g. 'INST001'.\n"
         "- Database field name exactly as stored (e.g. 'data1', 'data5', 'calculation2').\n"
         "- The numeric value to test (e.g. 12.7).\n"
         "Example: 'For instrument INST045 check if the value 12.7 on data3 breaches any review levels.'\n"
-        "Returns: breached review level name (str) or None if no breach or ERROR: message."
+        "Returns: pandas DataFrame with columns (instrument_id, db_field_name, db_field_value, review_name) or None or ERROR: message."
     )
     args_schema: Type[BaseModel] = ReviewByValueAgentInput
     underlying_tool_cls: ClassVar[Type[Any]] = GetReviewStatusByValueTool
@@ -415,10 +511,42 @@ class ReviewByValueAgentTool(BaseGenericReviewAgentTool):
         "Extract the instrument ID, database field name (e.g., data1, calculation1) and numeric field value. If numeric value includes units, strip units."
     )
     param_map: ClassVar[Dict[str, str]] = {
-        "instrument_id": "instrument_id",
-        "db_field_name": "db_field_name",
-        "db_field_value": "db_field_value",
+        "items": "items",
     }
+
+    def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        items = tool_inputs.get("items")
+        if isinstance(items, list) and items:
+            return tool_inputs
+
+        insts = _listify_str(tool_inputs.get("instrument_ids", tool_inputs.get("instrument_id")))
+        fields = _listify_str(tool_inputs.get("db_field_names", tool_inputs.get("db_field_name")))
+        vals = _listify_float(tool_inputs.get("db_field_values", tool_inputs.get("db_field_value")))
+
+        if not insts or not fields or not vals:
+            return tool_inputs
+
+        built: List[Dict[str, Any]] = []
+        if len(vals) == 1:
+            v = vals[0]
+            for i, f in product(insts, fields):
+                built.append({"instrument_id": i, "db_field_name": f, "db_field_value": v})
+        elif len(vals) == len(insts) and len(fields) == 1:
+            f = fields[0]
+            for i, v in zip(insts, vals):
+                built.append({"instrument_id": i, "db_field_name": f, "db_field_value": v})
+        elif len(vals) == len(fields) and len(insts) == 1:
+            i = insts[0]
+            for f, v in zip(fields, vals):
+                built.append({"instrument_id": i, "db_field_name": f, "db_field_value": v})
+        else:
+            return tool_inputs
+
+        out = dict(tool_inputs)
+        out["items"] = built
+        for k in ("instrument_ids", "instrument_id", "db_field_names", "db_field_name", "db_field_values", "db_field_value"):
+            out.pop(k, None)
+        return out
 
     def _run(self, prompt: str) -> Union[str, None]:
         return self._run_generic(prompt, agent_label="ReviewByValueAgent")
@@ -448,10 +576,10 @@ class ReviewByTimeAgentInput(BaseModel):
 class ReviewByTimeAgentTool(BaseGenericReviewAgentTool):
     name: str = "review_by_time_agent"
     description: str = (
-        "Determines the review status of the latest reading before a given timestamp.\n"
+        "Determines the review status (most severe breached review level) of the most recent reading taken before a specified timestamp recorded in one or more specified database fields at one or more specified instruments described in a natural language prompt.\n"
         "Use to get the historical or current breach status at a specific time.\n"
         "Prompt MUST contain: instrument ID, database field name, target timestamp (ISO8601 or clearly parseable).\n"
-        "Returns: DataFrame with columns (review_status, db_field_value, db_field_value_timestamp) or None or ERROR: message."
+        "Returns: DataFrame with columns (instrument_id, db_field_name, review_name, db_field_value, db_field_value_timestamp) or None or ERROR: message."
     )
     args_schema: Type[BaseModel] = ReviewByTimeAgentInput
     underlying_tool_cls: ClassVar[Type[Any]] = GetReviewStatusByTimeTool
@@ -461,10 +589,26 @@ class ReviewByTimeAgentTool(BaseGenericReviewAgentTool):
         "Extract instrument_id, db_field_name, and timestamp (ISO8601). If user supplies natural language time range ending at a time, choose the end timestamp."
     )
     param_map: ClassVar[Dict[str, str]] = {
-        "instrument_id": "instrument_id",
-        "db_field_name": "db_field_name",
+        "items": "items",
         "timestamp": "timestamp",
     }
+
+    def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(tool_inputs.get("items"), list) and tool_inputs["items"]:
+            out_existing = dict(tool_inputs)
+            for k in ("instrument_ids", "instrument_id", "db_field_names", "db_field_name"):
+                out_existing.pop(k, None)
+            return out_existing
+        insts = _listify_str(tool_inputs.get("instrument_ids", tool_inputs.get("instrument_id")))
+        fields = _listify_str(tool_inputs.get("db_field_names", tool_inputs.get("db_field_name")))
+        if not insts or not fields:
+            return tool_inputs
+        built = [{"instrument_id": i, "db_field_name": f} for i, f in product(insts, fields)]
+        out = dict(tool_inputs)
+        out["items"] = built
+        for k in ("instrument_ids", "instrument_id", "db_field_names", "db_field_name"):
+            out.pop(k, None)
+        return out
 
     def _run(self, prompt: str) -> Union[pd.DataFrame, None, str]:
         return self._run_generic(prompt, agent_label="ReviewByTimeAgent")
@@ -505,9 +649,25 @@ class ReviewSchemaAgentTool(BaseGenericReviewAgentTool):
     optional_fields: ClassVar[List[str]] = []
     instructions: ClassVar[str] = "Extract the instrument_id and db_field_name whose review schema is requested."
     param_map: ClassVar[Dict[str, str]] = {
-        "instrument_id": "instrument_id",
-        "db_field_name": "db_field_name",
+        "items": "items",
     }
+
+    def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(tool_inputs.get("items"), list) and tool_inputs["items"]:
+            out_existing = dict(tool_inputs)
+            for k in ("instrument_ids", "instrument_id", "db_field_names", "db_field_name"):
+                out_existing.pop(k, None)
+            return out_existing
+        insts = _listify_str(tool_inputs.get("instrument_ids", tool_inputs.get("instrument_id")))
+        fields = _listify_str(tool_inputs.get("db_field_names", tool_inputs.get("db_field_name")))
+        if not insts or not fields:
+            return tool_inputs
+        built = [{"instrument_id": i, "db_field_name": f} for i, f in product(insts, fields)]
+        out = dict(tool_inputs)
+        out["items"] = built
+        for k in ("instrument_ids", "instrument_id", "db_field_names", "db_field_name"):
+            out.pop(k, None)
+        return out
 
     def _run(self, prompt: str) -> Union[pd.DataFrame, None, str]:
         return self._run_generic(prompt, agent_label="ReviewSchemaAgent")

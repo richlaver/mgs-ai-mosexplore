@@ -152,7 +152,7 @@ def build_graph(
         }
         logger.info(f'Starting context in context_orchestrator_node with context: {state.context}')
 
-        sub_graph = get_context_graph(llms['BALANCED'], db, selected_project_key)
+        sub_graph = get_context_graph(llms, db, selected_project_key)
         accumulated_context = base_context_dict
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
             logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')
@@ -257,7 +257,8 @@ def build_graph(
 
             if ex.agent_type == "CodeAct":
                 coder_result = codeact_coder_agent(
-                    llm=llms['THINKING'],
+                    generating_llm=llms['THINKING'],
+                    checking_llm=llms['BALANCED'],
                     tools=[
                         extraction_tool,
                         timeseries_plot_tool,
@@ -280,15 +281,27 @@ def build_graph(
                 logs: List[str] = []
                 if code:
                     try:
-                        gen = (execute_remote_sandbox if remote_sandbox else execute_local_sandbox)(
-                            code=code,
-                            table_info=table_info,
-                            table_relationship_graph=table_relationship_graph,
-                            thread_id=thread_id,
-                            user_id=user_id,
-                            global_hierarchy_access=global_hierarchy_access,
-                            selected_project_key=selected_project_key,
-                        )
+                        if remote_sandbox:
+                            gen = execute_remote_sandbox(
+                                code=code,
+                                table_info=table_info,
+                                table_relationship_graph=table_relationship_graph,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                global_hierarchy_access=global_hierarchy_access,
+                                selected_project_key=selected_project_key,
+                                container_slot=branch_id,
+                            )
+                        else:
+                            gen = execute_local_sandbox(
+                                code=code,
+                                table_info=table_info,
+                                table_relationship_graph=table_relationship_graph,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                global_hierarchy_access=global_hierarchy_access,
+                                selected_project_key=selected_project_key,
+                            )
                         for out in gen:
                             if not isinstance(out, dict) or "metadata" not in out:
                                 logs.append(f"Invalid output: {out}")

@@ -140,24 +140,27 @@ def warm_up_container():
     if st.session_state.get("container_warm"):
         logger.info("Skipping warm_up_container: container already warm")
         return
-    with st.spinner("Warming up container..."):
+    with st.spinner("Warming up containers..."):
         try:
-            for output in modal_sandbox_remote.execute_remote_sandbox(
-                code=MOCK_CODE,
-                table_info=MOCK_TABLE_INFO,
-                table_relationship_graph=MOCK_TABLE_REL_GRAPH,
-                thread_id=MOCK_THREAD_ID,
-                user_id=MOCK_USER_ID,
-                global_hierarchy_access=MOCK_GLOBAL_ACCESS,
-                selected_project_key=st.session_state.get("selected_project_key"),
-            ):
-                logger.info(f"Container output from warm_up_container: {output}")
-                if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
-                    st.error("Cannot warm container: App not deployed.")
-                    st.session_state.container_warm = False
-                    return
+            target = int(st.session_state.get("num_parallel_executions", 1) or 1)
+            for slot in range(target):
+                for output in modal_sandbox_remote.execute_remote_sandbox(
+                    code=MOCK_CODE,
+                    table_info=MOCK_TABLE_INFO,
+                    table_relationship_graph=MOCK_TABLE_REL_GRAPH,
+                    thread_id=MOCK_THREAD_ID,
+                    user_id=MOCK_USER_ID,
+                    global_hierarchy_access=MOCK_GLOBAL_ACCESS,
+                    selected_project_key=st.session_state.get("selected_project_key"),
+                    container_slot=slot,
+                ):
+                    logger.info(f"Container[{slot}] output from warm_up_container: {output}")
+                    if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
+                        st.error("Cannot warm container: App not deployed.")
+                        st.session_state.container_warm = False
+                        return
             st.session_state.container_warm = True
-            st.toast("Container warmed successfully.", icon=":material/mode_heat:")
+            st.toast(f"{target} container(s) warmed successfully.", icon=":material/mode_heat:")
         except Exception as e:
             st.session_state.container_warm = False
             st.toast(f"Warm-up failed: {str(e)}", icon=":material/error:")

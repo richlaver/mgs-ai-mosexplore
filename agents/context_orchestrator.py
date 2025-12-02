@@ -1,3 +1,4 @@
+from typing import Dict
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.tools import tool
@@ -46,7 +47,7 @@ transfer_to_project_insider = create_handoff_tool(
     description="Transfer to project insider for retrieving ad-hoc insights specific to the project."
 )
 
-def get_context_graph(llm: BaseLanguageModel, db: any, selected_project_key: str | None) -> any:
+def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_project_key: str | None) -> any:
     tools = [
         transfer_to_instrument_validator,
         transfer_to_database_expert,
@@ -127,7 +128,7 @@ Current status:
             HumanMessage(content=user_input),
         ]
 
-        llm_with_tools = llm.bind_tools(tools)
+        llm_with_tools = llms['BALANCED'].bind_tools(tools)
         try:
             response = llm_with_tools.invoke(messages)
         except Exception:
@@ -169,9 +170,9 @@ Current status:
 
     graph = StateGraph(ContextState)
     graph.add_node("supervisor", supervisor_node)
-    graph.add_node("instrument_validator", lambda state: instrument_validator(state, llm, db))
-    graph.add_node("database_expert", lambda state: database_expert(state, llm, db))
-    graph.add_node("period_expert", lambda state: period_expert(state, llm, db))
+    graph.add_node("instrument_validator", lambda state: instrument_validator(state, llms['FAST'], db))
+    graph.add_node("database_expert", lambda state: database_expert(state, llms['FAST'], db))
+    graph.add_node("period_expert", lambda state: period_expert(state, llms['FAST'], db))
     graph.add_node("project_insider", lambda state: project_insider(state, selected_project_key))
     graph.add_node("platform_expert", platform_expert)
     graph.add_edge(START, "supervisor")

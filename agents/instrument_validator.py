@@ -14,54 +14,37 @@ logger = logging.getLogger(__name__)
 def extract_instruments_with_llm(llm: BaseLanguageModel, query: str) -> dict:
     try:
         analysis_prompt = f"""
-You are an expert in identifying technical instrument IDs from natural language queries about monitoring equipment, sensors, and measurement devices.
+# Role
+You are an expert geotechnical instrumentation engineer with rich experience working on a wide variety of construction sites. You are adept at differentiating words which are instrument names from those which are not.
 
-Analyze this query: "{query}"
+# Task
+Identify instrument names in a query requesting construction site instrumentation data from a database.
 
-Your task is to:
-1. Determine if this query is asking about technical instruments/sensors/monitoring equipment
-2. Identify any proper nouns or technical identifiers that could be instrument IDs
-3. Pay special attention to compound queries with "and", "or", "&" etc. where multiple instruments are mentioned
-4. Provide confidence scores and reasoning
+# Tips on Identifying Instrument Names
+- They are always proper nouns
+- Likely to have a concise or abbreviated prefix identifying the instrument type
+- Likely to be suffixed by some alphanumeric characters to differentiate between instruments of the same type
+- May contain concise or abbreviated alphanumeric characters differentiating other metadata of the instrument e.g. zone, contract
+- Can contain hyphens or slashes
 
-IMPORTANT: Handle compound queries intelligently:
-- If a query mentions multiple instruments in list format (e.g., "A, B, and C"), all items are likely instruments
-- Numbers, letters, or short codes in instrument context should be considered potential IDs
+# Steps
+1. Analyse this query: {query}
+2. Identify any words which could be proper nouns
+3. For each word, assess the probability that it is an instrument name based on your own experience and above tips
 
-Examples of compound instrument queries:
-- "settlement at 0003-L-1 and 10" → both "0003-L-1" and "10" are instruments
-- "reading from PZ001 and S5" → both "PZ001" and "S5" are instruments
-- "status of A, B, and C" → all three are likely instruments
-
-Consider these characteristics of instrument IDs:
-- They are often proper nouns or technical identifiers
-- They may contain alphanumeric combinations (PZ001, ABC-123, Sn, Dn) 
-- They can be simple numbers/letters when in instrument context (10, A, B1)
-- They appear in contexts related to measurements, readings, monitoring
-- They are typically the object of prepositions like "on", "of", "from"
-- They are NOT common English words like "reading", "settlement", "latest"
-
-Chain-of-thought:
-1. What is the context of the query
-2. Are multiple instruments mentioned? If no, skip to step 5.
-3. How are conjunctions used to connect instruments?
-4. Analyse query semantically and summarise
-5. List instrument candidates: where, how confident, why, relationship between
-
-Please respond in this exact JSON format:
+# Output
+Respond in this exact JSON format:
 {{
-    "instrument_candidates": [
+    "instrument_names": [
         {{
-            "text": "identified text",
-            "confidence": 0.0-1.0,
-            "reasoning": "why you think this is/isn't an instrument ID",
-            "context_type": "measurement/monitoring/settlement/status/etc",
-            "compound_context": "how this relates to other instruments in the query"
+            "text": "identified name",
+            "probability": 0.0-1.0
         }}
     ]
 }}
-"""
+        """
         response = llm.invoke(analysis_prompt)
+        logger.info(f"instrument validator LLM response: {response}")
         response_text = response.content if hasattr(response, 'content') else str(response)
         try:
             analysis_result = json.loads(response_text)
@@ -71,10 +54,10 @@ Please respond in this exact JSON format:
                 analysis_result = json.loads(json_match.group(1))
             else:
                 raise ValueError("Could not parse LLM response as JSON")
-        candidates = analysis_result.get("instrument_candidates", [])
-        final_instruments = [candidate for candidate in candidates if candidate.get("confidence", 0.0) > 0.3]
+        candidates = analysis_result.get("instrument_names", [])
+        final_instruments = [candidate for candidate in candidates if candidate.get("probability", 0.0) > 0.3]
         return {
-            "instruments": sorted(final_instruments, key=lambda x: x["confidence"], reverse=True),
+            "instruments": sorted(final_instruments, key=lambda x: x["probability"], reverse=True),
             "error": None
         }
     except Exception as e:
@@ -163,7 +146,7 @@ def instrument_validator(state: ContextState, llm: BaseLanguageModel, db: any) -
 
     result = extract_instruments_with_llm(llm, retro_query)
     instruments = result.get("instruments", [])
-    ids = [inst["text"] for inst in instruments if inst["confidence"] > 0.7]
+    ids = [inst["text"] for inst in instruments if inst["probability"] > 0.7]
     ids = [id_ for id_ in ids if id_ not in ignore_IDs]
     valid_instruments = validate_instruments_in_database(db, ids)
     unverif_IDs = [id_ for id_ in ids if id_ not in valid_instruments]

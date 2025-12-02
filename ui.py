@@ -16,10 +16,72 @@ from utils.project_selection import (
     get_selected_project_key,
 )
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
-from modal_management import deploy_app, stop_app, is_app_deployed
+from modal_management import deploy_app, stop_app, is_app_deployed, warm_up_container
 from utils.chat_history import filter_messages_only_final
 
 logger = logging.getLogger(__name__)
+
+def is_code_like(text: str) -> bool:
+    """Heuristically determine if a text chunk looks like code.
+
+    Rules:
+    - Explicit fenced start (``` or ```python) counts as code.
+    - Prefer syntax signals over generic English keywords to avoid false positives.
+    - Use multiple signals to classify ambiguous cases.
+    """
+
+    if not text:
+        return False
+    t = text.lstrip()
+    if t.startswith("```"):
+        return True
+
+    lines = [ln.rstrip() for ln in t.splitlines() if ln.strip()]
+    if not lines:
+        return False
+
+    strong_signals = [
+        re.compile(r"^\s*(def|class)\s+\w+\s*\(?.*\):"),     # def foo(...): or class Bar:
+        re.compile(r"^\s*import\s+[A-Za-z0-9_., ]+"),           # import x, y
+        re.compile(r"^\s*from\s+[A-Za-z0-9_\.]+\s+import\s+"),# from x.y import z
+        re.compile(r"^\s*(try|except|with|for|while|if|elif|else)\b.*:\s*$"), # block starters ending with ':'
+        re.compile(r"^\s*@[A-Za-z_][A-Za-z0-9_]*\b"),           # decorators
+        re.compile(r"^\s*#[^\n]*$"),                            # comment line
+    ]
+
+    weak_signals = [
+        re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$"),   # assignment
+        re.compile(r"\breturn\b|\byield\b|\blambda\b"),      # less common in prose
+        re.compile(r"\basync\b|\bawait\b"),                    # async/await
+        re.compile(r"\bprint\s*\("),                           # print(
+        re.compile(r"[(){}\[\]]"),                              # brackets presence
+    ]
+
+    strong_hits = 0
+    weak_hits = 0
+    structural_hits = 0
+
+    for ln in lines[:6]:
+        for rx in strong_signals:
+            if rx.search(ln):
+                strong_hits += 1
+                break
+        for rx in weak_signals:
+            if rx.search(ln):
+                weak_hits += 1
+        # structural cues: indentation, line ending with ':', or punctuation density typical in code
+        if ln.startswith(" ") or ln.startswith("\t"):
+            structural_hits += 1
+        if ln.endswith(":"):
+            structural_hits += 1
+        if sum(ln.count(ch) for ch in ",.;:(){}[]") >= 3:
+            structural_hits += 1
+
+    if strong_hits >= 1:
+        return True
+    if weak_hits >= 2 and structural_hits >= 1:
+        return True
+    return False
 
 @st.dialog("Login")
 def login_modal():
@@ -285,6 +347,11 @@ def render_initial_ui() -> None:
             agent_type=st.session_state.agent_type,
             selected_project_key=st.session_state.get("selected_project_key"),
         )
+        try:
+            if st.session_state.sandbox_mode == "Remote" and st.session_state.get("app_deployed"):
+                warm_up_container()
+        except Exception:
+            pass
 
     with st.sidebar:
         st.divider()
@@ -424,6 +491,8 @@ def render_initial_ui() -> None:
         )
 
 def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
+    if message.content.strip() == "":
+        return False
     additional_kwargs = message.additional_kwargs or {}
     if is_final:
         return additional_kwargs.get('is_final') is True
@@ -630,8 +699,12 @@ def render_chat_content() -> None:
                     parallel_current_query_steps = current_query_steps['parallels']
 
                     preparallel_previous_message_type = None
+                    preparallel_previous_chunk_id = None
                     parallel_previous_message_types = [None for _ in range(st.session_state.num_parallel_executions)]
+                    parallel_previous_chunk_ids = [None for _ in range(st.session_state.num_parallel_executions)]
+                    parallel_code_block_open = [False for _ in range(st.session_state.num_parallel_executions)]
                     postparallel_previous_message_type = None
+                    postparallel_previous_chunk_id = None
 
                 for state_update in st.session_state.graph.stream(initial_state, stream_mode="messages", config=config):
                     logger.debug(f'Raw state update in ui.py: {state_update[:100]}')
@@ -645,36 +718,88 @@ def render_chat_content() -> None:
                         # Render intermediate steps
                         match message.additional_kwargs.get("thinking_container"):
                             case "preparallel":
-                                separator = "" if preparallel_previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
-                                preparallel_current_query_steps.append(separator + (message.content or ""))
+                                mc = (message.content or "")
+                                is_chunk = isinstance(message, AIMessageChunk)
+                                separator = ""
+                                if is_chunk:
+                                    if preparallel_previous_chunk_id is not None and message.id != preparallel_previous_chunk_id:
+                                        separator = "\n"
+                                elif preparallel_previous_message_type is AIMessageChunk:
+                                    separator = "\n\n"
+                                else:
+                                    separator = "\n\n"
+
+                                preparallel_current_query_steps.append(separator + mc)
                                 rendered_content = ""
-                                prev_type = None
                                 for step in preparallel_current_query_steps:
                                     rendered_content += step
-                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
                                 preparallel_thinking_container.markdown(rendered_content)
                                 preparallel_previous_message_type = type(message)
+                                preparallel_previous_chunk_id = message.id if isinstance(message, AIMessageChunk) else None
                             case "parallel":
                                 branch_id = message.additional_kwargs.get("branch_id", 0)
-                                separator = "" if parallel_previous_message_types[branch_id] is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
-                                parallel_current_query_steps[branch_id].append(separator + (message.content or ""))
+                                mc = (message.content or "")
+                                is_chunk = isinstance(message, AIMessageChunk)
+                                prev_chunk_id = parallel_previous_chunk_ids[branch_id]
+                                parts = []
+
+                                if is_chunk:
+                                    if mc.startswith("import asyncio") and not parallel_code_block_open[branch_id]:
+                                        parts.append("\n\n```python\n")
+                                        parallel_code_block_open[branch_id] = True
+                                    if mc.startswith("```") and not parallel_code_block_open[branch_id]:
+                                        parallel_code_block_open[branch_id] = True
+                                    if parallel_code_block_open[branch_id] and prev_chunk_id is not None and message.id != prev_chunk_id:
+                                        last_step = parallel_current_query_steps[branch_id][-1] if parallel_current_query_steps[branch_id] else ""
+                                        logger.info(f"Last step before closing code block for branch {branch_id} for AIMessageChunk: {last_step}")
+                                        if not last_step.rstrip().endswith("```"):
+                                            parts.append("\n```\n\n")
+                                        else:
+                                            parts.append("\n\n")
+                                        if not mc.startswith("import asyncio") and not mc.startswith("```"):
+                                            parts.append("\n\n```python\n")
+                                else:
+                                    if parallel_code_block_open[branch_id]:
+                                        last_step = parallel_current_query_steps[branch_id][-1] if parallel_current_query_steps[branch_id] else ""
+                                        logger.info(f"Last step before closing code block for branch {branch_id} for AIMessage: {last_step}")
+                                        if not last_step.rstrip().endswith("```"):
+                                            parts.append("\n```\n\n")
+                                        else:
+                                            parts.append("\n\n")
+                                        parallel_code_block_open[branch_id] = False
+                                    else:
+                                        parts.append("\n\n")
+
+                                if mc != "":
+                                    parts.append(mc)
+                                if parts:
+                                    logger.info(f"parts for parallel branch {branch_id}: {parts}")
+                                    parallel_current_query_steps[branch_id].append("".join(parts))
                                 rendered_content = ""
-                                prev_type = None
                                 for step in parallel_current_query_steps[branch_id]:
                                     rendered_content += step
-                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
                                 parallel_thinking_containers[branch_id].markdown(rendered_content)
                                 parallel_previous_message_types[branch_id] = type(message)
+                                parallel_previous_chunk_ids[branch_id] = message.id if isinstance(message, AIMessageChunk) else None
                             case "postparallel":
-                                separator = "" if postparallel_previous_message_type is AIMessageChunk and isinstance(message, AIMessageChunk) else "\n\n"
-                                postparallel_current_query_steps.append(separator + (message.content or ""))
+                                mc = (message.content or "")
+                                is_chunk = isinstance(message, AIMessageChunk)
+                                separator = ""
+                                if is_chunk:
+                                    if postparallel_previous_chunk_id is not None and message.id != postparallel_previous_chunk_id:
+                                        separator = "\n"
+                                elif postparallel_previous_message_type is AIMessageChunk:
+                                    separator = "\n\n"
+                                else:
+                                    separator = "\n\n"
+
+                                postparallel_current_query_steps.append(separator + mc)
                                 rendered_content = ""
-                                prev_type = None
                                 for step in postparallel_current_query_steps:
                                     rendered_content += step
-                                    prev_type = AIMessageChunk if step and is_message_visible(message, is_final=False) and isinstance(message, AIMessageChunk) else AIMessage
                                 postparallel_thinking_container.markdown(rendered_content)
                                 postparallel_previous_message_type = type(message)
+                                postparallel_previous_chunk_id = message.id if isinstance(message, AIMessageChunk) else None
 
                 if len(st.session_state.intermediate_steps_history) > MAX_HISTORY // 2:
                     st.session_state.intermediate_steps_history = st.session_state.intermediate_steps_history[-MAX_HISTORY // 2:]

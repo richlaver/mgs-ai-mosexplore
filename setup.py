@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Union
 import modal
 import logging
 from utils.project_selection import (
@@ -199,13 +199,23 @@ def get_llms() -> Dict[str, ChatVertexAI]:
     """Initialize the Gemini language models.
 
     Returns:
-        A dictionary of ChatVertexAI instances configured with Google Vertex API.
+        A dictionary of language model instances configured with Google APIs.
     """
     st.toast("Setting up Gemini LLMs...", icon=":material/build:")
     return {
-        "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1),
-        "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1),
-        "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1),
+        "FAST": ChatVertexAI(
+            model="gemini-2.0-flash-lite",
+            temperature=0.3,
+            candidate_count=1,
+        ),
+        "BALANCED": ChatVertexAI(
+            model="gemini-2.0-flash",
+            temperature=0.5,
+        ),
+        "THINKING": ChatVertexAI(
+            model="gemini-2.5-pro",
+            temperature=0.7,
+        ),
     }
 
 

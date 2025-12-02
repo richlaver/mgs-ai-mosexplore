@@ -10,6 +10,35 @@ from classes import Execution, Context
 
 logger = logging.getLogger(__name__)
 
+code_check_prompt = PromptTemplate(
+    input_variables=["code"],
+    template="""
+# Role
+You are an expert code checker.
+
+# Task
+Check the following Python code for syntax errors.
+If you identify any syntax errors, correct them and output the correct code.
+Do not consider missing imports in your check.
+If there are no errors, output "CORRECT".
+
+# Common Coding Errors to Look-out For
+- AttributeError: 'coroutine' object has no attribute 'get_name'.
+- KeyError: <coroutine object as_completed.<locals>._wait_for_one at 0x2b863e6e1b10>
+- Missing `await` in async code when invoking tools or calling async functions.
+- Attempting to access `now()` method from `datetime` module instead of `datetime` class.
+- AttributeError: type object 'datetime.datetime' has no attribute 'datetime'.
+- Tool call arguments not exactly matching ainvoke(tool_name, prompt) signature.
+
+# Code
+{code}
+
+# Output
+Output "CORRECT" if the code is correct.
+Output ONLY the corrected code if the code is incorrect. Do not include any other text.
+"""
+)
+
 codeact_coder_prompt = PromptTemplate(
     input_variables=[
         "current_date",
@@ -51,6 +80,21 @@ Generate code to answer the following user query plus an optional extension that
 
 # Constraints on Your Generated Code
 ## Structure
+- Do not include any imports in your code because they are already imported in the sandbox namespace.
+- Already in the namespace:
+  * `extraction_sandbox_agent`
+  * `timeseries_plot_sandbox_agent`
+  * `map_plot_sandbox_agent`
+  * `review_by_value_agent`
+  * `review_by_time_agent`
+  * `review_schema_agent`
+  * `breach_instr_agent`
+  * `datetime` class from `datetime` module
+  * `timezone` class from `datetime` module
+  * `timedelta` class from `datetime` module
+  * `pandas` module as `pd`
+  * `numpy` module as `np`
+  * `ainvoke` and `asyncio` modules
 - Define a single function named `execute_strategy` that takes no parameters.
 - Execute tools and code in parallel where possible to reduce latency.
 - Declare as `async def` if running parallel, otherwise `def`.
@@ -59,15 +103,7 @@ Generate code to answer the following user query plus an optional extension that
 - Omit docstrings.
 - Dynamically respond to extracted data and errors for robustness.
 - Use `try`-`except` blocks to handle exceptions but continue where possible.
-- Already in environment (DO NOT import):
-  * `extraction_sandbox_agent`
-  * `timeseries_plot_sandbox_agent`
-  * `map_plot_sandbox_agent`
-  * `datetime` module (NOT class)
-  * helper `ainvoke` and `asyncio`
-- Available for import:
-  * `numpy`
-  * `pandas`
+- When running multiple named asyncio Tasks where the result needs to be identified by the task name (e.g., differentiating between a 'plot' task and a 'data' task), ALWAYS use `asyncio.wait(tasks)`. Never use `asyncio.as_completed` for named tasks, as it strips task identity.
 
 ## Yielded Output
 - Yield dictionaries as:
@@ -210,43 +246,57 @@ Generate code to answer the following user query plus an optional extension that
 
 ## `review_by_value_agent`
 ### How to Use
-- Use to get review status for a known measurement value strictly following `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
+- Use to get review status for one or more known measurement values strictly following `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
 - Prompt is natural language description of review status request that MUST include:
-  * Instrument ID
-  * Database field name
-  * Database field value
-- Returns breached review level name (str) or `None` or `ERROR: <error message>`.
+  * Instrument IDs
+  * Database field names
+  * Database field values
+- Returns `pandas.DataFrame` with columns (`instrument_id`, `db_field_name`, `db_field_value`, `review_name`) or `None` or `ERROR: <error message>`.
 ### Example Prompt
 "Find review status:
+Status Query 1
 - Instrument ID: INST045
 - Database field name: data3
+- Database field value: 15.7
+Status Query 2
+- Instrument ID: INST047
+- Database field name: data2
 - Database field value: 12.7"
 
 ## `review_by_time_agent`
 ### How to Use
-- Use to get review status of the latest reading before a given timestamp strictly following `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
+- Use to get review status of the latest reading before a given timestamp at one or more instruments and data fields strictly following `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
 - Prompt is natural language description of review status request that MUST include:
-  * Instrument ID
-  * Database field name
-  * Timestamp
-- Returns `pandas.DataFrame` with columns (`review_status`, `db_field_value`, `db_field_value_timestamp`) or `None` or `ERROR: <error message>`.
+  * Instrument IDs
+  * Database field names
+  * Timestamps
+- Returns `pandas.DataFrame` with columns (`instrument_id`, `db_field_name`, `review_name`, `db_field_value`, `db_field_value_timestamp`) or `None` or `ERROR: <error message>`.
 ### Example Prompt
-"Find review status:
+"Find review status for:
+Status Query 1
 - Instrument ID: INST045
 - Database field name: data3
-- Timestamp: 14 May 2025 12:00:00 PM"
+- Timestamp: 14 May 2025 12:00:00 PM
+Status Query 2
+- Instrument ID: INST046
+- Database field name: data1
+- Timestamp: 14 Jun 2025 09:00:00 PM"
 
 ## `review_schema_agent`
 ### How to Use
-- Use to get full schema (names, values, direction, color) of active review levels for a specific instrument field strictly following `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
+- Use to get full schema (names, values, direction, color) of active review levels for one or more instrument fields strictly following `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
 - Prompt is natural language description of review schema request that MUST include:
-  * Instrument ID
-  * Database field name
+  * Instrument IDs
+  * Database field names
 - Returns `pandas.DataFrame` with columns (`review_name`, `review_value`, `review_direction`, `review_color`) or `None` or `ERROR: <error message>`.
 ### Example Prompt
 "List review levels for:
+Schema Query 1
 - Instrument ID: INST088
-- Database field name: calculation2"
+- Database field name: calculation2
+Schema Query 2
+- Instrument ID: INST087
+- Database field name: calculation4"
 
 ## `breach_instr_agent`
 ### How to Use
@@ -266,6 +316,13 @@ Generate code to answer the following user query plus an optional extension that
 - Database field name: calculation1
 - Timestamp: 14 May 2025 12:00:00 PM"
 
+# Common Coding Errors to Avoid
+- AttributeError: 'coroutine' object has no attribute 'get_name'.
+- KeyError: <coroutine object as_completed.<locals>._wait_for_one at 0x2b863e6e1b10>
+- Missing `await` in async code when invoking tools or calling async functions.
+- Attempting to access `now()` method from `datetime` module instead of `datetime` class.
+- Tool call arguments not exactly matching ainvoke(tool_name, prompt) signature.
+
 # Sequential Instructions
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
@@ -273,13 +330,63 @@ Generate code to answer the following user query plus an optional extension that
 4. Produce a step-by-step execution plan to answer the query and optional extension. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
 5. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`).
 6. Check code for:
+  - Common coding errors above
   - Logic to answer query
   - Adheres to constraints
   - Calls tools correctly with necessary inputs
   - Yielded outputs formed correctly
-7. Output only the code.
+7. Output only the code. Do not include any other text to save tokens.
 """
 )
+
+def extract_code_from_response(response: str) -> str:
+  """Extracts the code part from the LLM response by removing preceding thought processes."""
+  lines = response.splitlines()
+
+  # Rule 1: Find "async def execute_strategy():" and return from that line onward
+  # This strips any imports and comments that precede the strategy function.
+  for i, line in enumerate(lines):
+    if line.strip().startswith("async def execute_strategy():"):
+      return "\n".join(lines[i:])
+
+  # Rule 1: Find "async def execute_strategy():" then search backward
+  # for i, line in enumerate(lines):
+  #   if line.strip().startswith("async def execute_strategy():"):
+  #     start_index = i
+  #     for j in range(i - 1, -1, -1):
+  #       prev_line = lines[j]
+  #       if "import " in prev_line or prev_line.strip() == "":
+  #         start_index = j
+  #       else:
+  #         break
+  #     return "\n".join(lines[start_index:])
+
+  # Rule 2: The first line of the first two consecutive lines starting with "import "
+  for i in range(len(lines) - 1):
+    if lines[i].strip().startswith("import ") and lines[i+1].strip().startswith("import "):
+      return "\n".join(lines[i:])
+
+  # Rule 3: The line after the first line with "```python"
+  for i, line in enumerate(lines):
+    if "```python" in line:
+      return "\n".join(lines[i+1:])
+
+  # Rule 4: The line after the first line with "python"
+  for i, line in enumerate(lines):
+    if "python" in line:
+      return "\n".join(lines[i+1:])
+
+  # Rule 5: The line after the first line with "<code>"
+  for i, line in enumerate(lines):
+    if "<code>" in line:
+      return "\n".join(lines[i+1:])
+
+  # Rule 6: The line after the first line with "```"
+  for i, line in enumerate(lines):
+    if "```" in line:
+      return "\n".join(lines[i+1:])
+
+  return response
 
 def strip_code_tags(code: str) -> str:
   """Remove markdown and HTML tags from Python code, preserving valid code."""
@@ -305,7 +412,8 @@ def strip_code_tags(code: str) -> str:
   return code
 
 def codeact_coder_agent(
-    llm: BaseLanguageModel,
+    generating_llm: BaseLanguageModel,
+    checking_llm: BaseLanguageModel,
     tools: List[Any],
     context: Context,
     previous_attempts: List[Execution]
@@ -345,10 +453,11 @@ def codeact_coder_agent(
                 previous_attempts_summary += f"Attempt {i+1} failed.\n"
                 previous_attempts_summary += f"Error summary: {attempt.error_summary}\n\n"
 
-    chain = codeact_coder_prompt | llm
+    generate_chain = codeact_coder_prompt | generating_llm
+    check_chain = code_check_prompt | checking_llm
 
     try:
-        response = chain.invoke({
+        response = generate_chain.invoke({
             "current_date": current_date,
             "retrospective_query": retrospective_query,
             "verified_instrument_info_json": verified_instrument_info_json,
@@ -360,13 +469,25 @@ def codeact_coder_agent(
             "previous_attempts_summary": previous_attempts_summary,
         })
 
-        cleaned_code = strip_code_tags(response.content)
+        extracted_code = extract_code_from_response(response.content)
+        cleaned_code = strip_code_tags(extracted_code)
+
+        check_response = check_chain.invoke({"code": cleaned_code})
+        
+        if "CORRECT" in check_response.content:
+            final_code = cleaned_code
+        else:
+            checked_extracted_code = extract_code_from_response(check_response.content)
+            if checked_extracted_code == check_response.content:
+                final_code = cleaned_code
+            else:
+                final_code = strip_code_tags(checked_extracted_code)
 
         new_execution = Execution(
             agent_type="CodeAct",
             parallel_agent_id=0,
             retry_number=len(previous_attempts),
-            codeact_code=cleaned_code,
+            codeact_code=final_code,
             final_response=None,
             artefacts=[],
             error_summary=""
