@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, validator
 from pyproj.crs import CRS
 from pyproj.transformer import Transformer
 
+from tools.artefact_toolkit import WriteArtefactTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.review_level_toolkit import (
     GetMapSeriesReviewSnapshotTool,
@@ -505,7 +506,12 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                     if len(primary_y_instruments) == 1:
                         target_column = primary_y_instruments[0].column_name
                         schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
-                        schema_df = schema_tool._run(primary_y_instruments[0].instrument_id, target_column)
+                        schema_df = schema_tool._run([
+                            {
+                                "instrument_id": primary_y_instruments[0].instrument_id,
+                                "db_field_name": target_column,
+                            }
+                        ])
                         if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
                             logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
                         elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
@@ -582,7 +588,12 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                                     types.add(t); subtypes.add(st)
                             if len(types) == 1 and None not in types and len(subtypes) == 1 and None not in subtypes:
                                 schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
-                                schema_df = schema_tool._run(primary_y_instruments[0].instrument_id, target_column)
+                                schema_df = schema_tool._run([
+                                    {
+                                        "instrument_id": primary_y_instruments[0].instrument_id,
+                                        "db_field_name": target_column,
+                                    }
+                                ])
                                 if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
                                     logger.warning(f"GetReviewSchemaTool returned error: {schema_df}")
                                 elif schema_df is not None and hasattr(schema_df, 'empty') and not schema_df.empty:
@@ -839,6 +850,117 @@ class TimeSeriesPlotWrapperTool(BaseTool):
             content = f"Error processing input: {str(e)}"
             result = {'content': content, 'artifacts': []}
             return json.dumps(result)
+
+class CSVSaverInput(BaseModel):
+    dataframe: pd.DataFrame = Field(
+        ...,
+        description=(
+            "Pandas DataFrame for storing as CSV in file system."
+        )
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Optional human-readable description for Dataframe."
+    )
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @validator('dataframe', pre=True)
+    def _ensure_dataframe(cls, value):
+        if value is None:
+            raise ValueError("dataframe is required")
+        if isinstance(value, pd.DataFrame):
+            df = value
+        elif isinstance(value, (list, tuple)):
+            df = pd.DataFrame(value)
+        elif isinstance(value, dict):
+            df = pd.DataFrame(value)
+        else:
+            raise ValueError("dataframe must be a pandas DataFrame")
+        if df.empty:
+            raise ValueError("dataframe must contain at least one row to save")
+        return df
+
+
+class CSVSaverOutput(BaseModel):
+    artefact_id: Optional[str] = Field(
+        default=None,
+        description="Identifier to access stored CSV."
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message describing why the CSV could not be saved."
+    )
+
+
+class CSVSaverTool(BaseTool):
+    """Tool serializing pandas DataFrames to CSV and saving them in the file system."""
+    name: str = "csv_saver_tool"
+    description: str = """
+    Converts a pandas DataFrame into CSV text and writes it to the file system.
+    Call this tool when large data output needs to be yielded as output from the code.
+    The user will be able to download the CSV.
+
+    Inputs:
+    - dataframe: Pandas DataFrame to save.
+    - description: short text describing the CSV.
+
+    Output:
+    - artefact_id: String ID of the stored CSV when the upload is successful.
+    - error: Descriptive message when storage fails.
+    """
+    args_schema: Type[CSVSaverInput] = CSVSaverInput
+    write_artefact_tool: WriteArtefactTool = Field(exclude=True)
+    thread_id: str = Field(..., exclude=True)
+    user_id: int = Field(..., exclude=True)
+    response_format: str = "content"
+
+    def _run(self, dataframe: pd.DataFrame, description: Optional[str] = None) -> Dict[str, Any]:
+        logger.info("CSVSaverTool._run invoked")
+        try:
+            payload = self._prepare_artefact_payload(dataframe, description)
+            artefact_response = self.write_artefact_tool.invoke(payload)
+            return self._handle_artefact_response(artefact_response)
+        except Exception as exc:
+            logger.exception("CSVSaverTool encountered an error: %s", str(exc))
+            return CSVSaverOutput(artefact_id=None, error=str(exc)).dict()
+
+    async def _arun(self, dataframe: pd.DataFrame, description: Optional[str] = None) -> Dict[str, Any]:
+        logger.info("CSVSaverTool._arun invoked")
+        try:
+            payload = self._prepare_artefact_payload(dataframe, description)
+            artefact_response = await self.write_artefact_tool.ainvoke(payload)
+            return self._handle_artefact_response(artefact_response)
+        except Exception as exc:
+            logger.exception("CSVSaverTool encountered an async error: %s", str(exc))
+            return CSVSaverOutput(artefact_id=None, error=str(exc)).dict()
+
+    def _prepare_artefact_payload(self, dataframe: pd.DataFrame, description: Optional[str]) -> Dict[str, Any]:
+        description_text = (description or "CSV export generated by CSVSaver").strip() or "CSV export generated by CSVSaver"
+        csv_content = dataframe.to_csv(index=False)
+        logger.debug("CSV content generated with %d bytes", len(csv_content))
+        return {
+            "blob": csv_content,
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "generating_tool": "CSVSaver",
+            "generating_parameters": {
+                "columns": dataframe.columns.tolist(),
+                "row_count": len(dataframe)
+            },
+            "description": description_text
+        }
+
+    def _handle_artefact_response(self, artefact_response: Dict[str, Any]) -> Dict[str, Any]:
+        response_dict = artefact_response.dict() if hasattr(artefact_response, "dict") else artefact_response
+        logger.debug("WriteArtefactTool response: %s", response_dict)
+        if response_dict.get('error'):
+            error_message = str(response_dict['error'])
+            logger.error("CSVSaverTool failed to store artefact: %s", error_message)
+            return CSVSaverOutput(artefact_id=None, error=error_message).dict()
+        artefact_id = response_dict.get('artefact_id')
+        logger.info("CSVSaverTool stored CSV artefact with ID %s", artefact_id)
+        return CSVSaverOutput(artefact_id=artefact_id, error=None).dict()
+        
 
 hn72_crs = CRS.from_epsg(3405)  # VN-2000 / Vietnam TM-3 zone 105-45
 wgs84_crs = CRS.from_epsg(4326)  # WGS84
@@ -1378,7 +1500,12 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         schema_order: List[str] = []
         if chosen_instr_id:
             schema_tool = GetReviewSchemaTool(sql_tool=self.sql_tool)
-            schema_df = schema_tool._run(chosen_instr_id, s0.database_field_name)
+            schema_df = schema_tool._run([
+                {
+                    "instrument_id": chosen_instr_id,
+                    "db_field_name": s0.database_field_name,
+                }
+            ])
             if isinstance(schema_df, str) and schema_df.startswith("ERROR"):
                 schema_df = None
             if schema_df is not None and not schema_df.empty:

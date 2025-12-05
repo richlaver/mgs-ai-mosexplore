@@ -92,6 +92,21 @@ Only the first statement will be executed. Discarded statements:
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> Union[str, Sequence[Dict[str, Any]], Result]:
         """Execute the query, return the results or an error message."""
+        original_query = query
+
+        def _truncate(text: Any, max_len: int = 500) -> str:
+            if text is None:
+                return ""
+            text = str(text)
+            return text if len(text) <= max_len else text[:max_len] + "...[truncated]"
+
+        logger.info(
+            "[GeneralSQLQueryTool] Received query len=%d user_id=%s gha=%s | %s",
+            len(original_query),
+            self.user_id,
+            self.global_hierarchy_access,
+            _truncate(original_query, 300)
+        )
         # First strip any markdown formatting that might wrap a JSON string
         if query.startswith("```"):
             lines = query.splitlines()
@@ -118,6 +133,12 @@ Only the first statement will be executed. Discarded statements:
                 pass
                 
         query = self.strip_markdown(query)
+        if query != original_query:
+            logger.info(
+                "[GeneralSQLQueryTool] Query normalized (len=%d): %s",
+                len(query),
+                _truncate(query, 300)
+            )
 
         def check_for_write_statements(query: str) -> Optional[str]:
             """
@@ -200,6 +221,7 @@ Only the first statement will be executed. Discarded statements:
             """Dynamically rewrite the query to add JOIN and WHERE EXISTS clauses for user permissions."""
             logging.debug(f'Original query: {query}')
             query = query.rstrip(';')
+            logger.info("[GeneralSQLQueryTool] Extending query for permissions: %s", _truncate(query, 300))
             
             table_aliases = get_all_tables(query)
             if not table_aliases:
@@ -402,26 +424,41 @@ Only the first statement will be executed. Discarded statements:
 
             extended_query = "".join(str(token) for token in tokens)
             logging.debug(f'Returning extended query: {extended_query}')
+            logger.info(
+                "[GeneralSQLQueryTool] Extended query (len=%d): %s",
+                len(extended_query),
+                _truncate(extended_query, 300)
+            )
             return extended_query
 
         def process_results(results):
             """Process query results, handling empty results consistently."""
             if isinstance(results, str) and not results.strip():
+                logger.info("[GeneralSQLQueryTool] Empty string result; returning NO_DATA message")
                 return "No data was found in the database matching the specified search criteria."
+            logger.info("[GeneralSQLQueryTool] Returning result type=%s", type(results).__name__)
             return results
 
         write_error = check_for_write_statements(query)
         if write_error:
+            logger.info("[GeneralSQLQueryTool] Write statement detected -> %s", write_error)
             return write_error
         
         try:
             if self.global_hierarchy_access:
-                print("User has global hierarchy access, using original query.")
+                logger.info("[GeneralSQLQueryTool] Global hierarchy access granted; executing original query")
                 results = self.db.run_no_throw(query, include_columns=True)
             else:
                 extended_query = extend_query(query=query)
+                logger.info("[GeneralSQLQueryTool] Executing extended query")
                 results = self.db.run_no_throw(extended_query, include_columns=True)
 
+            if isinstance(results, list):
+                logger.info("[GeneralSQLQueryTool] Query returned %d row(s)", len(results))
+            else:
+                logger.info(
+                    "[GeneralSQLQueryTool] Query returned %s", _truncate(str(results), 300)
+                )
             return process_results(results)
         except Exception as e:
             logging.error(f"Error executing query: {str(e)}")

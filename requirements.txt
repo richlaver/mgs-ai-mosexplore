@@ -12,6 +12,7 @@ numpy
 plotly
 pyproj
 pandas
+tabulate
 pydantic>=2
 psycopg2-binary
 sqlalchemy

@@ -228,21 +228,26 @@ Schema Query 2
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels) strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Use to get instruments of a specified type whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
 - Prompt is natural language description of review status enquiry that MUST include:
-  * Review level name
   * Instrument type
-  * Instrument subtype (optional)
-  * Database field name
   * Timestamp cut-off
-- Returns `pandas.DataFrame` with columns (`instrument_id`, `field_value`, `field_value_timestamp`, `review_value`) or `None` or `ERROR: <error message>`.
-### Example Prompt
+- For more specific requests, you can include the following in the prompt:
+  * Review level name to only return breaches at that level
+  * Instrument subtype
+  * Database field name
+- Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or `None` or `ERROR: <error message>`.
+### Example Prompt 1
 "List breaches for:
 - Review level name: ALERT
 - Instrument type: LP
 - Instrument subtype: MOVEMENT
 - Database field name: calculation1
 - Timestamp: 14 May 2025 12:00:00 PM"
+### Example Prompt 2
+"List breaches for:
+- Instrument type: LP
+- Timestamp: 14 Jun 2025 09:00:00 PM"
 
 # Instructions
 1. Analyse the user query to understand what is being asked.

@@ -152,11 +152,12 @@ def instrument_validator(state: ContextState, llm: BaseLanguageModel, db: any) -
     unverif_IDs = [id_ for id_ in ids if id_ not in valid_instruments]
 
     clarification_request = ""
-    if unverif_IDs:
-        clarification_request = (
-            f"The following instrument IDs could not be found in the database: "
-            f"{', '.join(unverif_IDs)}. Please clarify or provide correct IDs."
-        )
+    # Skip clarification request to allow types and subtypes that are incorrectly identified as instrument IDs to pass downstream.
+    # if unverif_IDs:
+    #     clarification_request = (
+    #         f"The following instrument IDs could not be found in the database: "
+    #         f"{', '.join(unverif_IDs)}. Please clarify or provide correct IDs."
+    #     )
     context_update = {
         "ignore_IDs": ignore_IDs,
         "verif_ID_info": valid_instruments,

@@ -686,12 +686,12 @@ class BreachInstrAgentInput(BaseModel):
     prompt: str = Field(
         ..., 
         description=(
-            "Natural language prompt to find instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels). Prompt must include:\n"
-            "- Review level name to test (e.g. 'Alert', 'Warning').\n"
+            "Natural language prompt to find instruments whose latest reading before a timestamp is at a specified review status. Prompt must include:\n"
             "- Instrument type (instrum.type1).\n"
-            "- Optional instrument subtype (instrum.type2).\n"
-            "- Database field name (dataN or calculationN).\n"
             "- Timestamp cutoff (ISO8601 or parseable).\n"
+            "- Optional: Review level name to test (e.g. 'Alert', 'Warning'); if omitted, include breaches at the most severe active level per instrument/field.\n"
+            "- Optional: Instrument subtype (instrum.type2).\n"
+            "- Optional: Database field name (dataN or calculationN); if omitted, search all fields with active review schema for the given instrument type/subtype.\n"
             "Example: 'Which settlement instruments of type SETT with subtype DEEP breach the Warning level on calculation1 as of 2025-02-10T00:00:00Z?'"
         )
     )
@@ -701,16 +701,17 @@ class BreachInstrAgentTool(BaseGenericReviewAgentTool):
     name: str = "breach_instr_agent"
     description: str = (
         "Finds instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels).\n"
-        "Use to get a filtered list of currently or historically breached instruments at a particular review status for reporting or alerting.\n"
-        "Prompt MUST contain: review level name, instrument type, database field name, timestamp. Optional: instrument subtype.\n"
-        "Returns: DataFrame rows (instrument_id, field_value, field_value_timestamp, review_value) or None or ERROR: message."
+        "Use to get a filtered list of currently or historically breached instruments.\n"
+        "Prompt MUST contain: instrument type and timestamp. Optional: review level name, instrument subtype, database field name.\n"
+        "If review level name is omitted, returns breaches across all active levels, emitting only the most severe breach per instrument/field. If database field name is omitted, searches all fields with active review schema for the instrument type/subtype.\n"
+        "Returns: DataFrame rows (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or None or ERROR: message."
     )
     args_schema: Type[BaseModel] = BreachInstrAgentInput
     underlying_tool_cls: ClassVar[Type[Any]] = GetBreachedInstrumentsTool
-    required_fields: ClassVar[List[str]] = ["review_name", "instrument_type", "db_field_name", "timestamp"]
-    optional_fields: ClassVar[List[str]] = ["instrument_subtype"]
+    required_fields: ClassVar[List[str]] = ["instrument_type", "timestamp"]
+    optional_fields: ClassVar[List[str]] = ["instrument_subtype", "db_field_name", "review_name"]
     instructions: ClassVar[str] = (
-        "Extract review_name (the level to test), instrument_type, optional instrument_subtype (set null if not specified), db_field_name and timestamp (ISO8601)."
+        "Extract instrument_type and timestamp (ISO8601). Optionally extract instrument_subtype, db_field_name, and review_name. If instrument_subtype is absent, set it to null."
     )
     param_map: ClassVar[Dict[str, str]] = {
         "review_name": "review_name",

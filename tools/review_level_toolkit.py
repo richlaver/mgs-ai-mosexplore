@@ -164,6 +164,8 @@ class _ReviewValueOutput(BaseModel):
 class _BreachedInstrumentReading(BaseModel):
     """Schema for a single breached instrument reading."""
     instrument_id: str = Field(..., description="Instrument ID (from instrum.instr_id).")
+    db_field_name: str = Field(..., description="System field name (dataN or calculationN) that breached.")
+    review_name: Optional[str] = Field(None, description="Name of the breached review level (most severe or specific).")
     field_value: float = Field(..., description="Most recent field value breaching the review level.")
     field_value_timestamp: datetime = Field(..., description="Timestamp of the field value.")
     review_value: float = Field(..., description="Threshold value of the named review level.")
@@ -531,6 +533,8 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
         if not isinstance(items, list) or not items:
             return "ERROR: items must be a non-empty list of {instrument_id, db_field_name}."
 
+        logger.info("[get_review_schema] Starting run with %d item(s)", len(items))
+
         grouped: Dict[str, List[str]] = {}
         for it in items:
             instr = it.get("instrument_id")
@@ -539,9 +543,21 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
                 return "ERROR: instrument_id and db_field_name are required for each item."
             grouped.setdefault(field, []).append(instr)
 
+        logger.info(
+            "[get_review_schema] Grouped into %d distinct field(s): %s",
+            len(grouped),
+            ", ".join(grouped.keys()) or "<none>"
+        )
+
         all_rows: List[Dict[str, Any]] = []
         for field, instr_list in grouped.items():
             instr_list = list(dict.fromkeys(instr_list))
+            logger.info(
+                "[get_review_schema/%s] Preparing batch for %d instrument(s): %s",
+                field,
+                len(instr_list),
+                ", ".join(instr_list)
+            )
             values_sql_parts = [
                 f"SELECT {i} AS rn, {_quote(instr)} AS instr_id" for i, instr in enumerate(instr_list)
             ]
@@ -568,9 +584,11 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
             except Exception as e:
                 return f"ERROR: schema batch query failed: {e}"
             if _is_no_data(result):
+                logger.info("[get_review_schema/%s] Result indicated no data", field)
                 continue
             try:
                 rows = _parse_rows(result)
+                logger.info("[get_review_schema/%s] Parsed %d row(s)", field, len(rows))
             except Exception as e:
                 return f"ERROR: schema batch parse failed: {e}"
             for r in rows:
@@ -582,6 +600,11 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
                     "review_direction": r.get("review_direction"),
                     "review_color": r.get("review_color"),
                 })
+
+        logger.info(
+            "[get_review_schema] Returning %s",
+            f"DataFrame with {len(all_rows)} row(s)" if all_rows else "None"
+        )
 
         return pd.DataFrame(all_rows) if all_rows else None
 
@@ -694,141 +717,305 @@ class GetReviewValueTool(BaseTool, _BaseQueryTool):
 
 class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
     """
-    Finds instruments of given type/subtype where the latest reading before `timestamp`
-    breaches the named review level, but does NOT breach any more severe level.
+    Finds instruments of given type/subtype where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
+    Omitting `db_field_name` looks for reviews on all fields for the specified instrument type/subtype.
+    Omitting `review_name` finds breaches across all review levels subject to other input specifications.
 
     Returns a pandas DataFrame with one row per breached instrument (columns match BreachedInstrumentReading), or None, or an ERROR.
     """
     name: str = "get_breached_instruments_tool"
     description: str = (
         """
-        Finds instruments of given type/subtype where the latest reading before `timestamp`
-        breaches the named review level, but does NOT breach any more severe level.
+        Finds instruments of given type/subtype where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
+        Omitting `db_field_name` looks for reviews on all fields for the specified instrument type/subtype.
+        Omitting `review_name` finds breaches across all review levels subject to other input specifications.
 
-    Returns a pandas DataFrame with one row per breached instrument (columns match BreachedInstrumentReading), or None, or an ERROR.
+        Returns a pandas DataFrame with one row per breached instrument (columns match BreachedInstrumentReading), or None, or an ERROR.
         """
     )
 
     def _run(
         self,
-        review_name: str,
+        review_name: Optional[str],
         instrument_type: str,
         instrument_subtype: Optional[str],
-        db_field_name: str,
+        db_field_name: Optional[str],
         timestamp: Union[str, datetime],
     ) -> Union[pd.DataFrame, None, str]:
-        if not all([review_name, instrument_type, db_field_name]):
-            return "ERROR: review_name, instrument_type, and db_field_name are required."
+        if not instrument_type:
+            return "ERROR: instrument_type is required."
 
         if isinstance(timestamp, str):
             try:
                 timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             except Exception:
                 return "ERROR: Invalid timestamp format. Use ISO format."
-
-        try:
-            valid_col = _validate_col(db_field_name)
-        except ValueError as e:
-            return f"ERROR: {e}"
-
-        if valid_col.startswith("calculation"):
-            json_path = f"$.{valid_col}"
-            field_expr = (
-                "CASE WHEN JSON_VALID(m.custom_fields) "
-                "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
-                "ELSE NULL END"
-            )
-            reading_is_not_null = (
-                "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
-            )
-        else:
-            field_expr = (
-                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
-            )
-            reading_is_not_null = (
-                f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
-            )
-
-        sql = (
-            "WITH latest_reading AS ( "
-            "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
-            "FROM mydata m WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
-            "ranked AS ( SELECT instr_id, reading_time, field_value, ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn FROM latest_reading ) "
-            "SELECT r.instr_id AS instrument_id, r.field_value, r.reading_time AS field_value_timestamp, "
-            "CAST(REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value "
-            "FROM ranked r "
-            "JOIN instrum i ON r.instr_id = i.instr_id "
-            "JOIN review_instruments ri ON r.instr_id = ri.instr_id "
-            "JOIN review_instruments_values target_riv ON ri.id = target_riv.review_instr_id "
-            "JOIN review_levels target_rl ON target_riv.review_level_id = target_rl.id "
-            "WHERE r.rn = 1 AND i.type1 = %(instrument_type)s "
-            "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
-            "AND ri.review_field = %(review_field)s AND target_rl.review_name = %(review_name)s "
-            "AND ri.review_status='ON' "
-            "AND REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-            "AND ((target_riv.review_direction = 1 AND r.field_value > CAST(REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
-            "OR (target_riv.review_direction = -1 AND r.field_value < CAST(REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) "
-            "AND NOT EXISTS ( SELECT 1 FROM review_instruments_values s_riv JOIN review_levels s_rl ON s_riv.review_level_id = s_rl.id "
-            "WHERE s_riv.review_instr_id = ri.id "
-            "AND REPLACE(NULLIF(TRIM(s_riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-            "AND ((s_riv.review_direction = 1 "
-            "AND CAST(REPLACE(NULLIF(TRIM(s_riv.review_value), ''), ',', '') AS DECIMAL(20,6)) > CAST(REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') AS DECIMAL(20,6)) "
-            "AND r.field_value > CAST(REPLACE(NULLIF(TRIM(s_riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
-            "OR (s_riv.review_direction = -1 "
-            "AND CAST(REPLACE(NULLIF(TRIM(s_riv.review_value), ''), ',', '') AS DECIMAL(20,6)) < CAST(REPLACE(NULLIF(TRIM(target_riv.review_value), ''), ',', '') AS DECIMAL(20,6)) "
-            "AND r.field_value < CAST(REPLACE(NULLIF(TRIM(s_riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) ) "
-            "ORDER BY r.reading_time DESC"
-        )
-
-        params: Dict[str, Any] = {
-            "review_name": review_name,
-            "instrument_type": instrument_type,
-            "instrument_subtype": instrument_subtype,
-            "review_field": valid_col,
-            "ts": timestamp,
-        }
-        if valid_col.startswith("calculation"):
-            params["json_path"] = json_path
-
-        try:
-            rendered = sql % {k: _quote(v) for k, v in params.items()}
-        except Exception as e:
-            return f"ERROR: render failed: {e}"
-        try:
-            logger.info("[get_breached_instruments] SQL=%s", rendered)
-            result = self.sql_tool._run(rendered)
-            logger.info("[get_breached_instruments] Raw result=%s", result)
-        except Exception as e:
-            return f"ERROR: unified query failed: {e}"
-        if _is_no_data(result):
-            return None
-        try:
-            rows = _parse_rows(result)
-        except Exception as e:
-            return f"ERROR: unified parse failed: {e}"
-        if not rows:
-            return None
-        out: List[Dict[str, Any]] = []
-        for r in rows:
+        if db_field_name:
             try:
-                fv = _coerce_float(r.get("field_value"))
-                rv = _coerce_float(r.get("review_value"))
-                if fv is None or rv is None:
-                    raise ValueError("numeric conversion failed")
-                out.append(_BreachedInstrumentReading(
-                    instrument_id=r.get("instrument_id"),
-                    field_value=fv,
-                    field_value_timestamp=r.get("field_value_timestamp"),
-                    review_value=rv,
-                ).model_dump())
+                valid_col = _validate_col(db_field_name)
+            except ValueError as e:
+                return f"ERROR: {e}"
+
+            if valid_col.startswith("calculation"):
+                json_path = f"$.{valid_col}"
+                field_expr = (
+                    "CASE WHEN JSON_VALID(m.custom_fields) "
+                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "ELSE NULL END"
+                )
+                reading_is_not_null = (
+                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                )
+            else:
+                field_expr = (
+                    f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                    f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                )
+                reading_is_not_null = (
+                    f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                )
+
+            sql = (
+                "WITH latest_reading AS ( "
+                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
+                "FROM mydata m "
+                "JOIN review_instruments ri ON m.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
+                "ranked AS ( "
+                "SELECT instr_id, reading_time, field_value, ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
+                "FROM latest_reading ), "
+                "active_reviews AS ( "
+                "SELECT ri.instr_id, rl.review_name, "
+                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
+                "riv.review_direction, "
+                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
+                "FROM review_instruments ri "
+                "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
+                "breaches AS ( "
+                "SELECT r.instr_id, r.field_value, r.reading_time, ar.review_name, ar.review_value_clean, ar.review_direction, ar.severity_rank "
+                "FROM ranked r "
+                "JOIN active_reviews ar ON ar.instr_id = r.instr_id "
+                "WHERE r.rn = 1 AND ((ar.review_direction = 1 AND r.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND r.field_value < ar.review_value_clean)) ) "
+                "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
+                "FROM ranked r "
+                "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
+                "JOIN instrum i ON r.instr_id = i.instr_id "
+                "WHERE i.type1 = %(instrument_type)s "
+                "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
+                + "AND b.severity_rank = 1 "
+                + ("AND b.review_name = %(review_name)s " if review_name else "") +
+                "ORDER BY r.reading_time DESC"
+            )
+
+            params: Dict[str, Any] = {
+                "instrument_type": instrument_type,
+                "instrument_subtype": instrument_subtype,
+                "review_field": valid_col,
+                "ts": timestamp,
+            }
+            if review_name:
+                params["review_name"] = review_name
+            if valid_col.startswith("calculation"):
+                params["json_path"] = json_path
+
+            try:
+                rendered = sql % {k: _quote(v) for k, v in params.items()}
             except Exception as e:
-                logger.warning("[get_breached_instruments] Row parse skipped: %s row=%s", e, r)
-        logger.info("[get_breached_instruments] Parsed %d breached instruments", len(out))
-        return pd.DataFrame(out) if out else None
+                return f"ERROR: render failed: {e}"
+            try:
+                logger.info("[get_breached_instruments] SQL=%s", rendered)
+                result = self.sql_tool._run(rendered)
+                logger.info("[get_breached_instruments] Raw result=%s", result)
+            except Exception as e:
+                return f"ERROR: unified query failed: {e}"
+            if _is_no_data(result):
+                return None
+            try:
+                rows = _parse_rows(result)
+            except Exception as e:
+                return f"ERROR: unified parse failed: {e}"
+            if not rows:
+                return None
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                try:
+                    fv = _coerce_float(r.get("field_value"))
+                    rv = _coerce_float(r.get("review_value"))
+                    if fv is None or rv is None:
+                        raise ValueError("numeric conversion failed")
+                    out.append(_BreachedInstrumentReading(
+                        instrument_id=r.get("instrument_id"),
+                        db_field_name=valid_col,
+                        review_name=r.get("review_name"),
+                        field_value=fv,
+                        field_value_timestamp=r.get("field_value_timestamp"),
+                        review_value=rv,
+                    ).model_dump())
+                except Exception as e:
+                    logger.warning("[get_breached_instruments] Row parse skipped: %s row=%s", e, r)
+            logger.info("[get_breached_instruments] Parsed %d breached instruments", len(out))
+            return pd.DataFrame(out) if out else None
+
+        discover_sql = (
+            "SELECT DISTINCT ri.review_field AS db_field_name "
+            "FROM review_instruments ri "
+            "JOIN instrum i ON ri.instr_id = i.instr_id "
+            "WHERE ri.review_status = 'ON' "
+            "AND i.type1 = %(instrument_type)s "
+            "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s)"
+        )
+        try:
+            rendered_discover = discover_sql % {
+                "instrument_type": _quote(instrument_type),
+                "instrument_subtype": _quote(instrument_subtype),
+            }
+        except Exception as e:
+            return f"ERROR: render discover failed: {e}"
+
+        try:
+            logger.info("[get_breached_instruments/discover] SQL=%s", rendered_discover)
+            discover_result = self.sql_tool._run(rendered_discover)
+            logger.info("[get_breached_instruments/discover] Raw result=%s", discover_result)
+        except Exception as e:
+            return f"ERROR: discover query failed: {e}"
+
+        if _is_no_data(discover_result):
+            return None
+        try:
+            field_rows = _parse_rows(discover_result)
+        except Exception as e:
+            return f"ERROR: discover parse failed: {e}"
+
+        fields: List[str] = []
+        for r in field_rows:
+            f = r.get("db_field_name")
+            if not f:
+                continue
+            try:
+                fields.append(_validate_col(str(f)))
+            except ValueError:
+                # Skip invalid field names defensively
+                continue
+
+        # Deduplicate and short-circuit if none
+        fields = list(dict.fromkeys(fields))
+        if not fields:
+            return None
+
+        aggregated: List[Dict[str, Any]] = []
+        for valid_col in fields:
+            if valid_col.startswith("calculation"):
+                json_path = f"$.{valid_col}"
+                field_expr = (
+                    "CASE WHEN JSON_VALID(m.custom_fields) "
+                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "ELSE NULL END"
+                )
+                reading_is_not_null = (
+                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                )
+            else:
+                field_expr = (
+                    f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                    f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                )
+                reading_is_not_null = (
+                    f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                )
+
+            sql = (
+                "WITH latest_reading AS ( "
+                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
+                "FROM mydata m "
+                "JOIN review_instruments ri ON m.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
+                "ranked AS ( "
+                "SELECT instr_id, reading_time, field_value, ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
+                "FROM latest_reading ), "
+                "active_reviews AS ( "
+                "SELECT ri.instr_id, rl.review_name, "
+                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
+                "riv.review_direction, "
+                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
+                "FROM review_instruments ri "
+                "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
+                "breaches AS ( "
+                "SELECT r.instr_id, r.field_value, r.reading_time, ar.review_name, ar.review_value_clean, ar.review_direction, ar.severity_rank "
+                "FROM ranked r "
+                "JOIN active_reviews ar ON ar.instr_id = r.instr_id "
+                "WHERE r.rn = 1 AND ((ar.review_direction = 1 AND r.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND r.field_value < ar.review_value_clean)) ) "
+                "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
+                "FROM ranked r "
+                "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
+                "JOIN instrum i ON r.instr_id = i.instr_id "
+                "WHERE i.type1 = %(instrument_type)s "
+                "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
+                + "AND b.severity_rank = 1 "
+                + ("AND b.review_name = %(review_name)s " if review_name else "") +
+                "ORDER BY r.reading_time DESC"
+            )
+
+            params: Dict[str, Any] = {
+                "instrument_type": instrument_type,
+                "instrument_subtype": instrument_subtype,
+                "review_field": valid_col,
+                "ts": timestamp,
+            }
+            if review_name:
+                params["review_name"] = review_name
+            if valid_col.startswith("calculation"):
+                params["json_path"] = json_path
+
+            try:
+                rendered = sql % {k: _quote(v) for k, v in params.items()}
+            except Exception as e:
+                logger.warning("[get_breached_instruments/field] Render failed for %s: %s", valid_col, e)
+                continue
+            try:
+                logger.info("[get_breached_instruments/field] SQL(%s)=%s", valid_col, rendered)
+                result = self.sql_tool._run(rendered)
+                logger.info("[get_breached_instruments/field] Raw result=%s", result)
+            except Exception as e:
+                logger.warning("[get_breached_instruments/field] Query failed for %s: %s", valid_col, e)
+                continue
+            if _is_no_data(result):
+                continue
+            try:
+                rows = _parse_rows(result)
+            except Exception as e:
+                logger.warning("[get_breached_instruments/field] Parse failed for %s: %s", valid_col, e)
+                continue
+            for r in rows:
+                try:
+                    fv = _coerce_float(r.get("field_value"))
+                    rv = _coerce_float(r.get("review_value"))
+                    if fv is None or rv is None:
+                        raise ValueError("numeric conversion failed")
+                    aggregated.append(_BreachedInstrumentReading(
+                        instrument_id=r.get("instrument_id"),
+                        db_field_name=valid_col,
+                        review_name=r.get("review_name"),
+                        field_value=fv,
+                        field_value_timestamp=r.get("field_value_timestamp"),
+                        review_value=rv,
+                    ).model_dump())
+                except Exception as e:
+                    logger.warning("[get_breached_instruments/field] Row parse skipped for %s: %s row=%s", valid_col, e, r)
+
+        logger.info("[get_breached_instruments] Aggregated %d breached instruments across %d fields", len(aggregated), len(fields))
+        return pd.DataFrame(aggregated) if aggregated else None
 
 
 class _MapSeriesReviewStatusRow(BaseModel):

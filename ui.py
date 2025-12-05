@@ -744,7 +744,10 @@ def render_chat_content() -> None:
                                 parts = []
 
                                 if is_chunk:
-                                    if mc.startswith("import asyncio") and not parallel_code_block_open[branch_id]:
+                                    is_import_line = bool(
+                                        re.match(r"^\s*import\b", mc) or re.match(r"^\s*from\b.+\bimport\b", mc)
+                                    )
+                                    if is_import_line and not parallel_code_block_open[branch_id]:
                                         parts.append("\n\n```python\n")
                                         parallel_code_block_open[branch_id] = True
                                     if mc.startswith("```") and not parallel_code_block_open[branch_id]:
@@ -756,7 +759,7 @@ def render_chat_content() -> None:
                                             parts.append("\n```\n\n")
                                         else:
                                             parts.append("\n\n")
-                                        if not mc.startswith("import asyncio") and not mc.startswith("```"):
+                                        if is_import_line and not mc.startswith("```"):
                                             parts.append("\n\n```python\n")
                                 else:
                                     if parallel_code_block_open[branch_id]:

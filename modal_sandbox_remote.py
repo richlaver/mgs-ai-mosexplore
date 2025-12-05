@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2 import OperationalError
 import b2sdk.v1 as b2
 from langchain_google_vertexai import ChatVertexAI
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, event
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
 from typing import Generator, List, Dict, AsyncGenerator, Optional
@@ -40,7 +40,8 @@ image = (
         "psycopg2-binary",
         "requests",
         "sqlglot",
-        "streamlit"
+        "streamlit",
+        "tabulate",
     )
     .add_local_file("classes.py", remote_path="/root/classes.py")
     .add_local_file("parameters.py", remote_path="/root/parameters.py")
@@ -56,6 +57,17 @@ image = (
     .add_local_file("setup.py", remote_path="/root/setup.py")
     .add_local_file("utils/project_selection.py", remote_path="/root/utils/project_selection.py")
 )
+
+
+def _get_int_env(name: str, default: Optional[int] = None) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Environment variable %s=%s is not an int", name, raw)
+        return default
 
 def _enter_impl(self):
     logger.info("Running container enter hook")
@@ -132,6 +144,22 @@ def _enter_impl(self):
     sys.path.append("/root")
 
 
+def _attach_session_configuration(engine, tmp_size: Optional[int], heap_size: Optional[int]):
+    if not tmp_size and not heap_size:
+        return
+
+    @event.listens_for(engine, "connect")
+    def _set_session_limits(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            if tmp_size:
+                cursor.execute("SET SESSION tmp_table_size = %s", (tmp_size,))
+            if heap_size:
+                cursor.execute("SET SESSION max_heap_table_size = %s", (heap_size,))
+        finally:
+            cursor.close()
+
+
 def _exit_impl(self):
     logger.info("Running container exit hook")
     if hasattr(self, 'metadata_db') and self.metadata_db:
@@ -163,8 +191,11 @@ async def _run_impl(self,
         review_schema_agent,
         breach_instr_agent
     )
+    from tools.create_output_toolkit import CSVSaverTool
     from tools.sql_security_toolkit import GeneralSQLQueryTool
 
+    session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE")
+    session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE")
     try:
         # Verify PostgreSQL connection
         try:
@@ -204,6 +235,7 @@ async def _run_impl(self,
                 engine = create_engine(uri, echo=False, pool_pre_ping=True)
                 metadata = MetaData()
                 Table('3d_condours', metadata, Column('id', Integer, primary_key=True), Column('contour_bound', Geometry))
+                _attach_session_configuration(engine, session_tmp_table_size, session_max_heap_table_size)
                 db = SQLDatabase(
                     engine=engine,
                     metadata=metadata,
@@ -278,18 +310,37 @@ async def _run_impl(self,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
+        csv_saver_tool = CSVSaverTool(
+            write_artefact_tool=write_artefact_tool,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
         run_logger.info("Initialized tools")
+
+        tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
+        tool_limit = max(1, tool_limit)
+        tool_semaphore = asyncio.Semaphore(tool_limit)
+        run_logger.info("Tool call concurrency limited to %s", tool_limit)
 
         async def ainvoke(tool, prompt: str, timeout: float | None = None):
             try:
-                if hasattr(tool, "ainvoke") and callable(getattr(tool, "ainvoke")):
-                    coro = tool.ainvoke(prompt)
-                    return await (asyncio.wait_for(coro, timeout) if timeout else coro)
-                call = getattr(tool, "invoke", None)
-                if call is None or not callable(call):
-                    raise AttributeError("Tool has neither ainvoke nor invoke")
-                fut = asyncio.to_thread(call, prompt)
-                return await (asyncio.wait_for(fut, timeout) if timeout else fut)
+                async with tool_semaphore:
+                    meth = getattr(tool, "ainvoke", None)
+                    if callable(meth):
+                        if inspect.iscoroutinefunction(meth):
+                            coro = meth(prompt)
+                            return await (asyncio.wait_for(coro, timeout) if timeout else coro)
+                        fut = asyncio.to_thread(meth, prompt)
+                        res = await (asyncio.wait_for(fut, timeout) if timeout else fut)
+                        if inspect.isawaitable(res):
+                            return await (asyncio.wait_for(res, timeout) if timeout else res)
+                        return res
+
+                    call = getattr(tool, "invoke", None)
+                    if call is None or not callable(call):
+                        raise AttributeError("Tool has neither ainvoke nor invoke")
+                    fut = asyncio.to_thread(call, prompt)
+                    return await (asyncio.wait_for(fut, timeout) if timeout else fut)
             except Exception as e:
                 run_logger.exception("ainvoke failed for tool %s: %s", getattr(tool, 'name', type(tool).__name__), e)
                 raise
@@ -306,11 +357,11 @@ async def _run_impl(self,
             "review_by_time_agent": review_by_time_tool,
             "review_schema_agent": review_schema_tool,
             "breach_instr_agent": breach_instr_tool,
+            "csv_saver_tool": csv_saver_tool,
             "llm": self.llms['BALANCED'],
             "db": db,
-            "datetime": __import__("datetime").datetime,
-            "timezone": __import__("datetime").timezone,
-            "timedelta": __import__("datetime").timedelta,
+            # Avoid importing datetime because code generation agent gets confused between the datetime module and the datetime class
+            # "datetime": __import__("datetime"),
             "pd": __import__("pandas"),
             "np": __import__("numpy"),
             "ainvoke": ainvoke,

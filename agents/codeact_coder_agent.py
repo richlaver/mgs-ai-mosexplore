@@ -23,12 +23,13 @@ Do not consider missing imports in your check.
 If there are no errors, output "CORRECT".
 
 # Common Coding Errors to Look-out For
-- AttributeError: 'coroutine' object has no attribute 'get_name'.
-- KeyError: <coroutine object as_completed.<locals>._wait_for_one at 0x2b863e6e1b10>
 - Missing `await` in async code when invoking tools or calling async functions.
 - Attempting to access `now()` method from `datetime` module instead of `datetime` class.
 - AttributeError: type object 'datetime.datetime' has no attribute 'datetime'.
 - Tool call arguments not exactly matching ainvoke(tool_name, prompt) signature.
+- SyntaxError: 'return' with value in async generator.
+- ainvoke("tool_name", prompt) instead of ainvoke(tool_name, prompt). Do not use a string for tool_name.
+- Assuming that `map_plot_sandbox_agent`, `timeseries_plot_sandbox_agent`, and `csv_saver_tool` return "artefact_id=<artefact_id>" instead of <artefact_id>. Only the artefact ID itself is returned as a string.
 
 # Code
 {code}
@@ -79,8 +80,7 @@ Generate code to answer the following user query plus an optional extension that
 {previous_attempts_summary}
 
 # Constraints on Your Generated Code
-## Structure
-- Do not include any imports in your code because they are already imported in the sandbox namespace.
+## Imports
 - Already in the namespace:
   * `extraction_sandbox_agent`
   * `timeseries_plot_sandbox_agent`
@@ -89,12 +89,15 @@ Generate code to answer the following user query plus an optional extension that
   * `review_by_time_agent`
   * `review_schema_agent`
   * `breach_instr_agent`
-  * `datetime` class from `datetime` module
-  * `timezone` class from `datetime` module
-  * `timedelta` class from `datetime` module
+  * `csv_saver_tool`
   * `pandas` module as `pd`
   * `numpy` module as `np`
   * `ainvoke` and `asyncio` modules
+- If you need the `datetime` class from the `datetime` module, import it as:
+    `from datetime import datetime as datetime_class`
+  This will avoid confusion with the `datetime` module.
+
+## Structure
 - Define a single function named `execute_strategy` that takes no parameters.
 - Execute tools and code in parallel where possible to reduce latency.
 - Declare as `async def` if running parallel, otherwise `def`.
@@ -113,7 +116,7 @@ Generate code to answer the following user query plus an optional extension that
         {{
             "timestamp": `datetime.datetime.now(timezone.utc).isoformat()`,
             "step": step number in execution plan (int),
-            "type": "progress"|"error"|"final"|"plot"
+            "type": "progress"|"error"|"final"|"plot"|"csv"
         }}
 }}
 - When to yield different types:
@@ -121,6 +124,7 @@ Generate code to answer the following user query plus an optional extension that
   * "error": on exceptions, with error message
   * "final": after all steps with result summary for query and optional extension, self-explanatory and comprehensive for downstream interpretation
   * "plot": when calling a plotting tool
+  * "csv": when calling `csv_saver_tool`
 - ALWAYS yield a "final" output.
 - For "plot" yields write "content" field of above yield dictionary as:
 {{
@@ -128,6 +132,13 @@ Generate code to answer the following user query plus an optional extension that
     "description": detailed description of plot,
     "artefact_id": artefact ID of plot
 }}
+- If you need to yield the contents of any DataFrame with more than 20 rows, ALWAYS use `csv_saver_tool` to save the DataFrame as a CSV and yield a "csv" output with "content" field as:
+{{
+    "tool_name": "csv_saver_tool",
+    "description": detailed description of CSV,
+    "artefact_id": artefact ID of saved CSV
+}}
+then yield only the first 20 rows of the DataFrame in the "final" output to save tokens.
 
 ## Commenting
 - Divide into code blocks, each corresponding to a step in the execution plan.
@@ -138,6 +149,18 @@ Generate code to answer the following user query plus an optional extension that
 - No other comments apart from block explanations to save tokens.
 
 # Tools
+## `csv_saver_tool`
+### How to Use
+- Use to save any pandas DataFrame larger than 20 rows as a CSV file in the file system. The CSV will be downloadable by the user.
+- Call as:
+```python
+await csv_saver_tool.ainvoke({{
+    "dataframe": dataframe_to_save,
+    "description": "Detailed description of the CSV"
+}})
+```
+- Returns artefact ID to access CSV in file system or `None`.
+
 ## `extraction_sandbox_agent`
 ### How to Use
 - Use to extract data from database strictly following `extraction_sandbox_agent.invoke(prompt)` or in async code `await ainvoke(extraction_sandbox_agent, prompt)`.
@@ -247,6 +270,7 @@ Generate code to answer the following user query plus an optional extension that
 ## `review_by_value_agent`
 ### How to Use
 - Use to get review status for one or more known measurement values strictly following `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
+- If you need review status for multiple measurement values, combine into single prompt to reduce latency.
 - Prompt is natural language description of review status request that MUST include:
   * Instrument IDs
   * Database field names
@@ -266,6 +290,7 @@ Status Query 2
 ## `review_by_time_agent`
 ### How to Use
 - Use to get review status of the latest reading before a given timestamp at one or more instruments and data fields strictly following `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
+- If you need review status for multiple instruments and data fields, combine into single prompt to reduce latency.
 - Prompt is natural language description of review status request that MUST include:
   * Instrument IDs
   * Database field names
@@ -285,6 +310,7 @@ Status Query 2
 ## `review_schema_agent`
 ### How to Use
 - Use to get full schema (names, values, direction, color) of active review levels for one or more instrument fields strictly following `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
+- If you need review schemas for multiple instrument fields, combine into single prompt to reduce latency.
 - Prompt is natural language description of review schema request that MUST include:
   * Instrument IDs
   * Database field names
@@ -300,28 +326,36 @@ Schema Query 2
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels) strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Use to get instruments of a specified type whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
 - Prompt is natural language description of review status enquiry that MUST include:
-  * Review level name
   * Instrument type
-  * Instrument subtype (optional)
-  * Database field name
   * Timestamp cut-off
-- Returns `pandas.DataFrame` with columns (`instrument_id`, `field_value`, `field_value_timestamp`, `review_value`) or `None` or `ERROR: <error message>`.
-### Example Prompt
+- For more specific requests, you can include the following in the prompt:
+  * Review level name to only return breaches at that level
+  * Instrument subtype
+  * Database field name
+- Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or `None` or `ERROR: <error message>`.
+### Example Prompt 1
 "List breaches for:
 - Review level name: ALERT
 - Instrument type: LP
 - Instrument subtype: MOVEMENT
 - Database field name: calculation1
 - Timestamp: 14 May 2025 12:00:00 PM"
+### Example Prompt 2
+"List breaches for:
+- Instrument type: LP
+- Timestamp: 14 Jun 2025 09:00:00 PM"
 
 # Common Coding Errors to Avoid
-- AttributeError: 'coroutine' object has no attribute 'get_name'.
-- KeyError: <coroutine object as_completed.<locals>._wait_for_one at 0x2b863e6e1b10>
 - Missing `await` in async code when invoking tools or calling async functions.
 - Attempting to access `now()` method from `datetime` module instead of `datetime` class.
 - Tool call arguments not exactly matching ainvoke(tool_name, prompt) signature.
+- Tool prompts missing mandatory details. Double check against tool guidance above.
+- ainvoke("tool_name", prompt) instead of ainvoke(tool_name, prompt). Do not use a string for tool_name.
+- SyntaxError: 'return' with value in async generator.
+- Assuming that `map_plot_sandbox_agent`, `timeseries_plot_sandbox_agent`, and `csv_saver_tool` return "artefact_id=<artefact_id>" instead of <artefact_id>. Only the artefact ID itself is returned as a string.
+- Assuming the `ainvoke` function does not exist and needs to be defined. Actually the `ainvoke` function is already imported and available for use.
 
 # Sequential Instructions
 1. Analyse the user query to understand what is being asked.
@@ -345,21 +379,21 @@ def extract_code_from_response(response: str) -> str:
 
   # Rule 1: Find "async def execute_strategy():" and return from that line onward
   # This strips any imports and comments that precede the strategy function.
-  for i, line in enumerate(lines):
-    if line.strip().startswith("async def execute_strategy():"):
-      return "\n".join(lines[i:])
-
-  # Rule 1: Find "async def execute_strategy():" then search backward
   # for i, line in enumerate(lines):
   #   if line.strip().startswith("async def execute_strategy():"):
-  #     start_index = i
-  #     for j in range(i - 1, -1, -1):
-  #       prev_line = lines[j]
-  #       if "import " in prev_line or prev_line.strip() == "":
-  #         start_index = j
-  #       else:
-  #         break
-  #     return "\n".join(lines[start_index:])
+  #     return "\n".join(lines[i:])
+
+  # Rule 1: Find "async def execute_strategy():" then search backward
+  for i, line in enumerate(lines):
+    if line.strip().startswith("async def execute_strategy():"):
+      start_index = i
+      for j in range(i - 1, -1, -1):
+        prev_line = lines[j]
+        if "import " in prev_line or prev_line.strip() == "" or prev_line.strip().startswith("#"):
+          start_index = j
+        else:
+          break
+      return "\n".join(lines[start_index:])
 
   # Rule 2: The first line of the first two consecutive lines starting with "import "
   for i in range(len(lines) - 1):
@@ -472,22 +506,24 @@ def codeact_coder_agent(
         extracted_code = extract_code_from_response(response.content)
         cleaned_code = strip_code_tags(extracted_code)
 
-        check_response = check_chain.invoke({"code": cleaned_code})
+        # Skip checking step because the code checker lacks the full context that was used to generate the code and hence often modifies the code to its detriment.
+        # check_response = check_chain.invoke({"code": cleaned_code})
         
-        if "CORRECT" in check_response.content:
-            final_code = cleaned_code
-        else:
-            checked_extracted_code = extract_code_from_response(check_response.content)
-            if checked_extracted_code == check_response.content:
-                final_code = cleaned_code
-            else:
-                final_code = strip_code_tags(checked_extracted_code)
+        # if "CORRECT" in check_response.content:
+        #     final_code = cleaned_code
+        # else:
+        #     checked_extracted_code = extract_code_from_response(check_response.content)
+        #     if checked_extracted_code == check_response.content:
+        #         final_code = cleaned_code
+        #     else:
+        #         final_code = strip_code_tags(checked_extracted_code)
 
         new_execution = Execution(
             agent_type="CodeAct",
             parallel_agent_id=0,
             retry_number=len(previous_attempts),
-            codeact_code=final_code,
+            codeact_code=cleaned_code,
+            # codeact_code=final_code,
             final_response=None,
             artefacts=[],
             error_summary=""

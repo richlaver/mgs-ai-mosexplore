@@ -12,6 +12,7 @@ from agents.review_level_agents import (
     review_schema_agent,
     breach_instr_agent
 )
+from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.artefact_toolkit import WriteArtefactTool
 from agents.context_orchestrator import get_context_graph
@@ -118,6 +119,11 @@ def build_graph(
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
+    )
+    csv_saver_tool = CSVSaverTool(
+        write_artefact_tool=_write_artefact_tool,
+        thread_id=thread_id,
+        user_id=user_id,
     )
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
@@ -266,7 +272,8 @@ def build_graph(
                         review_by_value_tool,
                         review_by_time_tool,
                         review_schema_tool,
-                        breach_instr_tool
+                        breach_instr_tool,
+                        csv_saver_tool
                     ],
                     context=state.context,
                     previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
