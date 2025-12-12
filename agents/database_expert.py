@@ -9,8 +9,31 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
 from langgraph.types import Command
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+class InstrumentSelectionItem(BaseModel):
+    """Structured representation of an instrument key and its selected fields."""
+
+    key: str = Field(..., description="Instrument key formatted as TYPE_SUBTYPE")
+    database_field_names: List[str] = Field(
+        default_factory=list,
+        description="Database field names relevant to the query context",
+    )
+
+
+class InstrumentSelectionList(BaseModel):
+    """Object-wrapped list for structured LLM output (required by Vertex AI)."""
+
+    items: List[InstrumentSelectionItem] = Field(
+        default_factory=list,
+        description="Collection of instrument selections relevant to the query",
+    )
+
+    def to_dict_list(self) -> List[dict[str, Any]]:
+        return [item.model_dump() for item in self.items]
 
 def load_instrument_context(file_path: str = "instrument_context.json") -> dict[str, any]:
     try:
@@ -78,7 +101,7 @@ IMPORTANT: Match query semantics with field semantics using the rich metadata pr
 Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names that are relevant to the specific query context based on field metadata analysis.
 Additionally, identify other relevant keys from query semantics, and select their relevant fields.
 
-Output MUST be valid JSON list format: [[{{"key": "LP_MOVEMENT", "fields": ["calculation1"]}}, ...]
+Output MUST be valid JSON list format: [[{{"key": "LP_MOVEMENT", "database_field_names": ["calculation1"]}}, ...]
 If no relevant fields for a key, use empty list (will skip). If no additional semantics, only explicit.
 If no matches at all, return empty list []."""
 
@@ -94,70 +117,86 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         ("human", human_template)
     ])
 
-    chain = prompt | llm
-    response = chain.invoke({
+    call_inputs = {
         "query": query,
         "context": context,
         "verified_str": verified_str
-    })
+    }
 
+    result: list[dict[str, Any]] | None = None
     try:
-        logger.debug(f"Raw LLM response: {response.content}")
-        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response.content, re.DOTALL | re.IGNORECASE)
-        if json_match:
-            result = json.loads(json_match.group(1))
-            logger.debug("Successfully extracted JSON from markdown code block")
-        else:
-            result = json.loads(response.content)
-        if not isinstance(result, list):
-            logger.warning(f"Expected list but got {type(result)}: {result}")
-            return []
-        valid_items = []
-        for item in result:
-            if isinstance(item, dict) and 'key' in item and 'fields' in item:
-                valid_items.append(item)
+        structured_llm = llm.with_structured_output(InstrumentSelectionList)
+        structured_chain = prompt | structured_llm
+        structured_response = structured_chain.invoke(call_inputs)
+        result = structured_response.to_dict_list()
+        logger.debug(f"Structured instrument selection produced {len(result)} items")
+    except Exception as structured_error:
+        logger.warning(f"Structured output generation failed, falling back to raw parsing: {structured_error}")
+
+    if result is None:
+        chain = prompt | llm
+        response = chain.invoke(call_inputs)
+        try:
+            logger.debug(f"Raw LLM response: {response.content}")
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response.content, re.DOTALL | re.IGNORECASE)
+            if json_match:
+                result = json.loads(json_match.group(1))
+                logger.debug("Successfully extracted JSON from markdown code block")
             else:
-                logger.warning(f"Invalid item structure: {item}")
-        if verified_type_subtype and not valid_items:
-            logger.info("No LLM results but verified instruments exist, creating default entries with intelligent field selection")
-            for type_subtype in verified_type_subtype:
-                if type_subtype in instrument_data:
-                    relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
-                    valid_items.append({
-                        "key": type_subtype,
-                        "fields": relevant_fields
-                    })
-        logger.debug(f"Successfully parsed {len(valid_items)} instrument items")
-        return valid_items
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        logger.error(f"Raw response content: {repr(response.content)}")
-        if verified_type_subtype:
-            logger.info("JSON parsing failed but verified instruments exist, using intelligent field selection fallback")
-            default_items = []
-            for type_subtype in verified_type_subtype:
-                if type_subtype in instrument_data:
-                    relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
-                    default_items.append({
-                        "key": type_subtype,
-                        "fields": relevant_fields
-                    })
-            return default_items
+                result = json.loads(response.content)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            logger.error(f"Raw response content: {repr(response.content)}")
+            if verified_type_subtype:
+                logger.info("JSON parsing failed but verified instruments exist, using intelligent field selection fallback")
+                default_items = []
+                for type_subtype in verified_type_subtype:
+                    if type_subtype in instrument_data:
+                        relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
+                        default_items.append({
+                            "key": type_subtype,
+                            "database_field_names": relevant_fields
+                        })
+                return default_items
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error parsing identified instruments: {e}")
+            if verified_type_subtype:
+                logger.info("Error occurred but verified instruments exist, using intelligent field selection")
+                fallback_items = []
+                for type_subtype in verified_type_subtype:
+                    if type_subtype in instrument_data:
+                        relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
+                        fallback_items.append({
+                            "key": type_subtype,
+                            "database_field_names": relevant_fields
+                        })
+                return fallback_items
+            return []
+
+    if not isinstance(result, list):
+        logger.warning(f"Expected list but got {type(result)}: {result}")
         return []
-    except Exception as e:
-        logger.error(f"Unexpected error parsing identified instruments: {e}")
-        if verified_type_subtype:
-            logger.info("Error occurred but verified instruments exist, using intelligent field selection")
-            fallback_items = []
-            for type_subtype in verified_type_subtype:
-                if type_subtype in instrument_data:
-                    relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
-                    fallback_items.append({
-                        "key": type_subtype,
-                        "fields": relevant_fields
-                    })
-            return fallback_items
-        return []
+
+    valid_items = []
+    for item in result:
+        if isinstance(item, dict) and 'key' in item and 'database_field_names' in item:
+            valid_items.append(item)
+        else:
+            logger.warning(f"Invalid item structure: {item}")
+
+    if verified_type_subtype and not valid_items:
+        logger.info("No LLM results but verified instruments exist, creating default entries with intelligent field selection")
+        for type_subtype in verified_type_subtype:
+            if type_subtype in instrument_data:
+                relevant_fields = _select_relevant_fields_with_llm(llm, query, type_subtype, instrument_data)
+                valid_items.append({
+                    "key": type_subtype,
+                    "database_field_names": relevant_fields
+                })
+
+    logger.debug(f"Successfully parsed {len(valid_items)} instrument items")
+    return valid_items
 
 def get_instrument_metadata_from_json(instrument_data: dict[str, any], instr_type: str, instr_subtype: str) -> dict[str, any]:
     key = f"{instr_type}_{instr_subtype}"
@@ -476,7 +515,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
     verified_type_subtype_set = set(verified_type_subtype)
     for item in semantic_filtered:
         key = item.get('key')
-        selected_fields = item.get('fields', [])
+        selected_fields = item.get('database_field_names', [])
         if key:
             try:
                 instr_type, instr_subtype = key.split('_')

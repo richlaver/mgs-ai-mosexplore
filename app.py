@@ -9,6 +9,7 @@ st.set_page_config(
 
 import session
 from parameters import table_info
+from classes import AgentState, Context
 import logging
 
 def setup_logging():
@@ -56,9 +57,21 @@ def perform_setup():
         agent_type=st.session_state.agent_type,
         selected_project_key=st.session_state.get("selected_project_key"),
     )
+    st.session_state.graph_agent_state_cls_id = id(AgentState)
+    st.session_state.graph_context_cls_id = id(Context)
 
 def main() -> None:
-    if not st.session_state.get("setup_complete", False):
+    needs_setup = not st.session_state.get("setup_complete", False)
+    cached_agent_cls_id = st.session_state.get("graph_agent_state_cls_id")
+    cached_context_cls_id = st.session_state.get("graph_context_cls_id")
+    if cached_agent_cls_id and cached_agent_cls_id != id(AgentState):
+        logger.info("Detected updated AgentState class definition; rebuilding graph.")
+        needs_setup = True
+    if cached_context_cls_id and cached_context_cls_id != id(Context):
+        logger.info("Detected updated Context class definition; rebuilding graph.")
+        needs_setup = True
+
+    if needs_setup:
         perform_setup()
         st.session_state.setup_complete = True
         st.toast("Set-up complete!", icon=":material/celebration:")

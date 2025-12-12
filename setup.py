@@ -206,7 +206,6 @@ def get_llms() -> Dict[str, ChatVertexAI]:
         "FAST": ChatVertexAI(
             model="gemini-2.0-flash-lite",
             temperature=0.3,
-            candidate_count=1,
         ),
         "BALANCED": ChatVertexAI(
             model="gemini-2.0-flash",
@@ -217,6 +216,25 @@ def get_llms() -> Dict[str, ChatVertexAI]:
             temperature=0.7,
         ),
     }
+
+
+def clone_llm_with_overrides(llm: ChatVertexAI, **overrides) -> ChatVertexAI:
+    """Return a new ChatVertexAI copying the source config plus any overrides."""
+    base_params = {
+        "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
+        "temperature": getattr(llm, "temperature", None),
+        "max_output_tokens": getattr(llm, "max_output_tokens", None),
+        "top_p": getattr(llm, "top_p", None),
+        "top_k": getattr(llm, "top_k", None),
+        "safety_settings": getattr(llm, "safety_settings", None),
+        "location": getattr(llm, "location", None),
+        "project": getattr(llm, "project", None),
+    }
+    base_params.update({k: v for k, v in overrides.items() if v is not None})
+    filtered_params = {k: v for k, v in base_params.items() if v is not None}
+    if "model" not in filtered_params:
+        raise ValueError("Cannot clone ChatVertexAI without a model name")
+    return ChatVertexAI(**filtered_params)
 
 
 def get_db() -> SQLDatabase:

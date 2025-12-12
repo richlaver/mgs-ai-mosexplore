@@ -5,6 +5,8 @@ from typing import Dict, Any, List
 from datetime import datetime
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import AIMessage
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from classes import Execution, Context
 
@@ -58,7 +60,7 @@ codeact_coder_prompt = PromptTemplate(
 You are an expert in creating robust execution plans and implementing them in Python code to answer queries on instrumentation monitoring data in a database.
 
 # Task
-Generate code to answer the following user query plus an optional extension that adds value:
+Generate code to answer the following user query:
 {retrospective_query}
 
 # Context
@@ -101,7 +103,7 @@ Generate code to answer the following user query plus an optional extension that
 - Define a single function named `execute_strategy` that takes no parameters.
 - Execute tools and code in parallel where possible to reduce latency.
 - Declare as `async def` if running parallel, otherwise `def`.
-- If async: `async def execute_strategy() -> AsyncGenerator[dict, None]:`
+- If async: `async def execute_strategy() -> AsyncGenerator[dict, None]:` and ensure any nested functions yield instead of return values.
 - If sync: `def execute_strategy() -> Generator[dict, None, None]:`
 - Omit docstrings.
 - Dynamically respond to extracted data and errors for robustness.
@@ -326,12 +328,12 @@ Schema Query 2
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments of a specified type whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Use to get instruments whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
 - Prompt is natural language description of review status enquiry that MUST include:
-  * Instrument type
   * Timestamp cut-off
 - For more specific requests, you can include the following in the prompt:
   * Review level name to only return breaches at that level
+  * Instrument type
   * Instrument subtype
   * Database field name
 - Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or `None` or `ERROR: <error message>`.
@@ -344,7 +346,6 @@ Schema Query 2
 - Timestamp: 14 May 2025 12:00:00 PM"
 ### Example Prompt 2
 "List breaches for:
-- Instrument type: LP
 - Timestamp: 14 Jun 2025 09:00:00 PM"
 
 # Common Coding Errors to Avoid
@@ -360,72 +361,54 @@ Schema Query 2
 # Sequential Instructions
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
-3. Think up an optional extension to the query that adds value to the user's need.
-4. Produce a step-by-step execution plan to answer the query and optional extension. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
-5. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`).
-6. Check code for:
+3. Produce a step-by-step execution plan to answer the query. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
+4. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`).
+5. Check code for:
   - Common coding errors above
   - Logic to answer query
   - Adheres to constraints
   - Calls tools correctly with necessary inputs
   - Yielded outputs formed correctly
-7. Output only the code. Do not include any other text to save tokens.
+6. Output only the code. Do not include any other text to save tokens.
+
+# Output Schema
+- Return EXACTLY one JSON object with the following fields and no additional prose, Markdown, or prefixes:
+  * `objective`: string describing the underlying analytics objective in user-neutral language (<= 50 words).
+  * `plan`: array of concise strings, each string describing one numbered step necessary to fulfil the objective. Keep steps minimal but specific.
+  * `code`: string containing the generated code that already follows the commenting constraints above. Do not wrap the code in Markdown fences or HTML tags.
+- Ensure the JSON uses double-quoted keys/values per RFC 8259 and is syntactically valid even if embedded verbatim into a Python string literal.
+- Do not escape newlines inside the `code` string beyond what is required by JSON; rely on `\n` for line breaks.
+- The `code` string must not contain leading explanations, and only include the required block comments preceding each step.
+- If you cannot follow the schema, return a JSON object with an `error` key describing the issue instead.
 """
 )
 
-def extract_code_from_response(response: str) -> str:
-  """Extracts the code part from the LLM response by removing preceding thought processes."""
-  lines = response.splitlines()
 
-  # Rule 1: Find "async def execute_strategy():" and return from that line onward
-  # This strips any imports and comments that precede the strategy function.
-  # for i, line in enumerate(lines):
-  #   if line.strip().startswith("async def execute_strategy():"):
-  #     return "\n".join(lines[i:])
+class CodeactCoderResponse(BaseModel):
+  objective: str
+  plan: List[str]
+  code: str
 
-  # Rule 1: Find "async def execute_strategy():" then search backward
-  for i, line in enumerate(lines):
-    if line.strip().startswith("async def execute_strategy():"):
-      start_index = i
-      for j in range(i - 1, -1, -1):
-        prev_line = lines[j]
-        if "import " in prev_line or prev_line.strip() == "" or prev_line.strip().startswith("#"):
-          start_index = j
-        else:
-          break
-      return "\n".join(lines[start_index:])
+  model_config = ConfigDict(extra="forbid")
 
-  # Rule 2: The first line of the first two consecutive lines starting with "import "
-  for i in range(len(lines) - 1):
-    if lines[i].strip().startswith("import ") and lines[i+1].strip().startswith("import "):
-      return "\n".join(lines[i:])
+  @field_validator("objective", "code")
+  @classmethod
+  def _validate_non_empty_text(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("Value must be a non-empty string.")
+    return value
 
-  # Rule 3: The line after the first line with "```python"
-  for i, line in enumerate(lines):
-    if "```python" in line:
-      return "\n".join(lines[i+1:])
-
-  # Rule 4: The line after the first line with "python"
-  for i, line in enumerate(lines):
-    if "python" in line:
-      return "\n".join(lines[i+1:])
-
-  # Rule 5: The line after the first line with "<code>"
-  for i, line in enumerate(lines):
-    if "<code>" in line:
-      return "\n".join(lines[i+1:])
-
-  # Rule 6: The line after the first line with "```"
-  for i, line in enumerate(lines):
-    if "```" in line:
-      return "\n".join(lines[i+1:])
-
-  return response
+  @field_validator("plan")
+  @classmethod
+  def _validate_plan(cls, value: List[str]) -> List[str]:
+    cleaned = [step.strip() for step in value if isinstance(step, str) and step.strip()]
+    if not cleaned:
+      raise ValueError("Plan must include at least one non-empty step.")
+    return cleaned
 
 def strip_code_tags(code: str) -> str:
   """Remove markdown and HTML tags from Python code, preserving valid code."""
-  logger.debug(f"Original code before tag stripping: {code}")
-
   code = code.strip()
   # Strip markdown code fences (```python ... ```)
   if code.startswith("```"):
@@ -442,8 +425,15 @@ def strip_code_tags(code: str) -> str:
   # Remove any remaining backticks
   code = code.replace("```", "")
 
-  logger.debug(f"Code after tag stripping: {code}")
   return code
+
+
+def _make_codeact_message(content: str) -> AIMessage:
+    return AIMessage(
+        name="CodeActCoder",
+        content=content,
+        additional_kwargs={"stage": "node", "process": "codeact_coder_branch"},
+    )
 
 def codeact_coder_agent(
     generating_llm: BaseLanguageModel,
@@ -452,94 +442,110 @@ def codeact_coder_agent(
     context: Context,
     previous_attempts: List[Execution]
 ) -> Dict[str, Any]:
-    """Generates code in one LLM call.
+  """Generates code in one LLM call.
 
-    Args:
-        llm: Language model.
-        tools: Available tool instances (including plotting tools).
-        context: Context object.
-        previous_attempts: Prior Execution objects.
+  Args:
+    llm: Language model.
+    tools: Available tool instances (including plotting tools).
+    context: Context object.
+    previous_attempts: Prior Execution objects.
 
-    Returns:
-        Dict for state update: {"executions": [new_execution]}
-    """
-    retrospective_query = context.retrospective_query if context else ""
-    word_context_json = json.dumps([qw.model_dump() for qw in context.word_context] if context and context.word_context else [], indent=2)
-    verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
-    relevant_date_ranges_json = json.dumps([
-        r.model_dump() for r in (context.relevant_date_ranges or [])
-    ], indent=2) if context else "[]"
-    platform_context = context.platform_context or ""
-    project_specific_context = context.project_specific_context or ""
+  Returns:
+    Dict for state update: {"executions": [new_execution], "messages": [...]}
+  """
 
-    current_date = datetime.now().strftime('%B %d, %Y')
+  retrospective_query = context.retrospective_query if context else ""
+  word_context_json = json.dumps([
+    qw.model_dump() for qw in context.word_context
+  ] if context and context.word_context else [], indent=2)
+  verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
+  relevant_date_ranges_json = json.dumps([
+    r.model_dump() for r in (context.relevant_date_ranges or [])
+  ], indent=2) if context else "[]"
+  platform_context = context.platform_context or ""
+  project_specific_context = context.project_specific_context or ""
 
-    tools_str = json.dumps([
-        {"name": t.name, "description": t.description}
-        for t in tools
-    ], indent=2) or "[]"
+  current_date = datetime.now().strftime('%B %d, %Y')
 
-    previous_attempts_summary = "No previous failed attempts."
-    if previous_attempts:
-        previous_attempts_summary = "Summary of previous failed coding attempts:\n"
-        for i, attempt in enumerate(previous_attempts):
-            if attempt.error_summary:
-                previous_attempts_summary += f"Attempt {i+1} failed.\n"
-                previous_attempts_summary += f"Error summary: {attempt.error_summary}\n\n"
+  tools_str = json.dumps([
+    {"name": t.name, "description": t.description}
+    for t in tools
+  ], indent=2) or "[]"
 
-    generate_chain = codeact_coder_prompt | generating_llm
-    check_chain = code_check_prompt | checking_llm
+  previous_attempts_summary = "No previous failed attempts."
+  if previous_attempts:
+    previous_attempts_summary = "Summary of previous failed coding attempts:\n"
+    for i, attempt in enumerate(previous_attempts):
+      if attempt.error_summary:
+        previous_attempts_summary += f"Attempt {i+1} failed.\n"
+        previous_attempts_summary += f"Error summary: {attempt.error_summary}\n\n"
 
-    try:
-        response = generate_chain.invoke({
-            "current_date": current_date,
-            "retrospective_query": retrospective_query,
-            "verified_instrument_info_json": verified_instrument_info_json,
-            "word_context_json": word_context_json,
-            "relevant_date_ranges_json": relevant_date_ranges_json,
-            "platform_context": platform_context,
-            "project_specific_context": project_specific_context,
-            "tools_str": tools_str,
-            "previous_attempts_summary": previous_attempts_summary,
-        })
+  structured_llm = generating_llm.with_structured_output(CodeactCoderResponse)
+  generate_chain = codeact_coder_prompt | structured_llm
+  check_chain = code_check_prompt | checking_llm
 
-        extracted_code = extract_code_from_response(response.content)
-        cleaned_code = strip_code_tags(extracted_code)
+  try:
+    response = generate_chain.invoke({
+      "current_date": current_date,
+      "retrospective_query": retrospective_query,
+      "verified_instrument_info_json": verified_instrument_info_json,
+      "word_context_json": word_context_json,
+      "relevant_date_ranges_json": relevant_date_ranges_json,
+      "platform_context": platform_context,
+      "project_specific_context": project_specific_context,
+      "tools_str": tools_str,
+      "previous_attempts_summary": previous_attempts_summary,
+    })
 
-        # Skip checking step because the code checker lacks the full context that was used to generate the code and hence often modifies the code to its detriment.
-        # check_response = check_chain.invoke({"code": cleaned_code})
-        
-        # if "CORRECT" in check_response.content:
-        #     final_code = cleaned_code
-        # else:
-        #     checked_extracted_code = extract_code_from_response(check_response.content)
-        #     if checked_extracted_code == check_response.content:
-        #         final_code = cleaned_code
-        #     else:
-        #         final_code = strip_code_tags(checked_extracted_code)
+    objective = response.objective.strip()
+    plan_steps = response.plan
+    cleaned_code = strip_code_tags(response.code)
 
-        new_execution = Execution(
-            agent_type="CodeAct",
-            parallel_agent_id=0,
-            retry_number=len(previous_attempts),
-            codeact_code=cleaned_code,
-            # codeact_code=final_code,
-            final_response=None,
-            artefacts=[],
-            error_summary=""
-        )
+    logger.debug("Generated objective: %s", objective)
+    logger.debug("Generated plan: %s", plan_steps)
 
-        return {"executions": [new_execution]}
+    # Skip checking step because the code checker lacks the full context that was used to generate the code and hence often modifies the code to its detriment.
+    # check_response = check_chain.invoke({"code": cleaned_code})
 
-    except Exception as e:
-        logger.error("Error in codeact_coder_agent: %s", str(e))
-        new_execution = Execution(
-            agent_type="CodeAct",
-            parallel_agent_id=0,
-            retry_number=len(previous_attempts),
-            codeact_code="",
-            final_response=None,
-            artefacts=[],
-            error_summary=str(e)
-        )
-        return {"executions": [new_execution]}
+    # if "CORRECT" in check_response.content:
+    #     final_code = cleaned_code
+    # else:
+    #     final_code = strip_code_tags(check_response.content)
+
+    plan_body = "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(plan_steps))
+    messages = [
+      _make_codeact_message(f"Objective:\n{objective}"),
+      _make_codeact_message(f"Plan:\n{plan_body}"),
+      _make_codeact_message(f"```python\n{cleaned_code}\n```"),
+    ]
+
+    new_execution = Execution(
+      agent_type="CodeAct",
+      parallel_agent_id=0,
+      retry_number=len(previous_attempts),
+      codeact_code=cleaned_code,
+      final_response=None,
+      artefacts=[],
+      error_summary=""
+    )
+
+    return {"executions": [new_execution], "messages": messages}
+
+  except Exception as e:
+    logger.error("Error in codeact_coder_agent: %s", str(e))
+    new_execution = Execution(
+      agent_type="CodeAct",
+      parallel_agent_id=0,
+      retry_number=len(previous_attempts),
+      codeact_code="",
+      final_response=None,
+      artefacts=[],
+      error_summary=str(e)
+    )
+    error_message = str(e)
+    messages = [
+      _make_codeact_message(f"Objective generation failed due to error: {error_message}"),
+      _make_codeact_message(f"Plan generation failed due to error: {error_message}"),
+      _make_codeact_message(f"```python\n# Code generation failed due to error: {error_message}\n```"),
+    ]
+    return {"executions": [new_execution], "messages": messages}

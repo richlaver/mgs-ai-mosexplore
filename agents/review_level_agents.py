@@ -206,7 +206,6 @@ Output format: strictly one JSON object. No backticks. No explanations.
 
 def _build_consistency_check_prompt(
         tool_name: str,
-        tool_description: str,
         required_fields: List[str],
         optional_fields: Optional[List[str]] = None,
 ) -> ChatPromptTemplate:
@@ -229,9 +228,6 @@ def _build_consistency_check_prompt(
         optional_list = ", ".join(optional_fields) if optional_fields else "(none)"
         template = f"""
 You are validating structured inputs for the {tool_name}.
-
-Tool function summary:
-{tool_description}
 
 Schema (required -> {required_list}; optional -> {optional_list}).
 
@@ -313,7 +309,6 @@ class BaseGenericReviewAgentTool(BaseTool):
         consistency_chain = (
             _build_consistency_check_prompt(
                 tool_name=agent_label,
-                tool_description=self.description,
                 required_fields=self.required_fields,
                 optional_fields=self.optional_fields,
             ) | self.llm | StrOutputParser()
@@ -687,10 +682,10 @@ class BreachInstrAgentInput(BaseModel):
         ..., 
         description=(
             "Natural language prompt to find instruments whose latest reading before a timestamp is at a specified review status. Prompt must include:\n"
-            "- Instrument type (instrum.type1).\n"
             "- Timestamp cutoff (ISO8601 or parseable).\n"
             "- Optional: Review level name to test (e.g. 'Alert', 'Warning'); if omitted, include breaches at the most severe active level per instrument/field.\n"
-            "- Optional: Instrument subtype (instrum.type2).\n"
+            "- Optional: Instrument type (instrum.type1).\n"
+            "- Optional: Instrument subtype (instrum.subtype1).\n"
             "- Optional: Database field name (dataN or calculationN); if omitted, search all fields with active review schema for the given instrument type/subtype.\n"
             "Example: 'Which settlement instruments of type SETT with subtype DEEP breach the Warning level on calculation1 as of 2025-02-10T00:00:00Z?'"
         )
@@ -702,16 +697,16 @@ class BreachInstrAgentTool(BaseGenericReviewAgentTool):
     description: str = (
         "Finds instruments whose latest reading before a timestamp is at a specified review status (surpasses specified review level but not surpassing any more severe levels).\n"
         "Use to get a filtered list of currently or historically breached instruments.\n"
-        "Prompt MUST contain: instrument type and timestamp. Optional: review level name, instrument subtype, database field name.\n"
+        "Prompt MUST contain a timestamp. Optional: review level name, instrument type, instrument subtype, database field name.\n"
         "If review level name is omitted, returns breaches across all active levels, emitting only the most severe breach per instrument/field. If database field name is omitted, searches all fields with active review schema for the instrument type/subtype.\n"
         "Returns: DataFrame rows (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or None or ERROR: message."
     )
     args_schema: Type[BaseModel] = BreachInstrAgentInput
     underlying_tool_cls: ClassVar[Type[Any]] = GetBreachedInstrumentsTool
-    required_fields: ClassVar[List[str]] = ["instrument_type", "timestamp"]
-    optional_fields: ClassVar[List[str]] = ["instrument_subtype", "db_field_name", "review_name"]
+    required_fields: ClassVar[List[str]] = ["timestamp"]
+    optional_fields: ClassVar[List[str]] = ["instrument_type", "instrument_subtype", "db_field_name", "review_name"]
     instructions: ClassVar[str] = (
-        "Extract instrument_type and timestamp (ISO8601). Optionally extract instrument_subtype, db_field_name, and review_name. If instrument_subtype is absent, set it to null."
+        "Extract timestamp (ISO8601). Optionally extract instrument_type, instrument_subtype, db_field_name, and review_name. If instrument_type or instrument_subtype are absent, set them to null."
     )
     param_map: ClassVar[Dict[str, str]] = {
         "review_name": "review_name",
@@ -722,6 +717,8 @@ class BreachInstrAgentTool(BaseGenericReviewAgentTool):
     }
 
     def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if tool_inputs.get("instrument_type") in ("", "null", None):
+            tool_inputs["instrument_type"] = None
         if tool_inputs.get("instrument_subtype") in ("", "null", None):
             tool_inputs["instrument_subtype"] = None
         return tool_inputs

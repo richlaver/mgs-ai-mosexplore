@@ -4,7 +4,7 @@ import json
 import datetime as dt
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Union, Any, Type
+from typing import Dict, List, Optional, Union, Any, Type, Tuple
 import pandas as pd
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -717,8 +717,8 @@ class GetReviewValueTool(BaseTool, _BaseQueryTool):
 
 class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
     """
-    Finds instruments of given type/subtype where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
-    Omitting `db_field_name` looks for reviews on all fields for the specified instrument type/subtype.
+    Finds instruments (optionally filtered by type/subtype) where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
+    Omitting `db_field_name` looks for reviews on all fields for instrument types and subtypes as specified by the input filters.
     Omitting `review_name` finds breaches across all review levels subject to other input specifications.
 
     Returns a pandas DataFrame with one row per breached instrument (columns match BreachedInstrumentReading), or None, or an ERROR.
@@ -726,8 +726,8 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
     name: str = "get_breached_instruments_tool"
     description: str = (
         """
-        Finds instruments of given type/subtype where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
-        Omitting `db_field_name` looks for reviews on all fields for the specified instrument type/subtype.
+        Finds instruments (optionally filtered by type/subtype) where the latest reading before `timestamp` breaches the named review level, but does NOT breach any more severe level.
+        Omitting `db_field_name` looks for reviews on all fields for instrument types and subtypes as specified by the input filters.
         Omitting `review_name` finds breaches across all review levels subject to other input specifications.
 
         Returns a pandas DataFrame with one row per breached instrument (columns match BreachedInstrumentReading), or None, or an ERROR.
@@ -737,19 +737,43 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
     def _run(
         self,
         review_name: Optional[str],
-        instrument_type: str,
+        instrument_type: Optional[str],
         instrument_subtype: Optional[str],
         db_field_name: Optional[str],
         timestamp: Union[str, datetime],
     ) -> Union[pd.DataFrame, None, str]:
-        if not instrument_type:
-            return "ERROR: instrument_type is required."
-
         if isinstance(timestamp, str):
             try:
                 timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             except Exception:
                 return "ERROR: Invalid timestamp format. Use ISO format."
+
+        instrument_type = instrument_type or None
+        instrument_subtype = instrument_subtype or None
+
+        def _result_join_and_where(row_alias: str = "r") -> Tuple[str, str]:
+            join_clause = ""
+            where_parts = ["b.severity_rank = 1"]
+            if review_name:
+                where_parts.append("b.review_name = %(review_name)s")
+            if instrument_type or instrument_subtype:
+                join_clause = f"JOIN instrum i ON {row_alias}.instr_id = i.instr_id "
+                if instrument_type:
+                    where_parts.append("i.type1 = %(instrument_type)s")
+                if instrument_subtype:
+                    where_parts.append("i.subtype1 = %(instrument_subtype)s")
+            return join_clause, "WHERE " + " AND ".join(where_parts)
+
+        def _discover_join_and_where() -> Tuple[str, str]:
+            join_clause = ""
+            where_parts = ["ri.review_status = 'ON'"]
+            if instrument_type or instrument_subtype:
+                join_clause = "JOIN instrum i ON ri.instr_id = i.instr_id "
+                if instrument_type:
+                    where_parts.append("i.type1 = %(instrument_type)s")
+                if instrument_subtype:
+                    where_parts.append("i.subtype1 = %(instrument_subtype)s")
+            return join_clause, "WHERE " + " AND ".join(where_parts)
         if db_field_name:
             try:
                 valid_col = _validate_col(db_field_name)
@@ -778,6 +802,8 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
                     f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
                 )
 
+            result_join, result_where = _result_join_and_where("r")
+
             sql = (
                 "WITH latest_reading AS ( "
                 "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
@@ -805,12 +831,9 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
                 "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
                 "FROM ranked r "
                 "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
-                "JOIN instrum i ON r.instr_id = i.instr_id "
-                "WHERE i.type1 = %(instrument_type)s "
-                "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
-                + "AND b.severity_rank = 1 "
-                + ("AND b.review_name = %(review_name)s " if review_name else "") +
-                "ORDER BY r.reading_time DESC"
+                + result_join +
+                " " + result_where +
+                " ORDER BY r.reading_time DESC"
             )
 
             params: Dict[str, Any] = {
@@ -862,13 +885,12 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
             logger.info("[get_breached_instruments] Parsed %d breached instruments", len(out))
             return pd.DataFrame(out) if out else None
 
+        discover_join, discover_where = _discover_join_and_where()
         discover_sql = (
             "SELECT DISTINCT ri.review_field AS db_field_name "
             "FROM review_instruments ri "
-            "JOIN instrum i ON ri.instr_id = i.instr_id "
-            "WHERE ri.review_status = 'ON' "
-            "AND i.type1 = %(instrument_type)s "
-            "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s)"
+            + discover_join +
+            " " + discover_where
         )
         try:
             rendered_discover = discover_sql % {
@@ -932,6 +954,8 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
                     f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
                 )
 
+            result_join, result_where = _result_join_and_where("r")
+
             sql = (
                 "WITH latest_reading AS ( "
                 "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
@@ -959,12 +983,9 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
                 "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
                 "FROM ranked r "
                 "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
-                "JOIN instrum i ON r.instr_id = i.instr_id "
-                "WHERE i.type1 = %(instrument_type)s "
-                "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
-                + "AND b.severity_rank = 1 "
-                + ("AND b.review_name = %(review_name)s " if review_name else "") +
-                "ORDER BY r.reading_time DESC"
+                + result_join +
+                " " + result_where +
+                " ORDER BY r.reading_time DESC"
             )
 
             params: Dict[str, Any] = {

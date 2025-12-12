@@ -45,7 +45,11 @@ You are an expert at extracting relevant context from a chat history and incorpo
 # Task
 Incorporate relevant context from chat history, if any exists, into the current query so that the answer will address the user's intention.
 # Instructions
-Carefully analyse the provided chat history and current query. If there is relevant prior context, rewrite the query to include it while preserving critical details and relationships. If not, return the query unchanged.
+1. Carefully analyse the provided chat history and current query.
+2. Identify relevant prior context from the chat history that pertains to the current query.
+3. Assess whether any subsequent context supercedes any of the identified relevant prior context.
+4. If relevant prior context exists and is not superceded, rewrite the current query to include this context while preserving critical details and relationships.
+5. If no relevant prior context exists, return the current query unchanged.
             """
         ),
         (
@@ -56,10 +60,6 @@ Chat history:
 
 Current query:
 {current_query}
-
-Instructions:
-- If no relevant context exists, return the current query verbatim.
-- If relevant context exists, return a rewritten query that incorporates the context and preserves critical details and relationships.
             """
         ),
     ]

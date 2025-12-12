@@ -57,4 +57,4 @@ def setup_session() -> None:
     if "agent_type" not in st.session_state:
         st.session_state.agent_type = "CodeAct"
     if "selected_project_key" not in st.session_state:
-        st.session_state.selected_project_key = "project_data.hanoi_clone"
+        st.session_state.selected_project_key = "project_data.hanoi_live"

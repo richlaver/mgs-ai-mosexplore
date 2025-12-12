@@ -37,6 +37,7 @@ from typing import List, Dict, Any
 import logging
 
 from parameters import progress_messages
+from setup import clone_llm_with_overrides
 
 import json
 import traceback
@@ -63,8 +64,10 @@ def build_graph(
 ) -> StateGraph:
     st.toast("Building graph...", icon=":material/account_tree:")
 
+    tools_llm = clone_llm_with_overrides(llms['BALANCED'], temperature=0.1)
+
     extraction_tool = extraction_sandbox_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         db=db,
         table_info=table_info,
         table_relationship_graph=table_relationship_graph,
@@ -79,42 +82,42 @@ def build_graph(
     )
     _write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
     timeseries_plot_tool = timeseries_plot_sandbox_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
     )
     map_plot_tool = map_plot_sandbox_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         sql_tool=_general_sql_query_tool,
         write_artefact_tool=_write_artefact_tool,
         thread_id=thread_id,
         user_id=user_id,
     )
     review_by_value_tool = review_by_value_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     review_by_time_tool = review_by_time_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     review_schema_tool = review_schema_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access
     )
     breach_instr_tool = breach_instr_agent(
-        llm=llms['BALANCED'],
+        llm=tools_llm,
         db=db,
         table_relationship_graph=table_relationship_graph,
         user_id=user_id,
@@ -282,7 +285,7 @@ def build_graph(
                 code = (new_execution.codeact_code or "").strip()
                 updated = ex.model_copy(update={"codeact_code": code})
 
-                messages: List[AIMessage] = []
+                messages: List[AIMessage] = list(coder_result.get("messages", []) or [])
                 artefacts: List[AIMessage] = []
                 final_msg: AIMessage | None = None
                 logs: List[str] = []

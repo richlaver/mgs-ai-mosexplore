@@ -25,6 +25,28 @@ from tools.sql_security_toolkit import GeneralSQLQueryTool
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_column_name(column: str) -> str:
+    if not column:
+        return column
+    column = column.strip()
+    if len(column) >= 2 and column[0] == column[-1] and column[0] in {"'", '"', '`'}:
+        column = column[1:-1]
+    return column
+
+
+def _extract_expected_columns(prompt: str) -> Optional[List[str]]:
+    if not prompt:
+        return None
+    match = re.search(r'Output columns:\s*\[([^\]]*)\]', prompt)
+    if not match:
+        return None
+    columns_str = match.group(1)
+    raw_columns = [col.strip() for col in columns_str.split(',') if col.strip()]
+    cleaned_columns = [_sanitize_column_name(col) for col in raw_columns]
+    logger.debug("[expected_columns] Extracted columns: %s", cleaned_columns)
+    return cleaned_columns if cleaned_columns else None
+
 class ExtractionSandboxAgentState(TypedDict):
     prompt: str
     sql_query: Optional[str]
@@ -189,11 +211,8 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
         # Extract expected columns from prompt
         prompt = state.get('prompt', '')
-        expected_columns = None
-        match = re.search(r'Output columns:\s*\[([^\]]*)\]', prompt)
-        if match:
-            columns_str = match.group(1)
-            expected_columns = [col.strip() for col in columns_str.split(',') if col.strip()]
+        expected_columns = _extract_expected_columns(prompt)
+        if expected_columns:
             logger.debug("[check_sql] Expected columns from prompt: %s", expected_columns)
 
         # Parse SQL query to extract aliases using sqlglot
@@ -454,12 +473,8 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
         # Extract expected output columns from prompt
         prompt = state.get('prompt', '')
-        expected_columns = None
-        match = re.search(r'Output columns:\s*\[([^\]]*)\]', prompt)
-        if match:
-            # Parse the column names, handling spaces and commas
-            columns_str = match.group(1)
-            expected_columns = [col.strip() for col in columns_str.split(',') if col.strip()]
+        expected_columns = _extract_expected_columns(prompt)
+        if expected_columns:
             logger.debug("[parse_results] Expected columns from prompt: %s", expected_columns)
 
         try:

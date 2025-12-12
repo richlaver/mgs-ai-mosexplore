@@ -1,6 +1,8 @@
 import sys
 import asyncio
 import inspect
+import contextlib
+import io
 import modal
 import logging
 import json
@@ -12,9 +14,44 @@ from langchain_google_vertexai import ChatVertexAI
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, event
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
-from typing import Generator, List, Dict, AsyncGenerator, Optional
+from datetime import datetime, timezone
+from typing import Generator, List, Dict, AsyncGenerator, Optional, Any
 from parameters import include_tables
 from setup import build_modal_secrets
+
+# Ten times the default MySQL limits
+MYSQL_DEFAULT_SESSION_TABLE_LIMIT_BYTES = 16 * 1024 * 1024
+SANDBOX_SESSION_TABLE_LIMIT_BYTES = MYSQL_DEFAULT_SESSION_TABLE_LIMIT_BYTES * 10
+
+
+def _ensure_basic_logging():
+    """Attach a stdout handler so every logger (including nested tools) surfaces output."""
+    root = logging.getLogger()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    stdout_handler = None
+    for handler in root.handlers:
+        if isinstance(handler, logging.StreamHandler) and getattr(handler.stream, "name", None) == "stdout":
+            stdout_handler = handler
+            break
+
+    if stdout_handler is None:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        root.addHandler(stdout_handler)
+
+    stdout_handler.setFormatter(formatter)
+    stdout_handler.setLevel(logging.INFO)
+    root.setLevel(logging.INFO)
+    logging.captureWarnings(True)
+
+    for namespace in (
+        "modal_sandbox",
+        "tools",
+        "agents",
+        "tools.sql_security_toolkit",
+    ):
+        logging.getLogger(namespace).setLevel(logging.INFO)
+
 
 app = modal.App("mgs-code-sandbox")
 logger = logging.getLogger(__name__)
@@ -69,7 +106,157 @@ def _get_int_env(name: str, default: Optional[int] = None) -> Optional[int]:
         logger.warning("Environment variable %s=%s is not an int", name, raw)
         return default
 
+
+def _ensure_sandbox_session_limits():
+    """Ensure sandbox session tmp/max heap table limits default to 10x MySQL defaults."""
+    default_value = str(SANDBOX_SESSION_TABLE_LIMIT_BYTES)
+    limit_mib = SANDBOX_SESSION_TABLE_LIMIT_BYTES // (1024 * 1024)
+    if "SANDBOX_SESSION_TMP_TABLE_SIZE" not in os.environ:
+        os.environ["SANDBOX_SESSION_TMP_TABLE_SIZE"] = default_value
+        logger.info(
+            "Defaulting SANDBOX_SESSION_TMP_TABLE_SIZE to %s bytes (~%s MiB)",
+            default_value,
+            limit_mib,
+        )
+    if "SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE" not in os.environ:
+        os.environ["SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE"] = default_value
+        logger.info(
+            "Defaulting SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE to %s bytes (~%s MiB)",
+            default_value,
+            limit_mib,
+        )
+
+
+class _SandboxStream(io.TextIOBase):
+    """Tee a text stream into an asyncio queue while preserving default behavior."""
+
+    def __init__(self, original: io.TextIOBase, queue: "asyncio.Queue[Optional[str]]", filter_fn=None):
+        self._original = original
+        self._queue = queue
+        self._buffer: str = ""
+        self._filter = filter_fn
+
+    def writable(self) -> bool:  # pragma: no cover - interface hook
+        return True
+
+    def write(self, data: str) -> int:  # pragma: no cover - exercised indirectly
+        if not data:
+            return 0
+        self._original.write(data)
+        normalized = data.replace("\r\n", "\n").replace("\r", "\n")
+        self._buffer += normalized
+        self._flush_lines()
+        return len(data)
+
+    def flush(self) -> None:  # pragma: no cover - interface hook
+        self._original.flush()
+
+    def flush_buffer(self) -> None:
+        if self._buffer:
+            self._emit_line(self._buffer)
+            self._buffer = ""
+
+    def _flush_lines(self) -> None:
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit_line(line)
+
+    def _emit_line(self, line: str) -> None:
+        trimmed = line.rstrip()
+        if not trimmed:
+            return
+        if self._filter and not self._filter(trimmed):
+            return
+        try:
+            self._queue.put_nowait(trimmed)
+        except asyncio.QueueFull:  # pragma: no cover - unbounded queue by default
+            pass
+
+
+def _stdout_error_filter(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    upper = stripped.upper()
+    if any(marker in upper for marker in ("[WARNING]", "[ERROR]", "[CRITICAL]", "[EXCEPTION]")):
+        return True
+    lower = stripped.lower()
+    if "traceback" in lower or "exception" in lower:
+        return True
+    return "error" in lower
+
+
+class _QueueLoggingHandler(logging.Handler):
+    """Bridge logging records into the sandbox stdout/stderr queues."""
+
+    def __init__(self, stdout_queue: "asyncio.Queue[Optional[str]]", stderr_queue: "asyncio.Queue[Optional[str]]"):
+        super().__init__(level=logging.INFO)
+        self._stdout_queue = stdout_queue
+        self._stderr_queue = stderr_queue
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - thin adapter
+        try:
+            msg = self.format(record)
+        except Exception:  # pragma: no cover - fallback to default logging error handling
+            self.handleError(record)
+            return
+
+        target_queue = self._stderr_queue if record.levelno >= logging.WARNING else self._stdout_queue
+        if not msg or target_queue is None:
+            return
+        if target_queue is self._stdout_queue and not _stdout_error_filter(msg):
+            return
+        try:
+            target_queue.put_nowait(msg)
+        except asyncio.QueueFull:  # pragma: no cover - queues are unbounded in practice
+            pass
+
+
+def _make_step_payload(content: str, typ: str, step: int = 0, extra_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Dict | str]:
+    safe_step = step if isinstance(step, int) and step >= 0 else 0
+    payload = {
+        "content": (content or ""),
+        "metadata": {
+            "type": typ,
+            "step": safe_step,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    if extra_metadata:
+        payload["metadata"].update(extra_metadata)
+    return payload
+
+
+def _format_error_payload(
+    message: Optional[str] = None,
+    step: int = 0,
+    origin: str = "sandbox",
+    *,
+    line: Optional[str] = None,
+) -> Dict[str, Dict | str]:
+    safe_step = step if isinstance(step, int) and step >= 0 else 0
+    chosen_text = message if message not in (None, "") else line
+    safe_message = (chosen_text or "").strip()
+    safe_origin = (origin or "sandbox").strip() or "sandbox"
+    prefix = f"[{safe_origin.upper()}][Step {safe_step}]"
+    content = f"{prefix} {safe_message}" if safe_message else prefix
+    return _make_step_payload(content=content, typ="error", step=safe_step, extra_metadata={"origin": safe_origin})
+
+
+def _drain_stream_lines(queue: "asyncio.Queue[Optional[str]]") -> List[str]:
+    lines: List[str] = []
+    while True:
+        try:
+            line = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if line:
+            lines.append(line)
+    return lines
+
 def _enter_impl(self):
+    _ensure_basic_logging()
+    _ensure_sandbox_session_limits()
     logger.info("Running container enter hook")
 
     # Set up Google credentials
@@ -176,6 +363,7 @@ async def _run_impl(self,
     global_hierarchy_access: bool,
     selected_project_key: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
+    _ensure_basic_logging()
     from tools.artefact_toolkit import WriteArtefactTool
     run_logger = logging.getLogger("modal_sandbox.run")
     run_logger.info("Starting sandbox execution | user_id=%s global_access=%s code_len=%s table_info=%s rel_graph_keys=%s",
@@ -194,8 +382,8 @@ async def _run_impl(self,
     from tools.create_output_toolkit import CSVSaverTool
     from tools.sql_security_toolkit import GeneralSQLQueryTool
 
-    session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE")
-    session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE")
+    session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
+    session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
     try:
         # Verify PostgreSQL connection
         try:
@@ -322,6 +510,28 @@ async def _run_impl(self,
         tool_semaphore = asyncio.Semaphore(tool_limit)
         run_logger.info("Tool call concurrency limited to %s", tool_limit)
 
+        stdout_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+        stderr_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+        stdout_stream = _SandboxStream(sys.stdout, stdout_queue, filter_fn=_stdout_error_filter)
+        stderr_stream = _SandboxStream(sys.stderr, stderr_queue)
+        stdout_ctx = contextlib.redirect_stdout(stdout_stream)
+        stderr_ctx = contextlib.redirect_stderr(stderr_stream)
+
+        queue_logging_handler = _QueueLoggingHandler(stdout_queue, stderr_queue)
+        queue_logging_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(queue_logging_handler)
+
+        def _collect_stream_payloads(flush: bool = False) -> List[Dict[str, Dict | str]]:
+            if flush:
+                stdout_stream.flush_buffer()
+                stderr_stream.flush_buffer()
+            payloads: List[Dict[str, Dict | str]] = []
+            for origin, queue in (("stderr", stderr_queue), ("stdout", stdout_queue)):
+                for line in _drain_stream_lines(queue):
+                    payloads.append(_format_error_payload(message=line, step=0, origin=origin))
+            return payloads
+
         async def ainvoke(tool, prompt: str, timeout: float | None = None):
             try:
                 async with tool_semaphore:
@@ -345,98 +555,124 @@ async def _run_impl(self,
                 run_logger.exception("ainvoke failed for tool %s: %s", getattr(tool, 'name', type(tool).__name__), e)
                 raise
 
-        # Prepare and execute code
-        if not code.strip().startswith("from __future__ import annotations"):
-            code = "from __future__ import annotations\n" + code
-
-        local_namespace = {
-            "extraction_sandbox_agent": extraction_tool,
-            "timeseries_plot_sandbox_agent": timeseries_plot_sandbox_tool,
-            "map_plot_sandbox_agent": map_plot_sandbox_tool,
-            "review_by_value_agent": review_by_value_tool,
-            "review_by_time_agent": review_by_time_tool,
-            "review_schema_agent": review_schema_tool,
-            "breach_instr_agent": breach_instr_tool,
-            "csv_saver_tool": csv_saver_tool,
-            "llm": self.llms['BALANCED'],
-            "db": db,
-            # Avoid importing datetime because code generation agent gets confused between the datetime module and the datetime class
-            # "datetime": __import__("datetime"),
-            "pd": __import__("pandas"),
-            "np": __import__("numpy"),
-            "ainvoke": ainvoke,
-            "asyncio": asyncio,
-            "PARALLEL_ENABLED": True,
-        }
-        run_logger.info("[%s] Executing user code via exec()", type(self).__name__)
-
-        exec(code, local_namespace)
-
-        if "execute_strategy" not in local_namespace:
-            run_logger.error("User code did not define 'execute_strategy'")
-            yield {"type": "error", "content": "Error: Code must define an 'execute_strategy' function."}
-            return
-        execute_strategy = local_namespace["execute_strategy"]
-        if not callable(execute_strategy):
-            run_logger.error("'execute_strategy' is not callable")
-            yield {"type": "error", "content": "Error: 'execute_strategy' must be a callable function."}
-            return
-
-        run_logger.info("[%s] Running execute_strategy() with zero arguments ...", type(self).__name__)
-
-        async def _yield_outputs(obj):
-            """Yield outputs from any kind of result (async gen, coroutine, sync iterable, dict)."""
-            try:
-                if obj is None:
-                    return
-                # Async generator
-                if inspect.isasyncgen(obj):
-                    async for item in obj:
-                        yield item
-                    return
-                # Coroutine -> await and recurse
-                if inspect.iscoroutine(obj):
-                    awaited = await obj
-                    async for item in _yield_outputs(awaited):
-                        yield item
-                    return
-                # Single dict payload
-                if isinstance(obj, dict):
-                    yield obj
-                    return
-                # Synchronous iterable (avoid iterating strings/bytes)
-                if isinstance(obj, (str, bytes, bytearray)):
-                    return
-                try:
-                    iterator = iter(obj)
-                except TypeError:
-                    return
-                else:
-                    for item in iterator:
-                        yield item
-                    return
-            except Exception as e:
-                run_logger.exception("Error while yielding outputs: %s", e)
-                raise
-
         try:
-            result = execute_strategy()
-        except TypeError as te:
-            yield {"type": "error", "content": (
-                "Error: execute_strategy must be defined with zero arguments. "
-                f"Caught TypeError when calling execute_strategy(): {te}"
-            )}
-            return
+            with stdout_ctx, stderr_ctx:
+                # Prepare and execute code
+                if not code.strip().startswith("from __future__ import annotations"):
+                    code = "from __future__ import annotations\n" + code
 
-        async for output in _yield_outputs(result):
-            yield output
-        run_logger.info("[%s] execute_strategy completed", type(self).__name__)
+                local_namespace = {
+                    "extraction_sandbox_agent": extraction_tool,
+                    "timeseries_plot_sandbox_agent": timeseries_plot_sandbox_tool,
+                    "map_plot_sandbox_agent": map_plot_sandbox_tool,
+                    "review_by_value_agent": review_by_value_tool,
+                    "review_by_time_agent": review_by_time_tool,
+                    "review_schema_agent": review_schema_tool,
+                    "breach_instr_agent": breach_instr_tool,
+                    "csv_saver_tool": csv_saver_tool,
+                    "llm": self.llms['BALANCED'],
+                    "db": db,
+                    # Avoid importing datetime because code generation agent gets confused between the datetime module and the datetime class
+                    # "datetime": __import__("datetime"),
+                    "pd": __import__("pandas"),
+                    "np": __import__("numpy"),
+                    "ainvoke": ainvoke,
+                    "asyncio": asyncio,
+                    "PARALLEL_ENABLED": True,
+                }
+                run_logger.info("[%s] Executing user code via exec()", type(self).__name__)
+
+                exec(code, local_namespace)
+
+                if "execute_strategy" not in local_namespace:
+                    run_logger.error("User code did not define 'execute_strategy'")
+                    yield _make_step_payload(
+                        content="Error: Code must define an 'execute_strategy' function.",
+                        typ="error",
+                    )
+                    for payload in _collect_stream_payloads(flush=True):
+                        yield payload
+                    return
+                execute_strategy = local_namespace["execute_strategy"]
+                if not callable(execute_strategy):
+                    run_logger.error("'execute_strategy' is not callable")
+                    yield _make_step_payload(
+                        content="Error: 'execute_strategy' must be a callable function.",
+                        typ="error",
+                    )
+                    for payload in _collect_stream_payloads(flush=True):
+                        yield payload
+                    return
+
+                run_logger.info("[%s] Running execute_strategy() with zero arguments ...", type(self).__name__)
+
+                async def _yield_outputs(obj):
+                    """Yield outputs from any kind of result (async gen, coroutine, sync iterable, dict)."""
+                    try:
+                        if obj is None:
+                            return
+                        # Async generator
+                        if inspect.isasyncgen(obj):
+                            async for item in obj:
+                                yield item
+                            return
+                        # Coroutine -> await and recurse
+                        if inspect.iscoroutine(obj):
+                            awaited = await obj
+                            async for item in _yield_outputs(awaited):
+                                yield item
+                            return
+                        # Single dict payload
+                        if isinstance(obj, dict):
+                            yield obj
+                            return
+                        # Synchronous iterable (avoid iterating strings/bytes)
+                        if isinstance(obj, (str, bytes, bytearray)):
+                            return
+                        try:
+                            iterator = iter(obj)
+                        except TypeError:
+                            return
+                        else:
+                            for item in iterator:
+                                yield item
+                            return
+                    except Exception as e:
+                        run_logger.exception("Error while yielding outputs: %s", e)
+                        raise
+
+                try:
+                    result = execute_strategy()
+                except TypeError as te:
+                    yield _make_step_payload(
+                        content=(
+                            "Error: execute_strategy must be defined with zero arguments. "
+                            f"Caught TypeError when calling execute_strategy(): {te}"
+                        ),
+                        typ="error",
+                    )
+                    for payload in _collect_stream_payloads(flush=True):
+                        yield payload
+                    return
+
+                async for output in _yield_outputs(result):
+                    for payload in _collect_stream_payloads():
+                        yield payload
+                    yield output
+                for payload in _collect_stream_payloads(flush=True):
+                    yield payload
+                run_logger.info("[%s] execute_strategy completed", type(self).__name__)
+        finally:
+            root_logger.removeHandler(queue_logging_handler)
+            queue_logging_handler.close()
 
     except Exception as e:
         import traceback
         error_message = f"An error occurred in the sandbox: {e}\n{traceback.format_exc()}"
         run_logger.exception("Sandbox execution failed: %s", e)
-        yield {"type": "error", "content": error_message}
+        yield _make_step_payload(content=error_message, typ="error")
+        for payload in _collect_stream_payloads(flush=True):
+            yield payload
 @app.cls(
     image=image,
     secrets=build_modal_secrets(),

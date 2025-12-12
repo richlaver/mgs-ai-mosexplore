@@ -236,12 +236,12 @@ Schema Query 2
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments of a specified type whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
+- Use to get instruments whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
 - Prompt is natural language description of review status enquiry that MUST include:
-  * Instrument type
   * Timestamp cut-off
 - For more specific requests, you can include the following in the prompt:
   * Review level name to only return breaches at that level
+  * Instrument type
   * Instrument subtype
   * Database field name
 - Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, review_name, field_value, field_value_timestamp, review_value) or `None` or `ERROR: <error message>`.
@@ -254,18 +254,16 @@ Schema Query 2
 - Timestamp: 14 May 2025 12:00:00 PM"
 ### Example Prompt 2
 "List breaches for:
-- Instrument type: LP
 - Timestamp: 14 Jun 2025 09:00:00 PM"
 
 # Instructions
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
-3. Think up an optional extension to the query that adds value to the user's need.
-4. Plan how to answer the query and optional extension.
-5. Use tools to extract and/or plot data. You must call multiple tools in parallel if their executions are independent (e.g., extracting data for different sets of instruments, or creating different plots). This reduces latency.
-6. After receiving tool outputs, parse JSON from `extraction_sandbox_agent` if needed.
-7. Collect artefact IDs from plotting tools.
-8. Provide a final answer that addresses the query and extension, referencing the data and artefacts as appropriate.
+3. Plan how to answer the query.
+4. Use tools to extract and/or plot data. You must call multiple tools in parallel if their executions are independent (e.g., extracting data for different sets of instruments, or creating different plots). This reduces latency.
+5. After receiving tool outputs, parse JSON from `extraction_sandbox_agent` if needed.
+6. Collect artefact IDs from plotting tools.
+7. Provide a final answer that addresses the query, referencing the data and artefacts as appropriate.
 
 When calling tools, provide detailed natural language prompts as specified in the tool descriptions (pass as the "prompt" argument).
 

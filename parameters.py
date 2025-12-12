@@ -77,36 +77,12 @@ progress_messages = {
             "process": "query_classifier"
         }
     ),
-    'codeact_coder_branch': AIMessage(
-        name="CodeActCoderBranch",
-        content="Thinking up a strategy to answer your query...",
+    'enter_parallel_execution_node': AIMessage(
+        name="EnterParallelExecutionNode",
+        content="Implementing a strategy to answer your query...",
         additional_kwargs={
             "stage": "node",
-            "process": "codeact_coder_branch"
-        }
-    ),
-    'codeact_executor_branch': AIMessage(
-        name="CodeActExecutorBranch",
-        content="Actioning my strategy...",
-        additional_kwargs={
-            "stage": "node",
-            "process": "codeact_executor_branch"
-        }
-    ),
-    'react_branch': AIMessage(
-        name="ReactBranch",
-        content="Working on an answer to your query...",
-        additional_kwargs={
-            "stage": "node",
-            "process": "react_branch"
-        }
-    ),
-    'tool_calling_branch': AIMessage(
-        name="ToolCallingBranch",
-        content="Working on an answer to your query...",
-        additional_kwargs={
-            "stage": "node",
-            "process": "tool_calling_branch"
+            "process": "enter_parallel_execution_node"
         }
     ),
     'reporter_node': AIMessage(
