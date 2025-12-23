@@ -10,6 +10,7 @@ st.set_page_config(
 import session
 from parameters import table_info
 from classes import AgentState, Context
+from utils.context_data import ensure_project_context
 import logging
 
 def setup_logging():
@@ -39,6 +40,7 @@ def perform_setup():
 
     st.session_state.db = setup.get_db()
     st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+    ensure_project_context(st.session_state.get("selected_project_key"), force_refresh=True, strict=True)
 
     import graph
     st.session_state.graph = graph.build_graph(

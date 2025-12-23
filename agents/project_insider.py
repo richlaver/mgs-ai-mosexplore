@@ -7,19 +7,41 @@ from typing import Any, Optional
 from langgraph.types import Command
 
 from classes import ContextState
-from parameters import project_specific_context
+from utils.context_data import get_project_specific_context
 
 LOGGER = logging.getLogger(__name__)
 
 
 def _lookup_project_context(selected_project_key: str) -> Optional[str]:
-    """Return the project-specific context string associated with a database host."""
-    for entry in project_specific_context:
-        db_keys = entry.get("database_keys", [])
-        if isinstance(db_keys, list) and selected_project_key in db_keys:
-            context_value = entry.get("context")
-            if isinstance(context_value, str) and context_value.strip():
-                return context_value.strip()
+    """Return the project-specific context string for the selected project."""
+    # Delete the following block when the project-specific context in the API has been corrected.
+    if 'hanoi' in selected_project_key:
+        return """
+**IMPORTANT**:
+You MUST ensure that whenever you call review level tools or extract review levels ALWAYS specify a `data` field in the tool prompt.
+If you want to check review levels for a `calculation` field, you MUST convert it to the corresponding `data` field first.
+For example, if you want to check review levels for `calculation2`, you MUST specify `data2` in the tool prompt instead.
+"""
+    if 'lpp' in selected_project_key:
+        return """
+**IMPORTANT**:
+If a reading value is stored in a `calculation` field and the value of the reading is an empty string you MUST regard this as a missing reading.
+Therefore when you are extracting such values you MUST use:
+```sql
+CASE WHEN JSON_VALID(column) AND NULLIF(JSON_VALUE(column, '$.path'), '') IS NOT NULL THEN JSON_VALUE(column, '$.path') ELSE NULL END
+```
+and:
+```sql
+WHERE NULLIF(JSON_VALUE(column, '$.path1'), '') IS NOT NULL
+```
+For `calculation` field values which are not reading values simply use:
+```sql
+CASE WHEN JSON_VALID(column) THEN JSON_EXTRACT(column, '$.path') ELSE NULL END
+```
+"""
+    context_value = get_project_specific_context(selected_project_key)
+    if isinstance(context_value, str) and context_value.strip():
+        return context_value.strip()
     return None
 
 

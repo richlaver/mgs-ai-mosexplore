@@ -89,7 +89,7 @@ def validate_instruments_in_database(db: any, instrument_ids: list[str]) -> dict
             logger.error(f"Error validating {instrument_id}: {e}")
     return valid_instruments
 
-def instrument_validator(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
+def instr_type_validator(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
     """Instrument validator agent: Excludes and identifies/validates instrument IDs, updates context.
     Returns a Command to update state in the graph.
     """

@@ -2,9 +2,9 @@ import logging
 import re
 import json
 import datetime as dt
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional, Union, Any, Type, Tuple
+from typing import Dict, List, Optional, Union, Any, Type, Tuple, Literal
 import pandas as pd
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -170,6 +170,20 @@ class _BreachedInstrumentReading(BaseModel):
     field_value_timestamp: datetime = Field(..., description="Timestamp of the field value.")
     review_value: float = Field(..., description="Threshold value of the named review level.")
 
+
+class _ReviewChangeAcrossPeriod(BaseModel):
+    """Schema describing a change in review status between two timestamps."""
+    instrument_id: str = Field(..., description="Instrument ID (from instrum.instr_id).")
+    db_field_name: str = Field(..., description="System field name (dataN or calculationN).")
+    start_review_name: Optional[str] = Field(None, description="Review level breached just before start_timestamp, None if unbreached.")
+    start_review_value: Optional[float] = Field(None, description="Threshold value for the breached start review level (if any).")
+    start_field_value: float = Field(..., description="Reading value immediately before start_timestamp within buffer.")
+    start_field_value_timestamp: datetime = Field(..., description="Timestamp of the start reading.")
+    end_review_name: Optional[str] = Field(None, description="Review level breached just before end_timestamp, None if unbreached.")
+    end_review_value: Optional[float] = Field(None, description="Threshold value for the breached end review level (if any).")
+    end_field_value: float = Field(..., description="Reading value immediately before end_timestamp within buffer.")
+    end_field_value_timestamp: datetime = Field(..., description="Timestamp of the end reading.")
+
 class _ReviewStatusByValueItem(BaseModel):
     instrument_id: str = Field(..., description="Instrument ID")
     db_field_name: str = Field(..., description="System field name (dataN or calculationN)")
@@ -200,6 +214,20 @@ class _ReviewValueItem(BaseModel):
 
 class _ReviewValueInput(BaseModel):
     items: List[_ReviewValueItem] = Field(..., description="List of review value retrieval items")
+
+
+class _ReviewChangesAcrossPeriodInput(BaseModel):
+    instrument_type: Optional[str] = Field(None, description="Optional instrument type filter (instrum.type1).")
+    instrument_subtype: Optional[str] = Field(None, description="Optional instrument subtype filter (instrum.subtype1).")
+    db_field_name: Optional[str] = Field(None, description="Optional data/calculation field to restrict review discovery.")
+    start_timestamp: Union[str, datetime] = Field(..., description="Period start boundary (ISO string or datetime).")
+    end_timestamp: Union[str, datetime] = Field(..., description="Period end boundary (ISO string or datetime).")
+    start_buffer: Optional[Union[int, float]] = Field(None, description="Maximum days before start_timestamp allowed for the start reading (None means unbounded).")
+    end_buffer: Optional[Union[int, float]] = Field(None, description="Maximum days before end_timestamp allowed for the end reading (defaults to half the period, capped at the full period).")
+    change_direction: Literal["up", "down", "both"] = Field(
+        "up",
+        description="Return only more-severe ('up'), less-severe ('down'), or all ('both') review changes.",
+    )
 
 
 class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
@@ -1036,6 +1064,350 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
                     logger.warning("[get_breached_instruments/field] Row parse skipped for %s: %s row=%s", valid_col, e, r)
 
         logger.info("[get_breached_instruments] Aggregated %d breached instruments across %d fields", len(aggregated), len(fields))
+        return pd.DataFrame(aggregated) if aggregated else None
+
+
+class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
+    """
+    Finds changes in review level at instruments across a specified time period between `start_timestamp` and `end_timestamp`.
+    Optional inputs:
+    - instrument type (`instrument_type`), subtype (`instrument_subtype`) and data field name (`db_field_name`)
+    - change direction (`change_direction`)
+    - buffer windows  (`start_buffer`, `end_buffer`) before the period start and end within which to look for the most recent readings
+
+    Returns a pandas DataFrame with one row per breached instrument (columns match ReviewChangeAcrossPeriod), or None, or an ERROR. 
+    """
+
+    name: str = "get_review_changes_across_period_tool"
+    description: str = (
+        """
+        Detects review-level status changes between two timestamps for instruments filtered by type/subtype and optional db_field_name.
+        Takes `start_timestamp`, `end_timestamp`, optional buffer durations in days (`start_buffer`, `end_buffer`), and a
+        `change_direction` flag ('up', 'down', 'both'). Returns only combinations where the breached review status differs between
+        the two readings (including transitions to/from unbreached) provided both readings exist within their respective buffers.
+        """
+    )
+
+    args_schema: Type[BaseModel] = _ReviewChangesAcrossPeriodInput
+
+    def _run(
+        self,
+        instrument_type: Optional[str],
+        instrument_subtype: Optional[str],
+        db_field_name: Optional[str],
+        start_timestamp: Union[str, datetime],
+        end_timestamp: Union[str, datetime],
+        start_buffer: Optional[Union[int, float]] = None,
+        end_buffer: Optional[Union[int, float]] = None,
+        change_direction: str = "up",
+    ) -> Union[pd.DataFrame, None, str]:
+        def _parse_timestamp(val: Union[str, datetime], label: str) -> Union[datetime, str]:
+            if isinstance(val, datetime):
+                return val
+            if isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                except Exception:
+                    return f"ERROR: Invalid {label} format (use ISO)."
+            return f"ERROR: {label} must be a datetime or ISO 8601 string."
+
+        def _parse_buffer_days_to_seconds(val: Optional[Union[int, float]], label: str) -> Union[Optional[float], str]:
+            if val is None:
+                return None
+            try:
+                days = float(val)
+            except Exception:
+                return f"ERROR: {label} must be numeric days or None."
+            if days < 0:
+                return f"ERROR: {label} must be non-negative."
+            return days * 86400.0
+
+        start_ts = _parse_timestamp(start_timestamp, "start_timestamp")
+        if isinstance(start_ts, str):
+            return start_ts
+        end_ts = _parse_timestamp(end_timestamp, "end_timestamp")
+        if isinstance(end_ts, str):
+            return end_ts
+        if end_ts <= start_ts:
+            return "ERROR: end_timestamp must be after start_timestamp."
+
+        total_seconds = (end_ts - start_ts).total_seconds()
+        if total_seconds <= 0:
+            return "ERROR: start_timestamp and end_timestamp must be distinct with end > start."
+
+        parsed_start_buffer = _parse_buffer_days_to_seconds(start_buffer, "start_buffer")
+        if isinstance(parsed_start_buffer, str):
+            return parsed_start_buffer
+        parsed_end_buffer = _parse_buffer_days_to_seconds(end_buffer, "end_buffer")
+        if isinstance(parsed_end_buffer, str):
+            return parsed_end_buffer
+        if parsed_end_buffer is None:
+            parsed_end_buffer = total_seconds / 2.0
+        if parsed_end_buffer <= 0 or parsed_end_buffer > total_seconds:
+            return "ERROR: end_buffer must be > 0 and <= the period length (end_timestamp - start_timestamp)."
+
+        start_lower_bound = start_ts - timedelta(seconds=parsed_start_buffer) if parsed_start_buffer is not None else None
+        end_lower_bound = end_ts - timedelta(seconds=parsed_end_buffer)
+
+        direction = (change_direction or "up").lower()
+        if direction not in {"up", "down", "both"}:
+            return "ERROR: change_direction must be 'up', 'down', or 'both'."
+
+        instrument_type = instrument_type or None
+        instrument_subtype = instrument_subtype or None
+
+        if db_field_name:
+            try:
+                fields = [_validate_col(db_field_name)]
+            except ValueError as e:
+                return f"ERROR: {e}"
+        else:
+            join_clause = ""
+            where_parts = ["ri.review_status = 'ON'"]
+            if instrument_type or instrument_subtype:
+                join_clause = "JOIN instrum i ON ri.instr_id = i.instr_id "
+                if instrument_type:
+                    where_parts.append("i.type1 = %(instrument_type)s")
+                if instrument_subtype:
+                    where_parts.append("i.subtype1 = %(instrument_subtype)s")
+            discover_sql = (
+                "SELECT DISTINCT ri.review_field AS db_field_name "
+                "FROM review_instruments ri "
+                + join_clause +
+                " WHERE " + " AND ".join(where_parts)
+            )
+            try:
+                rendered_discover = discover_sql % {
+                    "instrument_type": _quote(instrument_type),
+                    "instrument_subtype": _quote(instrument_subtype),
+                }
+            except Exception as e:
+                return f"ERROR: render discover failed: {e}"
+            try:
+                logger.info("[get_review_changes/discover] SQL=%s", rendered_discover)
+                discover_result = self.sql_tool._run(rendered_discover)
+                logger.info("[get_review_changes/discover] Raw result=%s", discover_result)
+            except Exception as e:
+                return f"ERROR: discover query failed: {e}"
+            if _is_no_data(discover_result):
+                return None
+            try:
+                field_rows = _parse_rows(discover_result)
+            except Exception as e:
+                return f"ERROR: discover parse failed: {e}"
+            fields = []
+            for row in field_rows:
+                f = row.get("db_field_name")
+                if not f:
+                    continue
+                try:
+                    fields.append(_validate_col(str(f)))
+                except ValueError:
+                    continue
+            fields = list(dict.fromkeys(fields))
+            if not fields:
+                return None
+
+        def _field_sql_parts(valid_col: str) -> Tuple[str, str, Dict[str, Any]]:
+            if valid_col.startswith("calculation"):
+                json_path = f"$.{valid_col}"
+                field_expr_local = (
+                    "CASE WHEN JSON_VALID(m.custom_fields) "
+                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "ELSE NULL END"
+                )
+                reading_clause = (
+                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                )
+                return field_expr_local, reading_clause, {"json_path": json_path}
+            field_expr_local = (
+                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
+                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+            )
+            reading_clause = (
+                f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+            )
+            return field_expr_local, reading_clause, {}
+
+        active_instr_join = ""
+        active_instr_filters = [
+            "ri.review_status = 'ON'",
+            "ri.review_field = %(review_field)s",
+        ]
+        if instrument_type or instrument_subtype:
+            active_instr_join = "JOIN instrum i ON ri.instr_id = i.instr_id "
+            if instrument_type:
+                active_instr_filters.append("i.type1 = %(instrument_type)s")
+            if instrument_subtype:
+                active_instr_filters.append("i.subtype1 = %(instrument_subtype)s")
+        active_instr_where = " AND ".join(active_instr_filters)
+
+        where_clause = "WHERE NOT (se.start_review_name <=> ee.end_review_name)"
+        if instrument_type or instrument_subtype:
+            exists_conditions: List[str] = []
+            if instrument_type:
+                exists_conditions.append("i.type1 = %(instrument_type)s")
+            if instrument_subtype:
+                exists_conditions.append("i.subtype1 = %(instrument_subtype)s")
+            where_clause += (
+                " AND EXISTS (SELECT 1 FROM instrum i WHERE i.instr_id = se.instr_id "
+                "AND " + " AND ".join(exists_conditions) + ")"
+            )
+
+        aggregated: List[Dict[str, Any]] = []
+        for valid_col in fields:
+            field_expr, reading_is_not_null, extra_params = _field_sql_parts(valid_col)
+
+            start_buffer_clause = " AND reading_time >= %(start_lower)s" if start_lower_bound is not None else ""
+
+            sql = (
+                "WITH active_instr AS ( "
+                "SELECT DISTINCT ri.instr_id FROM review_instruments ri "
+                + active_instr_join +
+                "WHERE " + active_instr_where + " ), "
+                "active_reviews AS ( "
+                "SELECT ri.instr_id, rl.review_name, "
+                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
+                "riv.review_direction, "
+                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
+                "FROM review_instruments ri "
+                "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
+                "valid_readings AS ( "
+                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
+                "FROM mydata m JOIN active_instr ai ON ai.instr_id = m.instr_id "
+                "WHERE " + reading_is_not_null + " ), "
+                "start_candidates AS ( "
+                "SELECT instr_id, reading_time, field_value, "
+                "ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
+                "FROM valid_readings "
+                "WHERE reading_time < %(start_ts)s" + start_buffer_clause + " ), "
+                "start_latest AS ( SELECT instr_id, reading_time, field_value FROM start_candidates WHERE rn = 1 ), "
+                "start_ranked AS ( "
+                "SELECT sl.instr_id, sl.field_value, sl.reading_time, ar.review_name, ar.review_value_clean, ar.severity_rank, "
+                "ROW_NUMBER() OVER (PARTITION BY sl.instr_id ORDER BY ar.severity_rank) AS rn "
+                "FROM start_latest sl JOIN active_reviews ar ON ar.instr_id = sl.instr_id "
+                "WHERE ((ar.review_direction = 1 AND sl.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND sl.field_value < ar.review_value_clean)) ), "
+                "start_enriched AS ( "
+                "SELECT sl.instr_id, sl.field_value AS start_field_value, sl.reading_time AS start_field_value_timestamp, "
+                "sr.review_name AS start_review_name, sr.review_value_clean AS start_review_value, sr.severity_rank AS start_severity_rank "
+                "FROM start_latest sl LEFT JOIN (SELECT instr_id, review_name, review_value_clean, severity_rank FROM start_ranked WHERE rn = 1) sr ON sr.instr_id = sl.instr_id ), "
+                "end_candidates AS ( "
+                "SELECT instr_id, reading_time, field_value, "
+                "ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
+                "FROM valid_readings "
+                "WHERE reading_time < %(end_ts)s AND reading_time >= %(end_lower)s ), "
+                "end_latest AS ( SELECT instr_id, reading_time, field_value FROM end_candidates WHERE rn = 1 ), "
+                "end_ranked AS ( "
+                "SELECT el.instr_id, el.field_value, el.reading_time, ar.review_name, ar.review_value_clean, ar.severity_rank, "
+                "ROW_NUMBER() OVER (PARTITION BY el.instr_id ORDER BY ar.severity_rank) AS rn "
+                "FROM end_latest el JOIN active_reviews ar ON ar.instr_id = el.instr_id "
+                "WHERE ((ar.review_direction = 1 AND el.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND el.field_value < ar.review_value_clean)) ), "
+                "end_enriched AS ( "
+                "SELECT el.instr_id, el.field_value AS end_field_value, el.reading_time AS end_field_value_timestamp, "
+                "er.review_name AS end_review_name, er.review_value_clean AS end_review_value, er.severity_rank AS end_severity_rank "
+                "FROM end_latest el LEFT JOIN (SELECT instr_id, review_name, review_value_clean, severity_rank FROM end_ranked WHERE rn = 1) er ON er.instr_id = el.instr_id ) "
+                "SELECT se.instr_id AS instrument_id, %(review_field)s AS db_field_name, "
+                "se.start_review_name, se.start_review_value, se.start_field_value, se.start_field_value_timestamp, "
+                "ee.end_review_name, ee.end_review_value, ee.end_field_value, ee.end_field_value_timestamp, "
+                "se.start_severity_rank, ee.end_severity_rank "
+                "FROM start_enriched se JOIN end_enriched ee ON ee.instr_id = se.instr_id "
+                " " + where_clause +
+                " ORDER BY ee.end_field_value_timestamp DESC"
+            )
+
+            params: Dict[str, Any] = {
+                "instrument_type": instrument_type,
+                "instrument_subtype": instrument_subtype,
+                "review_field": valid_col,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "end_lower": end_lower_bound,
+            }
+            if start_lower_bound is not None:
+                params["start_lower"] = start_lower_bound
+            params.update(extra_params)
+
+            try:
+                rendered = sql % {k: _quote(v) for k, v in params.items()}
+            except Exception as e:
+                logger.warning("[get_review_changes/%s] Render failed: %s", valid_col, e)
+                continue
+            try:
+                logger.info("[get_review_changes/%s] SQL=%s", valid_col, rendered)
+                result = self.sql_tool._run(rendered)
+                logger.info("[get_review_changes/%s] Raw result=%s", valid_col, result)
+            except Exception as e:
+                logger.warning("[get_review_changes/%s] Query failed: %s", valid_col, e)
+                continue
+            if _is_no_data(result):
+                continue
+            try:
+                rows = _parse_rows(result)
+            except Exception as e:
+                logger.warning("[get_review_changes/%s] Parse failed: %s", valid_col, e)
+                continue
+
+            for r in rows:
+                try:
+                    start_val = _coerce_float(r.get("start_field_value"))
+                    end_val = _coerce_float(r.get("end_field_value"))
+                    if start_val is None or end_val is None:
+                        raise ValueError("missing numeric readings")
+                    start_review_value = _coerce_float(r.get("start_review_value"))
+                    end_review_value = _coerce_float(r.get("end_review_value"))
+                    start_rank = _coerce_int(r.get("start_severity_rank"))
+                    end_rank = _coerce_int(r.get("end_severity_rank"))
+
+                    def _severity_score(rank: Optional[int]) -> int:
+                        return rank if rank is not None else 10**6
+
+                    start_score = _severity_score(start_rank)
+                    end_score = _severity_score(end_rank)
+
+                    changed = (
+                        (r.get("start_review_name") != r.get("end_review_name"))
+                        or (start_score != end_score)
+                        or (start_review_value != end_review_value)
+                    )
+                    if not changed:
+                        continue
+
+                    include = False
+                    if direction == "both":
+                        include = True
+                    elif direction == "up" and end_score < start_score:
+                        include = True
+                    elif direction == "down" and end_score > start_score:
+                        include = True
+                    if not include:
+                        continue
+
+                    aggregated.append(_ReviewChangeAcrossPeriod(
+                        instrument_id=r.get("instrument_id"),
+                        db_field_name=valid_col,
+                        start_review_name=r.get("start_review_name"),
+                        start_review_value=start_review_value,
+                        start_field_value=start_val,
+                        start_field_value_timestamp=r.get("start_field_value_timestamp"),
+                        end_review_name=r.get("end_review_name"),
+                        end_review_value=end_review_value,
+                        end_field_value=end_val,
+                        end_field_value_timestamp=r.get("end_field_value_timestamp"),
+                    ).model_dump())
+                except Exception as e:
+                    logger.warning("[get_review_changes/%s] Row skipped: %s row=%s", valid_col, e, r)
+
+        logger.info(
+            "[get_review_changes] Aggregated %d review changes across %d fields",
+            len(aggregated),
+            len(fields),
+        )
         return pd.DataFrame(aggregated) if aggregated else None
 
 

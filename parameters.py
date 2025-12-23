@@ -38,20 +38,6 @@ The name for each review level is listed in the database in {{table: `review_lev
 """
     }
 ]
-project_specific_context = [
-    {
-        'database_keys': [
-            'project_data.hanoi_clone',
-            'project_data.hanoi_live'
-        ],
-        'context': """
-**IMPORTANT**:
-You MUST ensure that whenever you call review level tools or extract review levels ALWAYS specify a `data` field in the tool prompt.
-If you want to check review levels for a `calculation` field, you MUST convert it to the corresponding `data` field first.
-For example, if you want to check review levels for `calculation2`, you MUST specify `data2` in the tool prompt instead.
-"""
-    }
-]
 progress_messages = {
     'context_orchestrator_node': AIMessage(
         name="ContextOrchestrator",

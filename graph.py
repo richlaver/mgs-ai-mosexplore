@@ -10,7 +10,8 @@ from agents.review_level_agents import (
     review_by_time_agent,
     review_by_value_agent,
     review_schema_agent,
-    breach_instr_agent
+    breach_instr_agent,
+    review_changes_across_period_agent,
 )
 from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
@@ -117,6 +118,13 @@ def build_graph(
         global_hierarchy_access=global_hierarchy_access
     )
     breach_instr_tool = breach_instr_agent(
+        llm=tools_llm,
+        db=db,
+        table_relationship_graph=table_relationship_graph,
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access
+    )
+    review_changes_across_period_tool = review_changes_across_period_agent(
         llm=tools_llm,
         db=db,
         table_relationship_graph=table_relationship_graph,
@@ -276,6 +284,7 @@ def build_graph(
                         review_by_time_tool,
                         review_schema_tool,
                         breach_instr_tool,
+                        review_changes_across_period_tool,
                         csv_saver_tool
                     ],
                     context=state.context,
@@ -367,7 +376,8 @@ def build_graph(
                     review_by_value_tool,
                     review_by_time_tool,
                     review_schema_tool,
-                    breach_instr_tool
+                    breach_instr_tool,
+                    review_changes_across_period_tool,
                 ]
                 result = react_agent(
                     llm=llms['THINKING'],
@@ -394,7 +404,8 @@ def build_graph(
                     review_by_value_tool,
                     review_by_time_tool,
                     review_schema_tool,
-                    breach_instr_tool
+                    breach_instr_tool,
+                    review_changes_across_period_tool,
                 ]
                 result = tool_calling_agent(
                     llm=llms['THINKING'],

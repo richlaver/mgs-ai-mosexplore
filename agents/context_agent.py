@@ -10,9 +10,9 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 
 from classes import Context, InstrInfo, DbField, DbSource, QueryWords
+from utils.context_data import get_instrument_context
 import re
 import logging
-import os
 import ast
 
 logger = logging.getLogger(__name__)
@@ -86,31 +86,6 @@ Please respond in this exact JSON format:
     except Exception as e:
         logger.error(f"Error in LLM analysis: {e}")
         return {"instruments": [], "error": str(e)}
-
-def load_instrument_context(file_path: str = "instrument_context.json") -> Dict[str, Any]:
-    """
-    Load instrument context
-    
-    Args:
-        file_path: Path to instrument context JSON file
-        
-    Returns:
-        Dict containing instrument context data
-    """
-    try:
-        if not os.path.exists(file_path):
-            logger.warning(f"Instrument context file {file_path} not found")
-            return {}
-            
-        with open(file_path, 'r', encoding='utf-8') as f:
-            context_data = json.load(f)
-            
-        logger.info(f"Loaded instrument context: {len([k for k in context_data.keys() if not k.startswith('_')])} instruments")
-        return context_data
-        
-    except Exception as e:
-        logger.error(f"Error loading instrument context: {e}")
-        return {}
 
 def create_instrument_search_context(instrument_data: Dict[str, Any]) -> str:
     context_parts = []
@@ -743,7 +718,7 @@ Analyze this query for terms that should NOT be treated as instrument IDs:
                 "process": "query_enricher"
             }
         ))
-        instrument_data = load_instrument_context()
+        instrument_data = get_instrument_context()
             
         query = state.context.retrospective_query
         query_words_list: List[QueryWords] = []

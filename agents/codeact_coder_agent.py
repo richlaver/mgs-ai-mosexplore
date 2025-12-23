@@ -161,6 +161,13 @@ await csv_saver_tool.ainvoke({{
     "description": "Detailed description of the CSV"
 }})
 ```
+or:
+```python
+await ainvoke(csv_saver_tool, {{
+    "dataframe": dataframe_to_save,
+    "description": "Detailed description of the CSV"
+}})
+```
 - Returns artefact ID to access CSV in file system or `None`.
 
 ## `extraction_sandbox_agent`
@@ -347,6 +354,36 @@ Schema Query 2
 ### Example Prompt 2
 "List breaches for:
 - Timestamp: 14 Jun 2025 09:00:00 PM"
+
+## `review_changes_across_period_agent`
+### How to Use
+- Use to find instruments whose review level status changed between two timestamps strictly following `review_changes_across_period_agent.invoke(prompt)` or in async code `await ainvoke(review_changes_across_period_agent, prompt)`.
+- Prompt is natural language description of review level status change request that MUST include:
+  * Start timestamp
+  * End timestamp
+- For more specific requests, you can include the following in the prompt:
+  * Instrument type
+  * Instrument subtype
+  * Database field name
+  * Start buffer in days to extend start timestamp backwards
+  * End buffer in days to extend end timestamp backwards
+  * Change direction ('up', 'down', 'both')
+- Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, start_review_name, start_review_value, start_field_value, start_field_value_timestamp, end_review_name, end_review_value, end_field_value, end_field_value_timestamp) or `None` or `ERROR: <error message>`.
+### Example Prompt 1
+"List review changes for:
+- Start timestamp: 14 May 2025 12:00:00 PM
+- End timestamp: 14 Jun 2025 09:00:00 PM
+- Instrument type: LP
+- Instrument subtype: MOVEMENT
+- Database field name: calculation1
+- Start buffer: 7
+- End buffer: 7
+- Change direction: both"
+### Example Prompt 2
+"List review changes for:
+- Start timestamp: 14 Jul 2025 12:00:00 PM
+- End timestamp: 14 Aug 2025 09:00:00 PM
+- Change direction: up"
 
 # Common Coding Errors to Avoid
 - Missing `await` in async code when invoking tools or calling async functions.

@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import re
 from typing import Any, Dict, List
 
@@ -10,6 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
+from utils.context_data import get_instrument_context
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +34,6 @@ class InstrumentSelectionList(BaseModel):
 
     def to_dict_list(self) -> List[dict[str, Any]]:
         return [item.model_dump() for item in self.items]
-
-def load_instrument_context(file_path: str = "instrument_context.json") -> dict[str, any]:
-    try:
-        if not os.path.exists(file_path):
-            logger.warning(f"Instrument context file {file_path} not found")
-            return {}
-            
-        with open(file_path, 'r', encoding='utf-8') as f:
-            context_data = json.load(f)
-            
-        logger.info(f"Loaded instrument context: {len([k for k in context_data.keys() if not k.startswith('_')])} instruments")
-        return context_data
-    except Exception as e:
-        logger.error(f"Error loading instrument context: {e}")
-        return {}
 
 def create_instrument_search_context(instrument_data: dict[str, any]) -> str:
     context_parts = []
@@ -492,7 +477,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
     except Exception:
         pass
 
-    instrument_data = load_instrument_context()
+    instrument_data = get_instrument_context()
     if isinstance(state.context, dict):
         query = state.context.get("retrospective_query", "")
         verif_info = state.context.get("verif_ID_info") or {}

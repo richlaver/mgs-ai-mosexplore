@@ -377,7 +377,8 @@ async def _run_impl(self,
         review_by_value_agent,
         review_by_time_agent,
         review_schema_agent,
-        breach_instr_agent
+        breach_instr_agent,
+        review_changes_across_period_agent,
     )
     from tools.create_output_toolkit import CSVSaverTool
     from tools.sql_security_toolkit import GeneralSQLQueryTool
@@ -498,6 +499,13 @@ async def _run_impl(self,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
+        review_changes_across_period_tool = review_changes_across_period_agent(
+            llm=self.llms['BALANCED'],
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access
+        )
         csv_saver_tool = CSVSaverTool(
             write_artefact_tool=write_artefact_tool,
             thread_id=thread_id,
@@ -569,6 +577,8 @@ async def _run_impl(self,
                     "review_by_time_agent": review_by_time_tool,
                     "review_schema_agent": review_schema_tool,
                     "breach_instr_agent": breach_instr_tool,
+                    "review_changes_across_period_agent": review_changes_across_period_tool,
+                    "general_sql_query_tool": general_sql_query_tool,
                     "csv_saver_tool": csv_saver_tool,
                     "llm": self.llms['BALANCED'],
                     "db": db,

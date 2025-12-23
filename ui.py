@@ -15,6 +15,7 @@ from utils.project_selection import (
     list_projects,
     get_selected_project_key,
 )
+from utils.context_data import ensure_project_context
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
 from modal_management import deploy_app, stop_app, is_app_deployed, warm_up_container
 from utils.chat_history import filter_messages_only_final
@@ -385,6 +386,10 @@ def render_initial_ui() -> None:
                         st.session_state.table_relationship_graph = setup.build_relationship_graph()
                     except Exception:
                         pass
+                    try:
+                        ensure_project_context(selected_key, force_refresh=True, strict=True)
+                    except Exception as e:
+                        logger.error("Failed to refresh project contexts for %s: %s", selected_key, e)
                     if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "agent_type", "num_parallel_executions"]):
                         try:
                             logger.info("[Project Switch] Rebuilding agent graph (remote_sandbox=%s) for project=%s", st.session_state.sandbox_mode == "Remote", selected_key)

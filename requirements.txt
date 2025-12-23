@@ -19,3 +19,4 @@ sqlalchemy
 sqlparse
 sqlglot
 mysql-connector-python
+requests

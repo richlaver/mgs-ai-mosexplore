@@ -91,7 +91,30 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
     Task:
     1. Consider 3 to 5 possible SQL queries to achieve the desired outcome.
-    2. If the prompt requires extraction from a JSON string, ALWAYS use CASE WHEN JSON_VALID(column) THEN JSON_EXTRACT(column, '$.path') ELSE NULL END to avoid errors with empty strings or invalid JSON.
+    2. If a reading value is stored in a `calculation` field and the value of the reading is an empty string you MUST regard this as an attempted but unsuccessful reading.
+    Therefore to extract successful readings you MUST use:
+    ```sql
+    SELECT CAST(v.calc_value AS DECIMAL(10, 5))
+    FROM (
+    SELECT NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(custom_fields, '$.calculationX'))), '') AS calc_value
+    FROM mydata
+    WHERE JSON_VALID(custom_fields)
+    ) AS v
+    WHERE v.calc_value IS NOT NULL;
+    ```
+    To extract attempted unsuccessful readings, for instance when assessing compliance to a required monitoring frequency, use:
+    ```sql
+    SELECT
+    CASE
+        WHEN t.calc_value IS NULL OR TRIM(t.calc_value) = '' THEN NULL
+        ELSE CAST(t.calc_value AS DECIMAL(10, 5))
+    END AS calculation_reading
+    FROM (
+    SELECT JSON_UNQUOTE(JSON_EXTRACT(custom_fields, '$.calculationX')) AS calc_value
+    FROM mydata
+    WHERE JSON_VALID(custom_fields)
+    ) AS t;
+    ```
     3. If the prompt requests time series data, extract with timestamp as first column.
     4. Evaluate each for:
        - Correctness: Does it accurately retrieve the requested data?

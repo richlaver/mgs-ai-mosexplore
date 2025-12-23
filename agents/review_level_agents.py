@@ -1,10 +1,11 @@
 """Review level wrapper agents.
 
-Implements four agents wrapping the existing review level tools:
- - GetReviewStatusByValueTool  -> review_by_value_agent
- - GetReviewStatusByTimeTool   -> review_by_time_agent
- - GetReviewSchemaTool         -> review_schema_agent
- - GetBreachedInstrumentsTool  -> breach_instr_agent
+Implements five agents wrapping the existing review level tools:
+ - GetReviewStatusByValueTool          -> review_by_value_agent
+ - GetReviewStatusByTimeTool           -> review_by_time_agent
+ - GetReviewSchemaTool                 -> review_schema_agent
+ - GetBreachedInstrumentsTool          -> breach_instr_agent
+ - GetReviewChangesAcrossPeriodTool    -> review_changes_across_period_agent
 
 Pattern follows the proven sandbox agents (extraction_sandbox_agent, timeseries_plot_sandbox_agent):
  - Natural language prompt converted to populated input schema JSON via LLM
@@ -39,6 +40,7 @@ from tools.review_level_toolkit import (
     GetReviewStatusByTimeTool,
     GetReviewSchemaTool,
     GetBreachedInstrumentsTool,
+    GetReviewChangesAcrossPeriodTool,
 )
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 
@@ -732,10 +734,110 @@ def breach_instr_agent(llm: BaseLanguageModel, db, table_relationship_graph, use
     return BreachInstrAgentTool(llm=llm, sql_tool=sql_tool)
 
 
+# ---------------------------------------------------------------------------
+# ReviewChangesAcrossPeriod Agent
+# ---------------------------------------------------------------------------
+
+class ReviewChangesAcrossPeriodAgentInput(BaseModel):
+    prompt: str = Field(
+        ...,
+        description=(
+            "Natural language prompt to find review level status changes between two timestamps. Prompt must include:\n"
+            "- Start timestamp (ISO8601 or clearly parseable).\n"
+            "- End timestamp (must be after start).\n"
+            "- Optional: instrument type (instrum.type1).\n"
+            "- Optional: instrument subtype (instrum.subtype1).\n"
+            "- Optional: database field name (dataN, calculationN).\n"
+            "- Optional: start buffer in days (numeric) to extend start timestamp backwards.\n"
+            "- Optional: end buffer in days (numeric) to extend end timestamp backwards.\n"
+            "- Optional: change direction ('up', 'down', 'both').\n"
+            "Example: 'Between 1 Feb 2025 00:00:00 and 1 Mar 2025 00:00:00 find upward review level changes for instruments of type LP and subtype MOVEMENT on data field calculation2.'"
+        ),
+    )
+
+
+class ReviewChangesAcrossPeriodAgentTool(BaseGenericReviewAgentTool):
+    name: str = "review_changes_across_period_agent"
+    description: str = (
+        "Finds instruments whose review level status changed between two timestamps.\n"
+        "Use to find new or historic review level breaches or changes within a period of interest.\n"
+        "Prompt MUST contain start_timestamp and end_timestamp. Optional filters: instrument_type, instrument_subtype, db_field_name, start_buffer (days), end_buffer (days), change_direction ('up', 'down', 'both').\n"
+        "Returns: DataFrame rows (instrument_id, db_field_name, start_review_name, start_review_value, start_field_value, start_field_value_timestamp, end_review_name, end_review_value, end_field_value, end_field_value_timestamp) or None or ERROR: message."
+    )
+    args_schema: Type[BaseModel] = ReviewChangesAcrossPeriodAgentInput
+    underlying_tool_cls: ClassVar[Type[Any]] = GetReviewChangesAcrossPeriodTool
+    required_fields: ClassVar[List[str]] = ["start_timestamp", "end_timestamp"]
+    optional_fields: ClassVar[List[str]] = [
+        "instrument_type",
+        "instrument_subtype",
+        "db_field_name",
+        "start_buffer",
+        "end_buffer",
+        "change_direction",
+    ]
+    instructions: ClassVar[str] = (
+        "Extract ISO8601 start_timestamp and end_timestamp (end must be later).\n"
+        "Provide numeric buffers in DAYS (floats allowed) for start_buffer/end_buffer when mentioned; otherwise set null.\n"
+        "Instrument filters (instrument_type/instrument_subtype) or db_field_name should be null when absent.\n"
+        "change_direction must be one of 'up', 'down', or 'both' when present; lowercase it."
+    )
+    param_map: ClassVar[Dict[str, str]] = {
+        "instrument_type": "instrument_type",
+        "instrument_subtype": "instrument_subtype",
+        "db_field_name": "db_field_name",
+        "start_timestamp": "start_timestamp",
+        "end_timestamp": "end_timestamp",
+        "start_buffer": "start_buffer",
+        "end_buffer": "end_buffer",
+        "change_direction": "change_direction",
+    }
+
+    def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(tool_inputs)
+
+        def _normalize_nullable_text(key: str) -> None:
+            if out.get(key) in ("", "null", None):
+                out[key] = None
+
+        for k in ("instrument_type", "instrument_subtype", "db_field_name"):
+            _normalize_nullable_text(k)
+
+        def _normalize_float(key: str) -> None:
+            val = out.get(key)
+            if val in ("", "null", None):
+                out[key] = None
+                return
+            if isinstance(val, (int, float)):
+                out[key] = float(val)
+                return
+            try:
+                out[key] = float(str(val).strip())
+            except (TypeError, ValueError):
+                # Leave as-is; tool will raise a clear error downstream.
+                pass
+
+        for k in ("start_buffer", "end_buffer"):
+            _normalize_float(k)
+
+        direction = out.get("change_direction")
+        if direction not in (None, ""):
+            out["change_direction"] = str(direction).strip().lower()
+
+        return out
+
+    def _run(self, prompt: str) -> Union[pd.DataFrame, None, str]:
+        return self._run_generic(prompt, agent_label="ReviewChangesAcrossPeriodAgent")
+
+
+def review_changes_across_period_agent(llm: BaseLanguageModel, db, table_relationship_graph, user_id: int, global_hierarchy_access: bool) -> BaseTool:
+    sql_tool = GeneralSQLQueryTool(db=db, table_relationship_graph=table_relationship_graph, user_id=user_id, global_hierarchy_access=global_hierarchy_access)
+    return ReviewChangesAcrossPeriodAgentTool(llm=llm, sql_tool=sql_tool)
+
+
 def review_level_agent_factory(kind: str, llm: BaseLanguageModel, db, table_relationship_graph, user_id: int, global_hierarchy_access: bool) -> BaseTool:
     """Unified factory returning any review level agent by short kind string.
 
-    Accepted kinds: value, time, schema, breach (case-insensitive).
+    Accepted kinds: value, time, schema, breach, changes_across_period (case-insensitive).
     """
     kind_norm = kind.lower().strip()
     mapping = {
@@ -743,6 +845,7 @@ def review_level_agent_factory(kind: str, llm: BaseLanguageModel, db, table_rela
         "time": review_by_time_agent,
         "schema": review_schema_agent,
         "breach": breach_instr_agent,
+        "changes_across_period": review_changes_across_period_agent,
     }
     if kind_norm not in mapping:
         raise ValueError(f"Unknown review level agent kind: {kind}. Expected one of {list(mapping.keys())}.")
@@ -754,10 +857,12 @@ __all__ = [
     "review_by_time_agent",
     "review_schema_agent",
     "breach_instr_agent",
+    "review_changes_across_period_agent",
     "ReviewByValueAgentTool",
     "ReviewByTimeAgentTool",
     "ReviewSchemaAgentTool",
     "BreachInstrAgentTool",
+    "ReviewChangesAcrossPeriodAgentTool",
     "BaseGenericReviewAgentTool",
     "review_level_agent_factory",
 ]
