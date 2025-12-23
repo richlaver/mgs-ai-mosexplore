@@ -45,7 +45,7 @@ CASE WHEN JSON_VALID(column) THEN JSON_EXTRACT(column, '$.path') ELSE NULL END
     return None
 
 
-def project_insider(state: ContextState, selected_project_key: str | None) -> Command:
+def project_insider(state: ContextState, selected_project_key: str) -> Command:
     context_update: dict[str, Any] = {}
     if selected_project_key:
         project_context = _lookup_project_context(selected_project_key)

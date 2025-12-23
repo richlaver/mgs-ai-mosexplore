@@ -480,24 +480,45 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
     instrument_data = get_instrument_context()
     if isinstance(state.context, dict):
         query = state.context.get("retrospective_query", "")
-        verif_info = state.context.get("verif_ID_info") or {}
+        verif_id_info = state.context.get("verif_ID_info") or {}
+        verif_type_info = state.context.get("verif_type_info") or []
     else:
         query = getattr(state.context, "retrospective_query", "")
-        verif_info = getattr(state.context, "verif_ID_info", {}) or {}
+        verif_id_info = getattr(state.context, "verif_ID_info", {}) or {}
+        verif_type_info = getattr(state.context, "verif_type_info", []) or []
     query_words_list: list[QueryWords] = []
     type_subtype_groups: dict[tuple, list[str]] = {}
-    verified_type_subtype = []
-    if verif_info:
-        for instr_id, info in verif_info.items():
+    verified_type_subtype: list[str] = []
+    verified_type_subtype_keys: set[str] = set()
+
+    def _add_verified_type(instr_type: str | None, instr_subtype: str | None) -> None:
+        if not instr_type or not instr_subtype:
+            return
+        key = f"{instr_type}_{instr_subtype}"
+        if key not in verified_type_subtype_keys:
+            verified_type_subtype_keys.add(key)
+            verified_type_subtype.append(key)
+
+    if verif_id_info:
+        for instr_id, info in verif_id_info.items():
             db_type = info["type"]
             db_subtype = info["subtype"]
             key_tuple = (db_type, db_subtype)
             if key_tuple not in type_subtype_groups:
                 type_subtype_groups[key_tuple] = []
             type_subtype_groups[key_tuple].append(instr_id)
-        verified_type_subtype = [f"{t}_{s}" for t, s in type_subtype_groups.keys()]
+            _add_verified_type(db_type, db_subtype)
+
+    if verif_type_info:
+        for type_entry in verif_type_info:
+            if not isinstance(type_entry, dict):
+                continue
+            instr_type = type_entry.get("type")
+            subtypes = type_entry.get("subtypes") or []
+            for subtype in subtypes:
+                _add_verified_type(instr_type, subtype)
     semantic_filtered = identify_and_filter_instruments(llm, query, instrument_data, verified_type_subtype)
-    verified_type_subtype_set = set(verified_type_subtype)
+    verified_type_subtype_set = verified_type_subtype_keys
     for item in semantic_filtered:
         key = item.get('key')
         selected_fields = item.get('database_field_names', [])

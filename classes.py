@@ -52,6 +52,7 @@ class Context(BaseModel):
     retrospective_query: str = Field(description="Query rephrased from current query to incorporate chat history")
     ignore_IDs: Optional[List[str]] = Field(description="Query words user has flagged as not instrument IDs", default=None)
     verif_ID_info: Optional[Dict[str, Dict[str, str]]] = Field(description="Mapping of verified instrument IDs to type/subtype info, e.g. {'0003-L-2': {'type': 'LP', 'subtype': 'MOVEMENT'}}", default=None)
+    verif_type_info: Optional[List[Dict[str, Any]]] = Field(description="List of identified instrument types and their matched subtypes from the query", default=None)
     unverif_IDs: Optional[List[str]] = Field(description="Instrument IDs in query not found in database", default=None)
     word_context: Optional[List[QueryWords]] = Field(description="How query words relate to where to get data and background info to answer", default=None)
     edge_case: Optional[bool] = Field(description="Indicates whether the user query is an edge case", default=None)
@@ -131,7 +132,8 @@ class ContextState(BaseModel):
     """State passed through the context graph for orchestrating agents."""
     messages: Annotated[List[BaseMessage], operator.add] = Field(default_factory=list)
     context: Annotated[Dict[str, Any], operator.or_] = Field(default_factory=dict)
-    instruments_validated: Annotated[bool, operator.or_] = False
+    instrument_ids_validated: Annotated[bool, operator.or_] = False
+    instrument_types_validated: Annotated[bool, operator.or_] = False
     db_context_provided: Annotated[bool, operator.or_] = False
     platform_context_provided: Annotated[bool, operator.or_] = False
     period_deduced: Annotated[bool, operator.or_] = False

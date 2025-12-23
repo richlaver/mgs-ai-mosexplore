@@ -5,7 +5,8 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command, Send
 
-from agents.instr_type_validator import instr_type_validator
+from agents.instrument_id_validator import instrument_id_validator
+from agents.instrument_type_validator import instrument_type_validator
 from agents.database_expert import database_expert
 from agents.period_expert import period_expert
 from agents.project_insider import project_insider
@@ -22,9 +23,14 @@ def create_handoff_tool(*, agent_name: str, description: str | None = None):
 
     return handoff_tool
 
-transfer_to_instr_type_validator = create_handoff_tool(
-    agent_name="instr_type_validator",
-    description="Transfer to instrument type validator for identifying valid and potentially invalid instrument IDs and types in the query."
+transfer_to_instrument_id_validator = create_handoff_tool(
+    agent_name="instrument_id_validator",
+    description="Transfer to instrument validator for identifying valid and potentially invalid instrument IDs in the query."
+)
+
+transfer_to_instrument_type_validator = create_handoff_tool(
+    agent_name="instrument_type_validator",
+    description="Transfer to instrument type validator for identifying instrument types and subtypes mentioned in the query."
 )
 
 transfer_to_database_expert = create_handoff_tool(
@@ -49,7 +55,8 @@ transfer_to_project_insider = create_handoff_tool(
 
 def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_project_key: str | None) -> any:
     tools = [
-        transfer_to_instr_type_validator,
+        transfer_to_instrument_id_validator,
+        transfer_to_instrument_type_validator,
         transfer_to_database_expert,
         transfer_to_period_expert,
         transfer_to_platform_expert,
@@ -79,8 +86,10 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
         scratch_lines = []
         if state.period_deduced:
             scratch_lines.append("INTERNAL: Period deduction completed.")
-        if state.instruments_types_validated:
-            scratch_lines.append("INTERNAL: Validation of instruments and types completed.")
+        if state.instrument_ids_validated:
+            scratch_lines.append("INTERNAL: Instrument validation completed.")
+        if state.instrument_types_validated:
+            scratch_lines.append("INTERNAL: Instrument type validation completed.")
         if state.db_context_provided:
             scratch_lines.append("INTERNAL: Database context retrieval completed.")
         if state.platform_context_provided:
@@ -97,16 +106,18 @@ STRICT ROUTING CONTRACT (follow exactly, highest precedence first):
     - Return NO tool calls.
 2) If ALL are true, do NOT call any tools:
     - period_deduced == true
-    - instruments_types_validated == true
+    - instrument_ids_validated == true
+    - instrument_types_validated == true
     - db_context_provided == true
     - platform_context_provided == true
     - project_specifics_retrieved == true
 3) Otherwise (has_clarification_requests is false):
     - If period_deduced == false, call transfer_to_period_expert.
-    - If instruments_types_validated == false, call transfer_to_instr_type_validator.
+    - If instrument_ids_validated == false, call transfer_to_instrument_id_validator.
+    - If instrument_types_validated == false, call transfer_to_instrument_type_validator.
     - If platform_context_provided == false, call transfer_to_platform_expert.
     - If project_specifics_retrieved == false, call transfer_to_project_insider.
-    - If instruments_types_validated == true AND db_context_provided == false, call transfer_to_database_expert.
+    - If instrument_ids_validated == true AND instrument_types_validated == true AND db_context_provided == false, call transfer_to_database_expert.
 
 Notes:
 - Call tools in parallel when multiple conditions in (3) apply.
@@ -115,7 +126,8 @@ Notes:
 
 Current status:
 - period_deduced={state.period_deduced}
-- instruments_types_validated={state.instruments_types_validated}
+- instrument_ids_validated={state.instrument_ids_validated}
+- instrument_types_validated={state.instrument_types_validated}
 - db_context_provided={state.db_context_provided}
 - platform_context_provided={state.platform_context_provided}
 - project_specifics_retrieved={state.project_specifics_retrieved}
@@ -138,8 +150,10 @@ Current status:
         if hasattr(response, 'tool_calls') and response.tool_calls:
             for tc in response.tool_calls:
                 tool_name = tc['name']
-                if tool_name == "transfer_to_instr_type_validator":
-                    requested_targets.append("instr_type_validator")
+                if tool_name == "transfer_to_instrument_id_validator":
+                    requested_targets.append("instrument_id_validator")
+                elif tool_name == "transfer_to_instrument_type_validator":
+                    requested_targets.append("instrument_type_validator")
                 elif tool_name == "transfer_to_database_expert":
                     requested_targets.append("database_expert")
                 elif tool_name == "transfer_to_period_expert":
@@ -152,13 +166,15 @@ Current status:
         allowed_targets = set()
         if not state.period_deduced:
             allowed_targets.add("period_expert")
-        if not state.instruments_validated:
-            allowed_targets.add("instr_type_validator")
+        if not state.instrument_ids_validated:
+            allowed_targets.add("instrument_id_validator")
+        if not state.instrument_types_validated:
+            allowed_targets.add("instrument_type_validator")
         if not state.platform_context_provided:
             allowed_targets.add("platform_expert")
         if not state.project_specifics_retrieved:
             allowed_targets.add("project_insider")
-        if state.instruments_validated and not state.db_context_provided:
+        if state.instrument_ids_validated and state.instrument_types_validated and not state.db_context_provided:
             allowed_targets.add("database_expert")
 
         final_targets = set(requested_targets).intersection(allowed_targets) if requested_targets else allowed_targets
@@ -170,13 +186,15 @@ Current status:
 
     graph = StateGraph(ContextState)
     graph.add_node("supervisor", supervisor_node)
-    graph.add_node("instr_type_validator", lambda state: instr_type_validator(state, llms['FAST'], db))
+    graph.add_node("instrument_id_validator", lambda state: instrument_id_validator(state, llms['FAST'], db))
+    graph.add_node("instrument_type_validator", lambda state: instrument_type_validator(state, selected_project_key))
     graph.add_node("database_expert", lambda state: database_expert(state, llms['FAST'], db))
     graph.add_node("period_expert", lambda state: period_expert(state, llms['FAST'], db))
     graph.add_node("project_insider", lambda state: project_insider(state, selected_project_key))
     graph.add_node("platform_expert", platform_expert)
     graph.add_edge(START, "supervisor")
-    graph.add_edge("instrument_validator", "supervisor")
+    graph.add_edge("instrument_id_validator", "supervisor")
+    graph.add_edge("instrument_type_validator", "supervisor")
     graph.add_edge("database_expert", "supervisor")
     graph.add_edge("period_expert", "supervisor")
     graph.add_edge("project_insider", "supervisor")
