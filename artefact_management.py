@@ -5,8 +5,9 @@ import numpy as np
 import logging
 
 import psycopg2
-from b2sdk.v1 import DownloadDestBytes
+from b2sdk.v1 import DownloadDestBytes, AbstractProgressListener
 from langchain_google_vertexai import VertexAIEmbeddings
+from utils.run_cancellation import get_active_run_controller, RunCancelledError
 
 TABLE_NAME = "mgs-explore-specificquery-artefacts"
 VECTOR_DIM = 768
@@ -74,14 +75,39 @@ def write_artefact(blob_db, metadata_db, blob, thread_id, user_id: int, generati
     Writes the blob to Backblaze B2, generates metadata including embedded vector, and stores it in RDS.
     """
     try:
+        controller = get_active_run_controller()
+        if controller:
+            controller.raise_if_cancelled("artefact:prepare")
+
+        class _CancellationAwareListener(AbstractProgressListener):
+            def __init__(self, description: str = "upload"):
+                super().__init__(description=description)
+                self._controller = controller
+
+            def set_total_bytes(self, total_byte_count: int) -> None:
+                if self._controller:
+                    self._controller.raise_if_cancelled("artefact:b2:init")
+
+            def bytes_completed(self, byte_count: int) -> None:
+                if self._controller:
+                    self._controller.raise_if_cancelled("artefact:b2:stream")
+
+        progress_listener = _CancellationAwareListener() if controller else None
+
         if isinstance(blob, str):
             blob = blob.encode('utf-8')
         
         artefact_id = str(uuid.uuid4())
-        uploaded_file = blob_db.upload_bytes(data_bytes=blob, file_name=artefact_id)
+        uploaded_file = blob_db.upload_bytes(
+            data_bytes=blob,
+            file_name=artefact_id,
+            progress_listener=progress_listener,
+        )
         timestamp = datetime.datetime.now()
         
         embeddings = _get_embeddings()
+        if controller:
+            controller.raise_if_cancelled("artefact:embeddings")
         description_vector = embeddings.embed_query(description)
         
         metadata = {
@@ -109,6 +135,8 @@ def write_artefact(blob_db, metadata_db, blob, thread_id, user_id: int, generati
         cur.close()
         
         return {'artefact_id': artefact_id, 'error': None}
+    except RunCancelledError:
+        raise
     except Exception as e:
         # Clean up orphan blob if metadata insertion fails
         try:

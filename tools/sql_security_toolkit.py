@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.tools import BaseTool
+from utils.run_cancellation import get_active_run_controller, RunCancelledError
 import sqlparse
 from collections import deque
 import logging
@@ -92,6 +93,9 @@ Only the first statement will be executed. Discarded statements:
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> Union[str, Sequence[Dict[str, Any]], Result]:
         """Execute the query, return the results or an error message."""
+        controller = get_active_run_controller()
+        if controller:
+            controller.raise_if_cancelled("sql-tool:start")
         original_query = query
 
         def _truncate(text: Any, max_len: int = 500) -> str:
@@ -445,6 +449,8 @@ Only the first statement will be executed. Discarded statements:
             return write_error
         
         try:
+            if controller:
+                controller.raise_if_cancelled("sql-tool:before-exec")
             if self.global_hierarchy_access:
                 logger.info("[GeneralSQLQueryTool] Global hierarchy access granted; executing original query")
                 results = self.db.run_no_throw(query, include_columns=True)
@@ -460,6 +466,9 @@ Only the first statement will be executed. Discarded statements:
                     "[GeneralSQLQueryTool] Query returned %s", _truncate(str(results), 300)
                 )
             return process_results(results)
+        except RunCancelledError:
+            logger.info("[GeneralSQLQueryTool] Query cancelled mid-flight")
+            raise
         except Exception as e:
             logging.error(f"Error executing query: {str(e)}")
             raise

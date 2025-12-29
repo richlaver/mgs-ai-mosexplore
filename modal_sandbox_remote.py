@@ -18,6 +18,14 @@ from datetime import datetime, timezone
 from typing import Generator, List, Dict, AsyncGenerator, Optional, Any
 from parameters import include_tables
 from setup import build_modal_secrets
+from contextlib import suppress
+from modal._functions import _FunctionCall
+
+try:  # The utils module may not exist inside the remote container image
+    from utils.run_cancellation import get_active_run_controller
+except ModuleNotFoundError:  # pragma: no cover - remote fallback
+    def get_active_run_controller():
+        return None
 
 # Ten times the default MySQL limits
 MYSQL_DEFAULT_SESSION_TABLE_LIMIT_BYTES = 16 * 1024 * 1024
@@ -93,6 +101,9 @@ image = (
     .add_local_file("artefact_management.py", remote_path="/root/artefact_management.py")
     .add_local_file("setup.py", remote_path="/root/setup.py")
     .add_local_file("utils/project_selection.py", remote_path="/root/utils/project_selection.py")
+    .add_local_file("utils/run_cancellation.py", remote_path="/root/utils/run_cancellation.py")
+    .add_local_file("utils/cancelable_llm.py", remote_path="/root/utils/cancelable_llm.py")
+    .add_local_file("utils/cancelable_sql.py", remote_path="/root/utils/cancelable_sql.py")
 )
 
 
@@ -225,6 +236,14 @@ def _make_step_payload(content: str, typ: str, step: int = 0, extra_metadata: Op
     if extra_metadata:
         payload["metadata"].update(extra_metadata)
     return payload
+
+
+def _make_control_payload(event: str, **data: Any) -> Dict[str, Any]:
+    control_payload = {"event": event}
+    for key, value in data.items():
+        if value is not None:
+            control_payload[key] = value
+    return {"__control__": control_payload}
 
 
 def _format_error_payload(
@@ -370,6 +389,20 @@ async def _run_impl(self,
                     user_id, global_hierarchy_access, len(code) if isinstance(code, str) else None,
                     len(table_info) if isinstance(table_info, list) else None,
                     list(table_relationship_graph.keys()) if isinstance(table_relationship_graph, dict) else None)
+
+    function_call_id = getattr(modal, "current_function_call_id", lambda: None)()
+    input_id = getattr(modal, "current_input_id", lambda: None)()
+    if function_call_id:
+        run_logger.info(
+            "[Sandbox] current_function_call_id=%s current_input_id=%s",
+            function_call_id,
+            input_id,
+        )
+        yield _make_control_payload(
+            event="modal_call_metadata",
+            function_call_id=function_call_id,
+            input_id=input_id,
+        )
     from agents.extraction_sandbox_agent import extraction_sandbox_agent
     from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
     from agents.map_plot_sandbox_agent import map_plot_sandbox_agent
@@ -813,10 +846,88 @@ def execute_remote_sandbox(
     selected_project_key: Optional[str] = None,
     container_slot: Optional[int] = None,
 ) -> Generator[dict, None, None]:
+
+    def _extract_modal_call(gen, slot_label: int, class_label: str) -> Optional[_FunctionCall]:
+        to_visit: list[Any] = [gen]
+        seen: set[int] = set()
+
+        def _maybe_queue(value: Any) -> None:
+            if value is None:
+                return
+            if not (inspect.isgenerator(value) or inspect.isasyncgen(value)):
+                return
+            ident = id(value)
+            if ident in seen:
+                return
+            to_visit.append(value)
+
+        while to_visit:
+            current = to_visit.pop()
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+
+            frame = (
+                getattr(current, "ag_frame", None)
+                or getattr(current, "gi_frame", None)
+                or getattr(current, "cr_frame", None)
+            )
+            locals_map = getattr(frame, "f_locals", {}) if frame else {}
+            invocation = locals_map.get("invocation")
+            if invocation is not None:
+                function_call_id = getattr(invocation, "function_call_id", None)
+                client = getattr(invocation, "client", None)
+                if function_call_id and client:
+                    try:
+                        fc = _FunctionCall._new_hydrated(function_call_id, client, None)
+                        fc._is_generator = True
+                        logger.info(
+                            "[RemoteSandbox] Hydrated FunctionCall for cancellation | slot=%s class=%s call_id=%s",
+                            slot_label,
+                            class_label,
+                            function_call_id,
+                        )
+                        return fc
+                    except Exception as exc:
+                        logger.warning(
+                            "[RemoteSandbox] Failed to hydrate FunctionCall for cancellation | slot=%s class=%s error=%s",
+                            slot_label,
+                            class_label,
+                            exc,
+                        )
+                        return None
+
+            for value in locals_map.values():
+                _maybe_queue(value)
+
+            for attr in ("gen", "_gen", "_agen", "_async_gen"):
+                _maybe_queue(getattr(current, attr, None))
+
+            inner = getattr(current, "gi_yieldfrom", None)
+            if inner is not None:
+                _maybe_queue(inner)
+
+        return None
+
+    def _run_coro_blocking(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     with modal.enable_output():
         slot = 0 if container_slot is None else int(container_slot)
         slot_mod = slot % 3
         class_name = "SandboxExecutorA" if slot_mod == 0 else ("SandboxExecutorB" if slot_mod == 1 else "SandboxExecutorC")
+        logger.info(
+            "[RemoteSandbox] Starting execute_remote_sandbox | slot=%s class=%s thread_id=%s user_id=%s",
+            slot,
+            class_name,
+            thread_id,
+            user_id,
+        )
         executor_class = modal.Cls.from_name("mgs-code-sandbox", class_name)
         executor = executor_class()
         outputs = executor.run_sandboxed_code.remote_gen(
@@ -828,5 +939,170 @@ def execute_remote_sandbox(
             global_hierarchy_access=global_hierarchy_access,
             selected_project_key=selected_project_key,
         )
-        for output in outputs:
-            yield output
+        modal_function_call = _extract_modal_call(outputs, slot, class_name)
+        controller = get_active_run_controller()
+        stream_handle = None
+        modal_handle = None
+        pending_modal_cancel = False
+
+        def _hydrate_modal_call_by_id(function_call_id: Optional[str], origin: str) -> Optional[_FunctionCall]:
+            if not function_call_id:
+                logger.warning(
+                    "[RemoteSandbox] Control payload missing function_call_id | slot=%s class=%s origin=%s",
+                    slot,
+                    class_name,
+                    origin,
+                )
+                return None
+            try:
+                fc = modal.FunctionCall.from_id(function_call_id)
+            except Exception as exc:
+                logger.warning(
+                    "[RemoteSandbox] Failed to hydrate Modal FunctionCall from id | slot=%s class=%s origin=%s error=%s",
+                    slot,
+                    class_name,
+                    origin,
+                    exc,
+                )
+                return None
+            if hasattr(fc, "_is_generator"):
+                setattr(fc, "_is_generator", True)
+            logger.info(
+                "[RemoteSandbox] Hydrated FunctionCall via %s | slot=%s class=%s call_id=%s",
+                origin,
+                slot,
+                class_name,
+                getattr(fc, "object_id", "unknown"),
+            )
+            return fc  # type: ignore[return-value]
+
+        def _cancel_modal_call() -> None:
+            nonlocal pending_modal_cancel
+            if modal_function_call is None:
+                pending_modal_cancel = True
+                logger.warning(
+                    "[RemoteSandbox] Cancellation requested but FunctionCall handle not ready | slot=%s class=%s",
+                    slot,
+                    class_name,
+                )
+                return
+            pending_modal_cancel = False
+            logger.warning(
+                "[RemoteSandbox] Cancellation requested, sending Modal cancel | slot=%s class=%s call_id=%s",
+                slot,
+                class_name,
+                getattr(modal_function_call, "object_id", "unknown"),
+            )
+            try:
+                result = modal_function_call.cancel(terminate_containers=True)
+                if inspect.isawaitable(result):
+                    _run_coro_blocking(result)
+            except Exception:
+                logger.exception(
+                    "[RemoteSandbox] Failed to cancel Modal FunctionCall | slot=%s class=%s",
+                    slot,
+                    class_name,
+                )
+
+        def _ensure_modal_handle(candidate: Optional[_FunctionCall], origin: str) -> None:
+            nonlocal modal_function_call
+            if candidate is None:
+                return
+            modal_function_call = candidate
+            if controller and controller.is_cancelled():
+                logger.info(
+                    "[RemoteSandbox] Run already cancelled; invoking Modal cancel immediately | slot=%s class=%s origin=%s",
+                    slot,
+                    class_name,
+                    origin,
+                )
+                _cancel_modal_call()
+            elif pending_modal_cancel:
+                logger.info(
+                    "[RemoteSandbox] Deferred Modal cancellation will now run | slot=%s class=%s origin=%s",
+                    slot,
+                    class_name,
+                    origin,
+                )
+                _cancel_modal_call()
+
+        _ensure_modal_handle(modal_function_call, "frame_introspection")
+
+        if controller:
+            logger.info(
+                "[RemoteSandbox] Registering cancellation callback | run_id=%s user_id=%s",
+                getattr(controller, "run_id", "?"),
+                getattr(controller, "user_id", "?"),
+            )
+
+            def _close_remote_stream() -> None:
+                logger.warning(
+                    "[RemoteSandbox] Cancellation requested, closing Modal stream | slot=%s class=%s",
+                    slot,
+                    class_name,
+                )
+                with suppress(Exception):
+                    outputs.close()
+
+            stream_handle = controller.register_generic(_close_remote_stream, label="modal_sandbox_stream_close")
+            modal_handle = controller.register_generic(_cancel_modal_call, label="modal_sandbox_call_cancel")
+        else:
+            logger.info("[RemoteSandbox] No active RunCancellationController detected for slot %s", slot)
+
+        def _maybe_process_control_message(output: Any) -> bool:
+            if not isinstance(output, dict):
+                return False
+            control = output.get("__control__")
+            if not isinstance(control, dict):
+                return False
+            event = control.get("event")
+            if event == "modal_call_metadata":
+                fc = _hydrate_modal_call_by_id(control.get("function_call_id"), "control_payload")
+                _ensure_modal_handle(fc, "control_payload")
+                return True
+            return False
+
+        if modal_function_call is None:
+            logger.info(
+                "[RemoteSandbox] Waiting for Modal control metadata to enable cancellation | slot=%s class=%s",
+                slot,
+                class_name,
+            )
+
+        try:
+            for output in outputs:
+                if _maybe_process_control_message(output):
+                    continue
+                if controller:
+                    if controller.is_cancelled():
+                        logger.info(
+                            "[RemoteSandbox] Detected cancellation signal while streaming | slot=%s class=%s",
+                            slot,
+                            class_name,
+                        )
+                    controller.raise_if_cancelled("modal_sandbox_stream")
+                yield output
+        finally:
+            if controller:
+                if stream_handle:
+                    controller.unregister(stream_handle)
+                if modal_handle:
+                    controller.unregister(modal_handle)
+                logger.info(
+                    "[RemoteSandbox] Unregistered cancellation callbacks | slot=%s class=%s",
+                    slot,
+                    class_name,
+                )
+
+
+class _RunSandboxedCodeAdapter:
+    """Backward compatible shim exposing .remote/.remote_gen helpers."""
+
+    def remote(self, **kwargs):
+        return execute_remote_sandbox(**kwargs)
+
+    def remote_gen(self, **kwargs):  # pragma: no cover - alias for modal API compatibility
+        return execute_remote_sandbox(**kwargs)
+
+
+run_sandboxed_code = _RunSandboxedCodeAdapter()

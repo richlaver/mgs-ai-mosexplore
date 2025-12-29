@@ -10,7 +10,9 @@ import b2sdk.v1 as b2
 import psycopg2
 import streamlit as st
 from langchain_google_vertexai import ChatVertexAI
-from langchain_community.utilities import SQLDatabase
+from langchain_community.utilities import SQLDatabase as BaseSQLDatabase
+from utils.cancelable_llm import InterruptibleChatVertexAI, clone_llm as clone_interruptible_llm
+from utils.cancelable_sql import CancelableSQLDatabase
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
@@ -162,7 +164,7 @@ def build_relationship_graph(table_info=table_info) -> defaultdict[str, List[Tup
     return graph
 
 
-def get_global_hierarchy_access(db: SQLDatabase) -> bool:
+def get_global_hierarchy_access(db: BaseSQLDatabase) -> bool:
     """Check if the user has global hierarchy access."""
     st.toast("Checking global hierarchy access...", icon=":material/lock_open:")
     query = """
@@ -203,41 +205,36 @@ def get_llms() -> Dict[str, ChatVertexAI]:
     """
     st.toast("Setting up Gemini LLMs...", icon=":material/build:")
     return {
-        "FAST": ChatVertexAI(
+        "FAST": InterruptibleChatVertexAI(
             model="gemini-2.0-flash-lite",
             temperature=0.3,
         ),
-        "BALANCED": ChatVertexAI(
+        "BALANCED": InterruptibleChatVertexAI(
             model="gemini-2.0-flash",
             temperature=0.5,
         ),
-        "THINKING": ChatVertexAI(
+        "THINKING": InterruptibleChatVertexAI(
             model="gemini-2.5-pro",
             temperature=0.7,
         ),
     }
 
 
+def get_llm(model: str = "FAST") -> ChatVertexAI:
+    """Backward compatible alias returning a single LLM by key."""
+
+    llms = get_llms()
+    key = (model or "FAST").upper()
+    return llms.get(key, llms["FAST"])
+
+
 def clone_llm_with_overrides(llm: ChatVertexAI, **overrides) -> ChatVertexAI:
-    """Return a new ChatVertexAI copying the source config plus any overrides."""
-    base_params = {
-        "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
-        "temperature": getattr(llm, "temperature", None),
-        "max_output_tokens": getattr(llm, "max_output_tokens", None),
-        "top_p": getattr(llm, "top_p", None),
-        "top_k": getattr(llm, "top_k", None),
-        "safety_settings": getattr(llm, "safety_settings", None),
-        "location": getattr(llm, "location", None),
-        "project": getattr(llm, "project", None),
-    }
-    base_params.update({k: v for k, v in overrides.items() if v is not None})
-    filtered_params = {k: v for k, v in base_params.items() if v is not None}
-    if "model" not in filtered_params:
-        raise ValueError("Cannot clone ChatVertexAI without a model name")
-    return ChatVertexAI(**filtered_params)
+    """Clone an LLM while preserving cancellation awareness."""
+
+    return clone_interruptible_llm(llm, **overrides)
 
 
-def get_db() -> SQLDatabase:
+def get_db() -> BaseSQLDatabase:
     """Initialize the SQL database connection.
 
     Returns:
@@ -275,7 +272,7 @@ def get_db() -> SQLDatabase:
         )
 
         # Initialize SQLDatabase with custom metadata
-        db = SQLDatabase(
+        db = CancelableSQLDatabase(
             engine=engine,
             metadata=metadata,
             include_tables=include_tables,

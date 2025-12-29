@@ -38,6 +38,7 @@ def tool_calling_agent(
         indent=2
     )
     verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2)
+    validated_type_info_json = json.dumps(context.verif_type_info or [], indent=2)
     relevant_date_ranges_json = json.dumps(
         [r.model_dump() for r in (context.relevant_date_ranges or [])], indent=2
     )
@@ -60,7 +61,9 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 # Context
 - Current date: {current_date}
-- Instrument IDs in query with their type and subtype:
+- Validated instrument types and subtypes referenced in the query (complete list from database; do not infer additional types or subtypes):
+{validated_type_info_json}
+- Validated instrument IDs with their type and subtype mappings (only rely on these ID-type pairs confirmed in the database):
 {verified_instrument_info_json}
 - Background behind words in query (instrument types, subtypes, DB fields, labels, units):
 {word_context_json}

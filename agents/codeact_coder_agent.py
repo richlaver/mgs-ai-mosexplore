@@ -47,6 +47,7 @@ codeact_coder_prompt = PromptTemplate(
         "current_date",
         "retrospective_query",
         "verified_instrument_ids",
+    "validated_type_info_json",
         "verified_instrument_info_json",
         "word_context_json",
         "relevant_date_ranges_json",
@@ -66,7 +67,9 @@ Generate code to answer the following user query:
 # Context
 - Current date:
 {current_date}
-- Instrument IDs in query with their type and subtype:
+- Validated instrument types and subtypes referenced in the query (complete list from the database; do not infer additional types or subtypes):
+{validated_type_info_json}
+- Validated instrument IDs with their type and subtype mappings (only rely on these confirmed ID-type pairs from the database):
 {verified_instrument_info_json}
 - Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data):
 {word_context_json}
@@ -174,7 +177,7 @@ await ainvoke(csv_saver_tool, {{
 ### How to Use
 - Use to extract data from database strictly following `extraction_sandbox_agent.invoke(prompt)` or in async code `await ainvoke(extraction_sandbox_agent, prompt)`.
 - Prompt is natural language description of data to extract.
-- Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
+- You MUST specify ALL details in the prompt with key:value pairs to minimize misinterpretation.
 - Always include `Output columns` in prompt to specify DataFrame column names.
 - Returns `pandas.DataFrame` or `None`.
 - Combine data extraction steps when possible to reduce latency.
@@ -496,6 +499,7 @@ def codeact_coder_agent(
     qw.model_dump() for qw in context.word_context
   ] if context and context.word_context else [], indent=2)
   verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
+  validated_type_info_json = json.dumps(context.verif_type_info or [], indent=2) if context else "[]"
   relevant_date_ranges_json = json.dumps([
     r.model_dump() for r in (context.relevant_date_ranges or [])
   ], indent=2) if context else "[]"
@@ -525,6 +529,7 @@ def codeact_coder_agent(
     response = generate_chain.invoke({
       "current_date": current_date,
       "retrospective_query": retrospective_query,
+      "validated_type_info_json": validated_type_info_json,
       "verified_instrument_info_json": verified_instrument_info_json,
       "word_context_json": word_context_json,
       "relevant_date_ranges_json": relevant_date_ranges_json,

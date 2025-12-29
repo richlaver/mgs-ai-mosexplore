@@ -42,10 +42,17 @@ from setup import clone_llm_with_overrides
 
 import json
 import traceback
-from modal_sandbox_remote import execute_remote_sandbox
+from modal_sandbox_remote import run_sandboxed_code
 from modal_sandbox_local import execute_local_sandbox
+from utils.run_cancellation import get_active_run_controller
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_run_not_cancelled(stage: str) -> None:
+    controller = get_active_run_controller()
+    if controller:
+        controller.raise_if_cancelled(stage)
 
 def build_graph(
     llms: Dict[str, BaseLanguageModel],
@@ -138,6 +145,7 @@ def build_graph(
     )
 
     def progress_messenger_node(state: AgentState, node: str) -> dict:
+        _ensure_run_not_cancelled(f"progress:{node}")
         template = progress_messages.get(node)
         if template:
             msg = AIMessage(
@@ -149,6 +157,7 @@ def build_graph(
         return {"messages": []}
     
     def history_summariser_node(state: AgentState) -> dict:
+        _ensure_run_not_cancelled("history_summariser")
         retrospective_query = history_summariser(
             messages=state.messages,
             llm=llms['BALANCED']
@@ -157,6 +166,7 @@ def build_graph(
         return {"context": new_context}
 
     def context_orchestrator_node(state: AgentState):
+        _ensure_run_not_cancelled("context_orchestrator")
         base_context_dict = {}
         if isinstance(state.context, Context):
             base_context_dict = state.context.model_dump(exclude_none=True)
@@ -172,6 +182,7 @@ def build_graph(
         sub_graph = get_context_graph(llms, db, selected_project_key)
         accumulated_context = base_context_dict
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
+            _ensure_run_not_cancelled("context_orchestrator_stream")
             logger.info(f'Context Orchestrator sub-chunk: {sub_chunk}')
             for node, context_update in sub_chunk.items():
                 if context_update:
@@ -210,6 +221,7 @@ def build_graph(
         return "continue_execution"
     
     def query_classifier_node(state: AgentState) -> dict:
+        _ensure_run_not_cancelled("query_classifier")
         classified_agent_type = query_classifier_agent(llm=llms['BALANCED'], messages=state.messages, context=state.context) if agent_type == "Auto" else agent_type
         logger.info(f"Classified agent type: {classified_agent_type}")
 
@@ -230,25 +242,30 @@ def build_graph(
         return {"executions": new_executions}
 
     def query_clarifier_node(state: AgentState) -> dict:
+        _ensure_run_not_cancelled("query_clarifier")
         clarification_requests = state.context.clarification_requests if state.context else []
         chat_history = filter_messages_only_final(state.messages)
         message = query_clarifier_agent(llm=llms['BALANCED'], clarification_requests=clarification_requests, chat_history=chat_history)
         return {"messages": [message]}
     
     def enter_parallel_execution_node(state: AgentState):
+        _ensure_run_not_cancelled("enter_parallel_execution")
         logger.info("[MainGraph] Entering parallel execution (inline branches): %d", num_parallel_executions)
         targets = [Send(f"run_branch_{i}", state) for i in range(num_parallel_executions)]
         return Command(goto=targets)
     
     def exit_parallel_execution_node(state: AgentState):
+        _ensure_run_not_cancelled("exit_parallel_execution")
         logger.info("[MainGraph] Exiting parallel execution (inline branches)")
         return {}
     
     def response_selector_node(state: AgentState) -> dict:
+        _ensure_run_not_cancelled("response_selector")
         updated_executions = response_selector(llm=llms['THINKING'], executions=state.executions, context=state.context)
         return {"executions": updated_executions}
         
     def reporter_node(state: AgentState) -> Dict[str, List]:
+        _ensure_run_not_cancelled("reporter")
         base_len = len(state.messages)
         updated_messages_full = reporter_agent(
             llm=llms['THINKING'],
@@ -266,6 +283,7 @@ def build_graph(
             return AIMessage(name=f"Executor_{branch_id}", content=str(content), additional_kwargs={"stage": "execution_output", "process": process})
 
         def run_branch(state: AgentState):
+            _ensure_run_not_cancelled(f"run_branch_{branch_id}")
             ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
             if not ex or ex.final_response is not None:
                 return {}
@@ -273,6 +291,7 @@ def build_graph(
             payload: Dict[str, Any] = {}
 
             if ex.agent_type == "CodeAct":
+                _ensure_run_not_cancelled(f"run_branch_{branch_id}:codeact")
                 coder_result = codeact_coder_agent(
                     generating_llm=llms['THINKING'],
                     checking_llm=llms['BALANCED'],
@@ -301,7 +320,7 @@ def build_graph(
                 if code:
                     try:
                         if remote_sandbox:
-                            gen = execute_remote_sandbox(
+                            gen = run_sandboxed_code.remote(
                                 code=code,
                                 table_info=table_info,
                                 table_relationship_graph=table_relationship_graph,
@@ -322,6 +341,7 @@ def build_graph(
                                 selected_project_key=selected_project_key,
                             )
                         for out in gen:
+                            _ensure_run_not_cancelled(f"run_branch_{branch_id}:sandbox_stream")
                             if not isinstance(out, dict) or "metadata" not in out:
                                 logs.append(f"Invalid output: {out}")
                                 continue
@@ -369,6 +389,7 @@ def build_graph(
                     payload["messages"] = messages
 
             elif ex.agent_type == "ReAct":
+                _ensure_run_not_cancelled(f"run_branch_{branch_id}:react")
                 tools = [
                     extraction_tool,
                     timeseries_plot_tool,
@@ -397,6 +418,7 @@ def build_graph(
                     payload["messages"] = msgs
 
             elif ex.agent_type == "Tool-Calling":
+                _ensure_run_not_cancelled(f"run_branch_{branch_id}:tool_calling")
                 tools = [
                     extraction_tool,
                     timeseries_plot_tool,
