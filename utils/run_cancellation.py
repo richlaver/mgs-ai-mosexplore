@@ -109,6 +109,22 @@ class RunCancellationController:
         for handle, resource in zip(handles, resources, strict=False):
             self._invoke_callback(handle, resource.cancel, resource.label)
 
+    def cancel_active_resources(self, reason: str | None = None) -> None:
+        """Best-effort cancellation of currently registered resources without marking the run cancelled.
+
+        This is useful when we want to stop in-flight work (e.g., LLM calls, SQL queries,
+        sandbox executions) while allowing the overall graph to continue to downstream nodes.
+        """
+
+        handles, resources = self._snapshot_callbacks()
+        if reason:
+            logger.info("[RunCancel %s] Cancelling active resources only: %s (handles=%d)", self.run_id, reason, len(handles))
+        if not handles:
+            logger.info("[RunCancel %s] No active resources to cancel", self.run_id)
+        for handle, resource in zip(handles, resources, strict=False):
+            logger.info("[RunCancel %s] Cancelling resource handle=%s label=%s", self.run_id, handle, resource.label)
+            self._invoke_callback(handle, resource.cancel, resource.label)
+
     def _snapshot_callbacks(self) -> tuple[list[str], list[_RegisteredResource]]:
         with self._lock:
             handles = list(self._resources.keys())

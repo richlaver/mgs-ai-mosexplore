@@ -497,18 +497,17 @@ def render_initial_ui() -> None:
             help="Use more agents to improve **accuracy** with marginal latency penalty",
             on_change=_rebuild_graph,
         )
-        # Uncomment to enable completions before response slider
-        # if st.session_state.num_parallel_executions > 1:
-        #     st.slider(
-        #         label="No. of Completions Before Responding",
-        #         min_value=1,
-        #         max_value=st.session_state.num_parallel_executions,
-        #         step=1,
-        #         format="%i",
-        #         key="num_completions_before_response",
-        #         help="Await completions to improve **accuracy** but prolong **latency**",
-        #         on_change=_rebuild_graph,
-        #     )
+        if st.session_state.num_parallel_executions > 1:
+            st.slider(
+                label="No. of Completions Before Responding",
+                min_value=1,
+                max_value=st.session_state.num_parallel_executions,
+                step=1,
+                format="%i",
+                key="num_completions_before_response",
+                help="Await completions to improve **accuracy** but prolong **latency**",
+                on_change=_rebuild_graph,
+            )
         st.selectbox(
             label="Agent Type",
             options=["Auto", "CodeAct", "ReAct", "Tool-Calling"],

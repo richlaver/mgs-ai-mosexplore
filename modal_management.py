@@ -3,6 +3,8 @@ import modal
 import subprocess
 import time
 import logging
+import json
+from typing import Optional
 
 import modal_sandbox_remote
 from graph import build_graph
@@ -73,6 +75,7 @@ def deploy_app():
             st.session_state.app_id = deployment.app_id if hasattr(deployment, 'app_id') else "unknown"
             st.toast(f"App deployed successfully! App ID: {st.session_state.app_id}", icon=":material/rocket_launch:")
             st.session_state.container_warm = False
+            st.session_state.container_warm_count = 0
             warm_up_container()
         except Exception as e:
             st.session_state.app_deployed = False
@@ -90,6 +93,7 @@ def stop_app():
             subprocess.run(["modal", "app", "stop", app_id], check=True)
             st.session_state.app_deployed = False
             st.session_state.container_warm = False
+            st.session_state.container_warm_count = 0
             st.session_state.app_id = None
             # make_local_sandbox_mode()
             st.toast("App and containers stopped successfully.", icon=":material/block:")
@@ -129,6 +133,101 @@ def restart_container_for_project_change():
         logger.error("[Modal] Restart failed: %s", e)
         raise
 
+
+def _list_app_containers(app_id: Optional[str]) -> list[dict]:
+    """Return running containers for the given app id using the Modal CLI."""
+
+    if not app_id:
+        return []
+    try:
+        result = subprocess.run(
+            ["modal", "container", "list", "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        containers = json.loads(result.stdout)
+        return [c for c in containers if c.get("App ID") == app_id]
+    except Exception as exc:
+        logger.warning("[Modal] Failed to list containers for app %s: %s", app_id, exc)
+        return []
+
+
+def _stop_extra_containers(app_id: Optional[str], keep: int) -> int:
+    """Stop containers above the desired count; returns how many were stopped."""
+
+    if keep < 0:
+        keep = 0
+    containers = _list_app_containers(app_id)
+    if not containers:
+        return 0
+
+    # Prefer keeping the oldest containers (likely already warm/busy).
+    containers.sort(key=lambda c: c.get("Start Time", ""))
+    extra = containers[keep:]
+    stopped = 0
+    for container in extra:
+        container_id = container.get("Container ID")
+        if not container_id:
+            continue
+        try:
+            subprocess.run(["modal", "container", "stop", container_id], check=True)
+            stopped += 1
+            logger.info("[Modal] Stopped extra container: %s", container_id)
+        except Exception as exc:
+            logger.warning("[Modal] Failed to stop container %s: %s", container_id, exc)
+    return stopped
+
+
+def _stop_all_containers(app_id: Optional[str]) -> int:
+    """Stop all running containers for the app; returns how many were stopped."""
+
+    containers = _list_app_containers(app_id)
+    stopped = 0
+    for container in containers:
+        container_id = container.get("Container ID")
+        if not container_id:
+            continue
+        try:
+            subprocess.run(["modal", "container", "stop", container_id], check=True)
+            stopped += 1
+            logger.info("[Modal] Stopped container: %s", container_id)
+        except Exception as exc:
+            logger.warning("[Modal] Failed to stop container %s: %s", container_id, exc)
+    return stopped
+
+
+def _update_autoscaler_for_all(target: int) -> None:
+    """Set per-class autoscaler targets with priority A -> B -> C."""
+
+    class_names = ["SandboxExecutorA", "SandboxExecutorB", "SandboxExecutorC"]
+
+    def _desired_class_counts(n: int) -> dict[str, int]:
+        alloc = {"SandboxExecutorA": 0, "SandboxExecutorB": 0, "SandboxExecutorC": 0}
+        remaining = max(n, 0)
+        for name in class_names:
+            if remaining <= 0:
+                break
+            alloc[name] = 1
+            remaining -= 1
+        return alloc
+
+    allocations = _desired_class_counts(target)
+
+    for name, count in allocations.items():
+        try:
+            cls = modal.Cls.from_name("mgs-code-sandbox", name)
+            obj = cls()
+            obj.update_autoscaler(  # type: ignore[attr-defined]
+                min_containers=count,
+                max_containers=count,
+                buffer_containers=0,
+            )
+            logger.info("[Modal] Autoscaler updated | class=%s min=%s max=%s", name, count, count)
+        except Exception as exc:
+            logger.warning("[Modal] Failed to update autoscaler for %s: %s", name, exc)
+
+
 def warm_up_container():
     """Execute a trivial remote sandbox strategy to trigger container spin-up and mark warm status.
 
@@ -137,13 +236,33 @@ def warm_up_container():
     if not st.session_state.get("app_deployed"):
         logger.info("Skipping warm_up_container: app not deployed")
         return
-    if st.session_state.get("container_warm"):
-        logger.info("Skipping warm_up_container: container already warm")
+    app_id = st.session_state.get("app_id")
+    target = int(st.session_state.get("num_parallel_executions", 1) or 0)
+
+    _update_autoscaler_for_all(target)
+
+    actual_containers = _list_app_containers(app_id)
+    current_warm = len(actual_containers)
+    st.session_state.container_warm_count = current_warm
+    st.session_state.container_warm = current_warm > 0
+
+    if target == current_warm:
+        logger.info("Skipping warm_up_container: target=%s matches current=%s", target, current_warm)
         return
+
+    if target < current_warm:
+        with st.spinner("Reducing warm containers..."):
+            _stop_all_containers(app_id)
+            refreshed = _list_app_containers(app_id)
+            st.session_state.container_warm_count = len(refreshed)
+            st.session_state.container_warm = st.session_state.container_warm_count > 0
+            logger.info("[Modal] Stopped all containers to enforce ordered allocation | before=%s after=%s target=%s", current_warm, st.session_state.container_warm_count, target)
+        # Reset warm count for deterministic re-warm below.
+        current_warm = 0
+
     with st.spinner("Warming up containers..."):
         try:
-            target = int(st.session_state.get("num_parallel_executions", 1) or 1)
-            for slot in range(target):
+            for slot in range(current_warm, target):
                 for output in modal_sandbox_remote.execute_remote_sandbox(
                     code=MOCK_CODE,
                     table_info=MOCK_TABLE_INFO,
@@ -158,11 +277,19 @@ def warm_up_container():
                     if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
                         st.error("Cannot warm container: App not deployed.")
                         st.session_state.container_warm = False
+                        st.session_state.container_warm_count = current_warm
                         return
-            st.session_state.container_warm = True
-            st.toast(f"{target} container(s) warmed successfully.", icon=":material/mode_heat:")
+            refreshed = _list_app_containers(app_id)
+            new_count = len(refreshed)
+            st.session_state.container_warm = new_count > 0
+            st.session_state.container_warm_count = new_count
+            if new_count >= target:
+                st.toast(f"{target} container(s) warmed successfully.", icon=":material/mode_heat:")
+            else:
+                st.toast(f"Warmed {new_count}/{target} container(s). Check Modal console.", icon=":material/warning:")
         except Exception as e:
             st.session_state.container_warm = False
+            st.session_state.container_warm_count = current_warm
             st.toast(f"Warm-up failed: {str(e)}", icon=":material/error:")
             logger.exception("Warm-up failed")
             raise

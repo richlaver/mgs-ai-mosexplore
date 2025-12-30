@@ -47,7 +47,7 @@ def setup_session() -> None:
     if "sandbox_mode" not in st.session_state:
         st.session_state.sandbox_mode = "Remote"
     if "num_parallel_executions" not in st.session_state:
-        st.session_state.num_parallel_executions = 2
+        st.session_state.num_parallel_executions = 3
     if "num_completions_before_response" not in st.session_state:
         st.session_state.num_completions_before_response = 2
     if "setup_complete" not in st.session_state:
@@ -60,3 +60,7 @@ def setup_session() -> None:
         st.session_state.selected_project_key = "project_data.lpp"
     if "project_context_cache" not in st.session_state:
         st.session_state.project_context_cache = {}
+    if "container_warm" not in st.session_state:
+        st.session_state.container_warm = False
+    if "container_warm_count" not in st.session_state:
+        st.session_state.container_warm_count = 0
