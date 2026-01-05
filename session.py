@@ -44,18 +44,22 @@ def setup_session() -> None:
         st.session_state.table_relationship_graph = None
     if "developer_view" not in st.session_state:
         st.session_state.developer_view = True
-    if "sandbox_mode" not in st.session_state:
-        st.session_state.sandbox_mode = "Remote"
+    if "parallel_plan" not in st.session_state:
+        st.session_state.parallel_plan = "Performance"
     if "num_parallel_executions" not in st.session_state:
-        st.session_state.num_parallel_executions = 3
+        st.session_state.num_parallel_executions = 7
+    if "completion_strategy" not in st.session_state:
+        st.session_state.completion_strategy = "Intelligent"
+    if "min_successful_responses" not in st.session_state:
+        st.session_state.min_successful_responses = 3
+    if "min_explained_variance" not in st.session_state:
+        st.session_state.min_explained_variance = 0.7
     if "num_completions_before_response" not in st.session_state:
         st.session_state.num_completions_before_response = 2
     if "setup_complete" not in st.session_state:
         st.session_state.setup_complete = False
     if "need_rebuild_graph" not in st.session_state:
         st.session_state.need_rebuild_graph = False
-    if "agent_type" not in st.session_state:
-        st.session_state.agent_type = "CodeAct"
     if "selected_project_key" not in st.session_state:
         st.session_state.selected_project_key = "project_data.lpp"
     if "project_context_cache" not in st.session_state:

@@ -55,12 +55,12 @@ progress_messages = {
             "process": "history_summariser"
         }
     ),
-    'query_classifier_node': AIMessage(
-        name="QueryClassifier",
-        content="Deciding the agent best suited to answer your query...",
+    'execution_initializer_node': AIMessage(
+        name="ExecutionInitializer",
+        content="Preparing CodeAct executors to answer your query...",
         additional_kwargs={
             "stage": "node",
-            "process": "query_classifier"
+            "process": "execution_initializer"
         }
     ),
     'enter_parallel_execution_node': AIMessage(

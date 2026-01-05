@@ -562,7 +562,6 @@ def codeact_coder_agent(
     ]
 
     new_execution = Execution(
-      agent_type="CodeAct",
       parallel_agent_id=0,
       retry_number=len(previous_attempts),
       codeact_code=cleaned_code,
@@ -576,7 +575,6 @@ def codeact_coder_agent(
   except Exception as e:
     logger.error("Error in codeact_coder_agent: %s", str(e))
     new_execution = Execution(
-      agent_type="CodeAct",
       parallel_agent_id=0,
       retry_number=len(previous_attempts),
       codeact_code="",

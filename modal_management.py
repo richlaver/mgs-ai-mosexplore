@@ -7,8 +7,6 @@ import json
 from typing import Optional
 
 import modal_sandbox_remote
-from graph import build_graph
-from parameters import table_info
 
 logger = logging.getLogger(__name__)
 
@@ -24,27 +22,6 @@ def execute_strategy():
     yield {"type": "warmup", "content": "Container warmed"}
 """
 
-def make_local_sandbox_mode():
-    current_sandbox_mode = st.session_state.get("sandbox_mode")
-    if current_sandbox_mode != "Local":
-        st.session_state.sandbox_mode = "Local"
-        st.session_state.update({'graph': build_graph(
-            llms=st.session_state.llms,
-            db=st.session_state.db,
-            blob_db=st.session_state.blob_db,
-            metadata_db=st.session_state.metadata_db,
-            table_info=table_info,
-            table_relationship_graph=st.session_state.table_relationship_graph, 
-            thread_id=st.session_state.thread_id,
-            user_id=st.session_state.selected_user_id,
-            global_hierarchy_access=st.session_state.global_hierarchy_access,
-            remote_sandbox=False,
-            num_parallel_executions=st.session_state.num_parallel_executions,
-            num_completions_before_response=st.session_state.num_completions_before_response,
-            agent_type=st.session_state.agent_type,
-            selected_project_key=st.session_state.get("selected_project_key"),
-        )})
-
 # Check if app is deployed using Modal API
 def is_app_deployed():
     try:
@@ -55,12 +32,8 @@ def is_app_deployed():
         logger.info(f"App Description: {app.description}")
         return app is not None
     except modal.exception.ExecutionError:
-        # make_local_sandbox_mode()
         return False
     except Exception as e:
-        # make_local_sandbox_mode()
-        # Comment the line below to fail silently when running Streamlit locally
-        # st.error(f"Failed to check app status: {str(e)}")
         return False
 
  
@@ -95,7 +68,6 @@ def stop_app():
             st.session_state.container_warm = False
             st.session_state.container_warm_count = 0
             st.session_state.app_id = None
-            # make_local_sandbox_mode()
             st.toast("App and containers stopped successfully.", icon=":material/block:")
         except Exception as e:
             st.toast(f"Stop failed: {str(e)}. Use CLI: modal app stop {app_id}", icon=":material/error:")
@@ -198,12 +170,12 @@ def _stop_all_containers(app_id: Optional[str]) -> int:
 
 
 def _update_autoscaler_for_all(target: int) -> None:
-    """Set per-class autoscaler targets with priority A -> B -> C."""
+    """Set per-class autoscaler targets with priority order A onward."""
 
-    class_names = ["SandboxExecutorA", "SandboxExecutorB", "SandboxExecutorC"]
+    class_names = list(modal_sandbox_remote.SANDBOX_EXECUTOR_CLASS_NAMES)
 
     def _desired_class_counts(n: int) -> dict[str, int]:
-        alloc = {"SandboxExecutorA": 0, "SandboxExecutorB": 0, "SandboxExecutorC": 0}
+        alloc = {name: 0 for name in class_names}
         remaining = max(n, 0)
         for name in class_names:
             if remaining <= 0:

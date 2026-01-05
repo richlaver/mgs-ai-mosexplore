@@ -238,8 +238,6 @@ def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
     if "app_deployed" not in st.session_state:
         st.session_state.app_deployed = is_app_deployed()
-        # if not st.session_state.app_deployed:
-        #     st.session_state.sandbox_mode = "Local"
         logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
         
     st.markdown(
@@ -389,14 +387,49 @@ def render_initial_ui() -> None:
         icon_image="mgs-small-logo.svg"
     )
 
+    def _majority_threshold(count: int) -> int:
+        return max(1, (count // 2) + 1)
+
+    parallel_plans = {
+        "Economy": {"agents": 3, "label": "Economy — 3 agents"},
+        "Reliable": {"agents": 5, "label": "Reliable — 5 agents"},
+        "Performance": {"agents": 7, "label": "Performance — 7 agents"},
+    }
+
+    completion_strategies = {
+        "Intelligent": {
+            "label": "Intelligent — consistency-based",
+            "resolve": _majority_threshold,
+        },
+        "Quick": {
+            "label": "Quick — first completion",
+            "resolve": lambda n: 1,
+        },
+        "Balanced": {
+            "label": "Balanced — majority completion",
+            "resolve": _majority_threshold,
+        },
+        "Max": {
+            "label": "Max — all agents complete",
+            "resolve": lambda n: max(1, n),
+        },
+    }
     def _rebuild_graph():
-        st.session_state.num_completions_before_response = max(
-            1,
-            min(
-                st.session_state.get('num_completions_before_response', 1),
-                st.session_state.num_parallel_executions,
-            ),
+        selected_plan = st.session_state.get("parallel_plan", "Economy")
+        plan = parallel_plans.get(selected_plan, parallel_plans["Economy"])
+        st.session_state.num_parallel_executions = plan["agents"]
+
+        selected_strategy = st.session_state.get("completion_strategy", "Intelligent")
+        strategy = completion_strategies.get(selected_strategy, completion_strategies["Intelligent"])
+        st.session_state.num_completions_before_response = strategy["resolve"](st.session_state.num_parallel_executions)
+
+        min_successful = min(
+            st.session_state.get("min_successful_responses", 3),
+            st.session_state.num_parallel_executions,
         )
+        st.session_state.min_successful_responses = min_successful
+        st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.7))
+
         st.session_state.graph = build_graph(
             llms=st.session_state.llms,
             db=st.session_state.db,
@@ -407,14 +440,15 @@ def render_initial_ui() -> None:
             thread_id=st.session_state.thread_id,
             user_id=st.session_state.selected_user_id,
             global_hierarchy_access=st.session_state.global_hierarchy_access,
-            remote_sandbox=st.session_state.sandbox_mode == "Remote",
             num_parallel_executions=st.session_state.num_parallel_executions,
             num_completions_before_response=st.session_state.num_completions_before_response,
-            agent_type=st.session_state.agent_type,
+            response_mode=selected_strategy,
+            min_successful_responses=st.session_state.min_successful_responses,
+            min_explained_variance=st.session_state.min_explained_variance,
             selected_project_key=st.session_state.get("selected_project_key"),
         )
         try:
-            if st.session_state.sandbox_mode == "Remote" and st.session_state.get("app_deployed"):
+            if st.session_state.get("app_deployed"):
                 warm_up_container()
         except Exception:
             pass
@@ -455,9 +489,9 @@ def render_initial_ui() -> None:
                         ensure_project_context(selected_key, force_refresh=True, strict=True)
                     except Exception as e:
                         logger.error("Failed to refresh project contexts for %s: %s", selected_key, e)
-                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "agent_type", "num_parallel_executions"]):
+                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "num_parallel_executions"]):
                         try:
-                            logger.info("[Project Switch] Rebuilding agent graph (remote_sandbox=%s) for project=%s", st.session_state.sandbox_mode == "Remote", selected_key)
+                            logger.info("[Project Switch] Rebuilding agent graph for project=%s", selected_key)
                             st.session_state.graph = build_graph(
                                 llms=st.session_state.llms,
                                 db=st.session_state.db,
@@ -468,10 +502,11 @@ def render_initial_ui() -> None:
                                 thread_id=st.session_state.thread_id,
                                 user_id=st.session_state.selected_user_id,
                                 global_hierarchy_access=st.session_state.global_hierarchy_access,
-                                remote_sandbox=st.session_state.sandbox_mode == "Remote",
                                 num_parallel_executions=st.session_state.num_parallel_executions,
                                 num_completions_before_response=st.session_state.get("num_completions_before_response", 1),
-                                agent_type=st.session_state.agent_type,
+                                response_mode=st.session_state.get("completion_strategy", "Intelligent"),
+                                min_successful_responses=st.session_state.get("min_successful_responses", 3),
+                                min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
                                 selected_project_key=selected_key,
                             )
                             logger.info("[Project Switch] Graph rebuilt for project=%s", selected_key)
@@ -487,34 +522,46 @@ def render_initial_ui() -> None:
                 help="Select which project database to query.",
                 on_change=_on_project_change,
             )
-        st.slider(
-            label="No. of Parallel-Running Agents",
-            min_value=1,
-            max_value=3,
-            step=1,
-            format="%i",
-            key="num_parallel_executions",
-            help="Use more agents to improve **accuracy** with marginal latency penalty",
+        plan_keys = list(parallel_plans.keys())
+        st.selectbox(
+            label="Subscription Plan",
+            options=plan_keys,
+            format_func=lambda key: parallel_plans[key]["label"],
+            key="parallel_plan",
+            help="Economy: 3 agents • Reliable: 5 agents • Performance: 7 agents",
             on_change=_rebuild_graph,
         )
-        if st.session_state.num_parallel_executions > 1:
+        strategy_keys = list(completion_strategies.keys())
+        st.selectbox(
+            label="Response Mode",
+            options=strategy_keys,
+            format_func=lambda key: completion_strategies[key]["label"],
+            key="completion_strategy",
+            help="Intelligent: consistency-based • Quick: first completion • Balanced: majority completion • Max: all agents complete",
+            on_change=_rebuild_graph,
+        )
+        if st.session_state.get("completion_strategy", "Intelligent") == "Intelligent":
+            selected_plan_key = st.session_state.get("parallel_plan", "Economy")
+            selected_plan = parallel_plans.get(selected_plan_key, parallel_plans["Economy"])
+            max_success_needed = selected_plan.get("agents", 3)
+            st.session_state.min_successful_responses = min(max_success_needed, st.session_state.min_successful_responses)
             st.slider(
-                label="No. of Completions Before Responding",
+                label="Minimum No. of Successful Responses to Await",
                 min_value=1,
-                max_value=st.session_state.num_parallel_executions,
+                max_value=max_success_needed,
                 step=1,
-                format="%i",
-                key="num_completions_before_response",
-                help="Await completions to improve **accuracy** but prolong **latency**",
+                key="min_successful_responses",
+                help="Stop early when consistency is stable after at least this many successful responses.",
                 on_change=_rebuild_graph,
             )
-        st.selectbox(
-            label="Agent Type",
-            options=["Auto", "CodeAct", "ReAct", "Tool-Calling"],
-            key="agent_type",
-            help="**CodeAct**: writes and executes code.  \n**ReAct**: reasons and uses tools.  \n**Tool-Calling**: parallel tool execution",
-            on_change=_rebuild_graph,
-        )
+            st.slider(
+                label="Minimum Explained Variance",
+                min_value=0.5,
+                max_value=1.0,
+                key="min_explained_variance",
+                help="Regularised Explained Variance threshold for Intelligent mode termination.",
+                on_change=_rebuild_graph,
+            )
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
@@ -577,10 +624,9 @@ def postprocess_state_update(state_update) -> AIMessage | AIMessageChunk | None:
     node_icon_map = {
         'history_summariser': 'summarize',
         'context_orchestrator': 'search',
-        'query_classifier': 'shuffle',
+        'execution_initializer': 'build',
         'codeact_coder_branch': 'lightbulb',
         'codeact_executor_branch': 'sprint',
-        'react_branch': 'conversion_path',
         'reporter': 'edit_square'
     }
     if isinstance(state_update, tuple) and len(state_update) == 2:

@@ -42,6 +42,24 @@ def perform_setup():
     st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
     ensure_project_context(st.session_state.get("selected_project_key"), force_refresh=True, strict=True)
 
+    plan_to_agents = {"Economy": 3, "Reliable": 5, "Performance": 7}
+    selected_plan = st.session_state.get("parallel_plan", "Reliable")
+    st.session_state.num_parallel_executions = plan_to_agents.get(selected_plan, 3)
+
+    completion_strategy = st.session_state.get("completion_strategy", "Intelligent")
+    if completion_strategy == "Quick":
+        st.session_state.num_completions_before_response = 1
+    elif completion_strategy == "Max":
+        st.session_state.num_completions_before_response = st.session_state.num_parallel_executions
+    else:
+        st.session_state.num_completions_before_response = max(1, (st.session_state.num_parallel_executions // 2) + 1)
+
+    st.session_state.min_successful_responses = min(
+        st.session_state.get("min_successful_responses", 3),
+        st.session_state.num_parallel_executions,
+    )
+    st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.7))
+
     import graph
     st.session_state.graph = graph.build_graph(
         llms=st.session_state.llms,
@@ -53,10 +71,11 @@ def perform_setup():
         thread_id=st.session_state.thread_id,
         user_id=st.session_state.selected_user_id,
         global_hierarchy_access=st.session_state.global_hierarchy_access,
-        remote_sandbox=st.session_state.sandbox_mode == "Remote",
         num_parallel_executions=st.session_state.num_parallel_executions,
         num_completions_before_response=st.session_state.num_completions_before_response,
-        agent_type=st.session_state.agent_type,
+        response_mode=completion_strategy,
+        min_successful_responses=st.session_state.min_successful_responses,
+        min_explained_variance=st.session_state.min_explained_variance,
         selected_project_key=st.session_state.get("selected_project_key"),
     )
     st.session_state.graph_agent_state_cls_id = id(AgentState)

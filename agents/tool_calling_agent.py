@@ -1,3 +1,9 @@
+"""Legacy tool-calling agent kept for potential future use.
+
+Currently not wired into the CodeAct-only execution flow but retained so it can be
+re-enabled without reconstructing the implementation from scratch.
+"""
+
 import json
 import logging
 from typing import Dict, Any, List, Union
@@ -79,10 +85,11 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 # Available Tools
 ## `extraction_sandbox_agent`
 ### How to Use
-- Use to extract data from database strictly following `extraction_sandbox_agent.invoke(prompt)` or in async code `await ainvoke(extraction_sandbox_agent, prompt)`.
-- Prompt is natural language description of data to extract.
-- Specify as much detail as possible in prompt with key:value pairs to minimize misinterpretation.
-- Always include `Output columns` in prompt to specify DataFrame column names.
+- Use to extract data from the database by calling the tool `extraction_sandbox_agent` with a prompt string (no Python code, no `.invoke`, no `print`).
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of the data to extract.
+- Include detailed key:value lines to minimize misinterpretation.
+- Always include `Output columns` in the prompt to specify DataFrame column names.
 - Returns `pandas.DataFrame` or `None`.
 - Combine data extraction steps when possible to reduce latency.
 ### Example Prompt
@@ -101,8 +108,9 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `timeseries_plot_sandbox_agent`
 ### How to Use
-- Use to display change of data with time for one or more series strictly following `timeseries_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(timeseries_plot_sandbox_agent, prompt)` if async).
-- Prompt is natural language description of plot which MUST include:
+- Use to display change of data with time for one or more series by calling the tool `timeseries_plot_sandbox_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of the plot which MUST include:
   * Instrument IDs for each series
   * Database field names for extracting data
   * Time range
@@ -131,10 +139,11 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `map_plot_sandbox_agent`
 ### How to Use
-- Use to display spatial distribution of readings or review status strictly following `map_plot_sandbox_agent.invoke(prompt)` (or `await ainvoke(map_plot_sandbox_agent, prompt)` if async).
+- Use to display spatial distribution of readings or review status by calling the tool `map_plot_sandbox_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
 - Readings or review status can be plotted as at single time or as change over period.
 - Can plot multiple series with different instrument types, subtypes and database fields.
-- Prompt is natural language description of plot which MUST include:
+- Prompt is a natural-language description of the plot which MUST include:
   * Whether plotting readings or review status
   * Whether plotting at single time or change over period
   * Time if single time or time range if change over period
@@ -185,8 +194,9 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 
 ## `review_by_value_agent`
 ### How to Use
-- Use to get review status for one or more known measurement values strictly following `review_by_value_agent.invoke(prompt)` or in async code `await ainvoke(review_by_value_agent, prompt)`.
-- Prompt is natural language description of review status request that MUST include:
+- Use to get review status for one or more known measurement values by calling the tool `review_by_value_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of review status request that MUST include:
   * Instrument IDs
   * Database field names
   * Database field values
@@ -204,8 +214,9 @@ Status Query 2
 
 ## `review_by_time_agent`
 ### How to Use
-- Use to get review status of the latest reading before a given timestamp at one or more instruments and data fields strictly following `review_by_time_agent.invoke(prompt)` or in async code `await ainvoke(review_by_time_agent, prompt)`.
-- Prompt is natural language description of review status request that MUST include:
+- Use to get review status of the latest reading before a given timestamp at one or more instruments and data fields by calling the tool `review_by_time_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of review status request that MUST include:
   * Instrument IDs
   * Database field names
   * Timestamps
@@ -223,8 +234,9 @@ Status Query 2
 
 ## `review_schema_agent`
 ### How to Use
-- Use to get full schema (names, values, direction, color) of active review levels for one or more instrument fields strictly following `review_schema_agent.invoke(prompt)` or in async code `await ainvoke(review_schema_agent, prompt)`.
-- Prompt is natural language description of review schema request that MUST include:
+- Use to get full schema (names, values, direction, color) of active review levels for one or more instrument fields by calling the tool `review_schema_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of review schema request that MUST include:
   * Instrument IDs
   * Database field names
 - Returns `pandas.DataFrame` with columns (`review_name`, `review_value`, `review_direction`, `review_color`) or `None` or `ERROR: <error message>`.
@@ -239,8 +251,9 @@ Schema Query 2
 
 ## `breach_instr_agent`
 ### How to Use
-- Use to get instruments whose latest reading before a timestamp surpasses any review level strictly following `breach_instr_agent.invoke(prompt)` or in async code `await ainvoke(breach_instr_agent, prompt)`.
-- Prompt is natural language description of review status enquiry that MUST include:
+- Use to get instruments whose latest reading before a timestamp surpasses any review level by calling the tool `breach_instr_agent` with a prompt string.
+- Do not emit Python code for this tool; issue a structured tool call only.
+- Prompt is a natural-language description of review status enquiry that MUST include:
   * Timestamp cut-off
 - For more specific requests, you can include the following in the prompt:
   * Review level name to only return breaches at that level
@@ -268,7 +281,7 @@ Schema Query 2
 6. Collect artefact IDs from plotting tools.
 7. Provide a final answer that addresses the query, referencing the data and artefacts as appropriate.
 
-When calling tools, provide detailed natural language prompts as specified in the tool descriptions (pass as the "prompt" argument).
+When calling tools, provide detailed natural-language prompts as specified in the tool descriptions (pass as the "prompt" argument).
 
 If you have enough information after tool calls, provide the final answer directly in your response.
 
@@ -331,8 +344,8 @@ Begin by analyzing the query.
                 description=t.description
             )
         langchain_tools.append(tool_obj)
-
-    llm_with_tools = llm.bind_tools(langchain_tools)
+        
+    llm_with_tools = llm.bind_tools(langchain_tools, tool_choice="any")
 
     def agent_node(state: AgentState) -> Dict[str, Any]:
         messages = state["messages"]
@@ -357,7 +370,7 @@ Begin by analyzing the query.
     workflow.add_edge("tools", "agent")
     graph = workflow.compile()
 
-    input_value = f"Answer the following user query plus an optional extension that adds value:\n{retrospective_query}"
+    input_value = f"Answer the following user query:\n{retrospective_query}"
 
     initial_state = {
         "messages": [SystemMessage(content=react_system_prompt), HumanMessage(content=input_value)],

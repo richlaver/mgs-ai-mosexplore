@@ -30,6 +30,15 @@ except ModuleNotFoundError:  # pragma: no cover - remote fallback
 # Ten times the default MySQL limits
 MYSQL_DEFAULT_SESSION_TABLE_LIMIT_BYTES = 16 * 1024 * 1024
 SANDBOX_SESSION_TABLE_LIMIT_BYTES = MYSQL_DEFAULT_SESSION_TABLE_LIMIT_BYTES * 10
+SANDBOX_EXECUTOR_CLASS_NAMES = [
+    "SandboxExecutorA",
+    "SandboxExecutorB",
+    "SandboxExecutorC",
+    "SandboxExecutorD",
+    "SandboxExecutorE",
+    "SandboxExecutorF",
+    "SandboxExecutorG",
+]
 
 
 def _ensure_basic_logging():
@@ -836,6 +845,166 @@ class SandboxExecutorC:
         ):
             yield out
 
+
+@app.cls(
+    image=image,
+    secrets=build_modal_secrets(),
+    min_containers=0,
+    timeout=600
+)
+@modal.concurrent(max_inputs=1)
+class SandboxExecutorD:
+    @modal.enter()
+    def enter(self):
+        _enter_impl(self)
+
+    @modal.exit()
+    def exit(self):
+        _exit_impl(self)
+
+    @modal.method()
+    async def run_sandboxed_code(
+        self,
+        code: str,
+        table_info: List[Dict],
+        table_relationship_graph: Dict[str, List[tuple]],
+        thread_id: str,
+        user_id: int,
+        global_hierarchy_access: bool,
+        selected_project_key: Optional[str] = None,
+    ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
+        async for out in _run_impl(
+            self,
+            code,
+            table_info,
+            table_relationship_graph,
+            thread_id,
+            user_id,
+            global_hierarchy_access,
+            selected_project_key,
+        ):
+            yield out
+
+
+@app.cls(
+    image=image,
+    secrets=build_modal_secrets(),
+    min_containers=0,
+    timeout=600
+)
+@modal.concurrent(max_inputs=1)
+class SandboxExecutorE:
+    @modal.enter()
+    def enter(self):
+        _enter_impl(self)
+
+    @modal.exit()
+    def exit(self):
+        _exit_impl(self)
+
+    @modal.method()
+    async def run_sandboxed_code(
+        self,
+        code: str,
+        table_info: List[Dict],
+        table_relationship_graph: Dict[str, List[tuple]],
+        thread_id: str,
+        user_id: int,
+        global_hierarchy_access: bool,
+        selected_project_key: Optional[str] = None,
+    ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
+        async for out in _run_impl(
+            self,
+            code,
+            table_info,
+            table_relationship_graph,
+            thread_id,
+            user_id,
+            global_hierarchy_access,
+            selected_project_key,
+        ):
+            yield out
+
+
+@app.cls(
+    image=image,
+    secrets=build_modal_secrets(),
+    min_containers=0,
+    timeout=600
+)
+@modal.concurrent(max_inputs=1)
+class SandboxExecutorF:
+    @modal.enter()
+    def enter(self):
+        _enter_impl(self)
+
+    @modal.exit()
+    def exit(self):
+        _exit_impl(self)
+
+    @modal.method()
+    async def run_sandboxed_code(
+        self,
+        code: str,
+        table_info: List[Dict],
+        table_relationship_graph: Dict[str, List[tuple]],
+        thread_id: str,
+        user_id: int,
+        global_hierarchy_access: bool,
+        selected_project_key: Optional[str] = None,
+    ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
+        async for out in _run_impl(
+            self,
+            code,
+            table_info,
+            table_relationship_graph,
+            thread_id,
+            user_id,
+            global_hierarchy_access,
+            selected_project_key,
+        ):
+            yield out
+
+
+@app.cls(
+    image=image,
+    secrets=build_modal_secrets(),
+    min_containers=0,
+    timeout=600
+)
+@modal.concurrent(max_inputs=1)
+class SandboxExecutorG:
+    @modal.enter()
+    def enter(self):
+        _enter_impl(self)
+
+    @modal.exit()
+    def exit(self):
+        _exit_impl(self)
+
+    @modal.method()
+    async def run_sandboxed_code(
+        self,
+        code: str,
+        table_info: List[Dict],
+        table_relationship_graph: Dict[str, List[tuple]],
+        thread_id: str,
+        user_id: int,
+        global_hierarchy_access: bool,
+        selected_project_key: Optional[str] = None,
+    ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
+        async for out in _run_impl(
+            self,
+            code,
+            table_info,
+            table_relationship_graph,
+            thread_id,
+            user_id,
+            global_hierarchy_access,
+            selected_project_key,
+        ):
+            yield out
+
 def execute_remote_sandbox(
     code: str,
     table_info: List[Dict],
@@ -919,8 +1088,8 @@ def execute_remote_sandbox(
 
     with modal.enable_output():
         slot = 0 if container_slot is None else int(container_slot)
-        slot_mod = slot % 3
-        class_name = "SandboxExecutorA" if slot_mod == 0 else ("SandboxExecutorB" if slot_mod == 1 else "SandboxExecutorC")
+        slot_mod = slot % len(SANDBOX_EXECUTOR_CLASS_NAMES)
+        class_name = SANDBOX_EXECUTOR_CLASS_NAMES[slot_mod]
         logger.info(
             "[RemoteSandbox] Starting execute_remote_sandbox | slot=%s class=%s thread_id=%s user_id=%s",
             slot,

@@ -71,7 +71,6 @@ class Suggestion(BaseModel):
 
 class Execution(BaseModel):
     """An execution run."""
-    agent_type: str = Field(description="Type of agent used for the execution run", enum=["ReAct", "CodeAct"])
     parallel_agent_id: int = Field(description="Differentiates between agents running in parallel during an execution run")
     retry_number: int = Field(description="Differentiates between retry attempts")
     codeact_code: str = Field(description="Code generated for CodeAct agents")
@@ -84,7 +83,7 @@ class Execution(BaseModel):
 def upsert_execution_list(existing: List["Execution"], incoming: List["Execution"]) -> List["Execution"]:
     """Custom reducer for AgentState.executions.
 
-    Replaces matching executions (by agent_type, parallel_agent_id, retry_number)
+    Replaces matching executions (by parallel_agent_id, retry_number)
     and appends new ones if no match exists. Preserves original order where possible.
     """
     if not existing:
@@ -93,7 +92,7 @@ def upsert_execution_list(existing: List["Execution"], incoming: List["Execution
         return list(existing)
 
     def _key(ex: "Execution") -> tuple:
-        return (ex.agent_type, ex.parallel_agent_id, ex.retry_number)
+        return (ex.parallel_agent_id, ex.retry_number)
 
     index = { _key(ex): i for i, ex in enumerate(existing) }
     result = list(existing)
