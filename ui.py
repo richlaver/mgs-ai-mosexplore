@@ -541,9 +541,9 @@ def render_initial_ui() -> None:
             on_change=_rebuild_graph,
         )
         if st.session_state.get("completion_strategy", "Intelligent") == "Intelligent":
-            selected_plan_key = st.session_state.get("parallel_plan", "Economy")
-            selected_plan = parallel_plans.get(selected_plan_key, parallel_plans["Economy"])
-            max_success_needed = selected_plan.get("agents", 3)
+            selected_plan_key = st.session_state.get("parallel_plan", "Performance")
+            selected_plan = parallel_plans.get(selected_plan_key, parallel_plans["Performance"])
+            max_success_needed = selected_plan.get("agents", 7)
             st.session_state.min_successful_responses = min(max_success_needed, st.session_state.min_successful_responses)
             st.slider(
                 label="Minimum No. of Successful Responses to Await",
