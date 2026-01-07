@@ -161,6 +161,16 @@ def build_graph(
     success_order_counter = 0
     response_mode_normalized = (response_mode or "").strip().lower()
 
+    def _reset_run_state() -> None:
+        """Clear termination and fact-tracking state for a fresh run."""
+        nonlocal termination_triggered, successful_executions, response_facts, counted_branches, success_order_counter
+        with termination_lock:
+            termination_triggered = False
+            successful_executions = []
+            response_facts = []
+            counted_branches = {}
+            success_order_counter = 0
+
     def _terminate_running_branches_if_threshold_met(successes: int) -> None:
         nonlocal termination_triggered
         if successes < num_completions_before_response:
@@ -500,6 +510,7 @@ def build_graph(
         return {"messages": []}
 
     def history_summariser_node(state: AgentState) -> dict:
+        _reset_run_state()
         _ensure_run_not_cancelled("history_summariser")
         retrospective_query = history_summariser(messages=state.messages, llm=llms["BALANCED"])
         base_context = state.context if isinstance(state.context, Context) else None
