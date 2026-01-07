@@ -582,11 +582,19 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
         for col in df.columns:
             if df[col].dtype == 'object' and col not in ['reading_timestamp', 'date1']:
                 converted = pd.to_numeric(df[col], errors='coerce')
-                if converted.notna().all():
+                non_numeric_count = converted.isna().sum()
+                if non_numeric_count < len(converted):
                     df[col] = converted
-                    if df[col].dtype == 'float64' and df[col].eq(df[col].astype('int64')).all():
+                    if df[col].dtype == 'float64' and df[col].notna().all() and df[col].eq(df[col].astype('int64')).all():
                         df[col] = df[col].astype('int64')
-                    logger.debug(f"[parse_results] Converted column '{col}' to numeric (dtype: {df[col].dtype})")
+                    if non_numeric_count:
+                        logger.debug(
+                            "[parse_results] Column '%s' numeric coercion left %d non-numeric value(s) as NaN",
+                            col,
+                            non_numeric_count,
+                        )
+                    else:
+                        logger.debug(f"[parse_results] Converted column '{col}' to numeric (dtype: {df[col].dtype})")
 
         messages.append(AIMessage(
             name="ExtractionSandboxAgent",

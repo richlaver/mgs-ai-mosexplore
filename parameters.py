@@ -226,9 +226,10 @@ User access permissions are often governed by this administration hierarchy and 
         ],
         'context': """
 # Instrument Status
-Each instrument can be labeled with a **status** indicating the current state that the instrument is in which is often used to suggest whether the instrument is fit to take readings and if not why.
-Refer to the status of an instrument to explain why readings are currently missing particularly over a prolonged period (> 7 days), or if the query specifically requests instrument status e.g. “How many instruments are decommissioned?”.
-Find the status of an instrument by referencing {{table: instrument_status_configuration, column: instrum_status}} and joining {{table: instrument_status_configuration, column: id}} to {{table: instrument_remarks, column: rem_status_id}} for an instrument with instrument ID in {{table: instrument_remarks, column: instr_id}}. 
+Each instrument can be labeled with an **instrument status** indicating the current state that the instrument is in which is often used to suggest whether the instrument is fit to take readings and if not why.
+The *instrument* status differs from the *review level* status.
+Refer to instrument status to explain why readings are currently missing particularly over a prolonged period (> 7 days), or if the query specifically requests instrument status e.g. “How many instruments are decommissioned?”.
+Find instrument status by referencing {{table: instrument_status_configuration, column: instrum_status}} and joining {{table: instrument_status_configuration, column: id}} to {{table: instrument_remarks, column: rem_status_id}} for an instrument with instrument ID in {{table: instrument_remarks, column: instr_id}}. 
 """
     }
 ]

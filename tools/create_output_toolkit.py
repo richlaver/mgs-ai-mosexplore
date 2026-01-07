@@ -1953,7 +1953,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 ),
                 text=text,
                 customdata=customdata,
-                hovertemplate="%<b>{customdata[0]}</b><br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
+                hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]:.3f} " + s.abbreviated_unit + "<extra></extra>",
                 name=f"{s.measured_quantity_name} ({s.abbreviated_unit})"
             ))
             logger.info(f"Added readings trace")
