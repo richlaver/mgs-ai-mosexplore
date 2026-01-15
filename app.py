@@ -1,4 +1,5 @@
 import sys
+
 import streamlit as st
 st.set_page_config(
     page_title="MissionOS Explore",
@@ -11,6 +12,7 @@ import session
 from parameters import table_info
 from classes import AgentState, Context
 from utils.context_data import ensure_project_context
+from utils.timezone_utils import init_timezones
 import logging
 
 def setup_logging():
@@ -39,7 +41,9 @@ def perform_setup():
     st.session_state.table_relationship_graph = setup.build_relationship_graph()
 
     st.session_state.db = setup.get_db()
+    st.session_state.map_spatial_defaults = setup.get_map_spatial_defaults(st.session_state.db)
     st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+    init_timezones(st.session_state.db)
     ensure_project_context(st.session_state.get("selected_project_key"), force_refresh=True, strict=True)
 
     plan_to_agents = {"Economy": 3, "Reliable": 5, "Performance": 7}

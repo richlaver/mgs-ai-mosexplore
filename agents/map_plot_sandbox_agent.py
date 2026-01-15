@@ -26,7 +26,7 @@ Natural language description of the map plot including:
 - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM') if 'change_over_period' or time to plot if 'value_at_time'.
 - Instrument types, subtypes, fields, names, units to plot e.g. 'plot calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series.'.
 - Centre (instrument ID or easting/northing) and radius.
-- Optional: instruments to exclude, number of hours within which to search for readings.
+- Optional: instruments to exclude; buffer period in hours.
                         """)
 
 class MapPlotSandboxAgentState(TypedDict):
@@ -40,7 +40,21 @@ class MapPlotSandboxAgentState(TypedDict):
 
 def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQLQueryTool, write_artefact_tool: WriteArtefactTool, thread_id: str, user_id: int):
     logger.debug("Entering create_map_plot_sandbox_subgraph")
-    plot_tool = MapPlotTool(sql_tool=sql_tool)
+    center_default = None
+    radius_default = None
+    try:
+        from setup import get_map_spatial_defaults  # Local import to avoid circulars during non-app runs
+        defaults = get_map_spatial_defaults(sql_tool.db) if hasattr(sql_tool, "db") else None
+        if defaults:
+            center_default = (
+                defaults.get("median_easting"),
+                defaults.get("median_northing"),
+            )
+            radius_default = defaults.get("radius_90_extent")
+    except Exception as exc:
+        logger.warning("Unable to load cached map spatial defaults: %s", exc)
+
+    plot_tool = MapPlotTool(sql_tool=sql_tool, default_center=center_default, default_radius_meters=radius_default)
     logger.debug("MapPlotTool initialized")
 
     generate_prompt = ChatPromptTemplate.from_template("""
@@ -51,7 +65,7 @@ def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQ
     - plot_type: Str, either 'value_at_time' or 'change_over_period'.
     - start_time: Optional str in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Required for 'change_over_period'.
     - end_time: Str in same format.
-    - buffer_period_hours: Optional int, default 72.
+    - buffer_period_hours: Optional int.
     - series: List of dicts with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str like 'dataN' or 'calculationN'), 'measured_quantity_name' (str), 'abbreviated_unit' (str).
     - center_instrument_id: Optional str.
     - center_easting: Optional float.
@@ -246,7 +260,7 @@ class MapPlotSandboxAgentTool(BaseTool):
     - Time range (e.g., 'from 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM') if 'change_over_period' or time to plot if 'value_at_time'.
     - Instrument types, subtypes, fields, names, units to plot e.g. 'plot calculation1 (settlement (mm)) from type "LP" and subtype "MOVEMENT" as the first series and data2 (groundwater level (mPD)) from type "VWP" and subtype "DEFAULT" as the second series.'
     - Centre (instrument ID or easting/northing) and radius.
-    - Optional: instruments to exclude, number of hours within which to search for readings.
+    - Optional: instruments to exclude; buffer period in hours.
     NOTE: When data_type='review_levels' ONLY the FIRST series provided (instrument_type/subtype/field/name/unit) is used to derive and plot review statuses; any additional series are ignored.
     Returns: String artefact_id of the stored Plotly JSON or None if failed.
     """

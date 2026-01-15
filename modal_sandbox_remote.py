@@ -7,6 +7,8 @@ import modal
 import logging
 import json
 import os
+import queue
+import threading
 import psycopg2
 from psycopg2 import OperationalError
 import b2sdk.v1 as b2
@@ -15,6 +17,7 @@ from sqlalchemy import create_engine, MetaData, Table, Column, Integer, event
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Generator, List, Dict, AsyncGenerator, Optional, Any
 from parameters import include_tables
 from setup import build_modal_secrets
@@ -39,6 +42,9 @@ SANDBOX_EXECUTOR_CLASS_NAMES = [
     "SandboxExecutorF",
     "SandboxExecutorG",
 ]
+
+# Temporary debug flag: surface INFO logs to client to trace stalls. Set back to False after diagnosing.
+STREAM_INFO_LOGS = True
 
 
 def _ensure_basic_logging():
@@ -72,6 +78,22 @@ def _ensure_basic_logging():
 
 app = modal.App("mgs-code-sandbox")
 logger = logging.getLogger(__name__)
+
+def _normalize_api_endpoint(raw: str) -> str:
+    if not raw:
+        return ""
+    return raw.replace("https://", "").replace("http://", "").rstrip("/")
+
+
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
+VERTEX_ENDPOINT = _normalize_api_endpoint(
+    os.environ.get(
+        "VERTEX_ENDPOINT",
+        "aiplatform.googleapis.com"
+        if VERTEX_LOCATION == "global"
+        else f"{VERTEX_LOCATION}-aiplatform.googleapis.com",
+    )
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.13")
@@ -114,6 +136,22 @@ image = (
     .add_local_file("utils/cancelable_llm.py", remote_path="/root/utils/cancelable_llm.py")
     .add_local_file("utils/cancelable_sql.py", remote_path="/root/utils/cancelable_sql.py")
 )
+
+
+@app.function(
+    image=image,
+    secrets=build_modal_secrets(),
+    timeout=60,
+)
+def sandbox_timezone_probe() -> dict:
+    now = datetime.now().astimezone()
+    raw_offset = now.strftime("%z") or "+0000"
+    normalized = f"{raw_offset[:3]}:{raw_offset[3:]}" if len(raw_offset) == 5 else raw_offset
+    return {
+        "iso": now.isoformat(),
+        "tzname": now.tzname(),
+        "offset": normalized,
+    }
 
 
 def _get_int_env(name: str, default: Optional[int] = None) -> Optional[int]:
@@ -197,6 +235,8 @@ def _stdout_error_filter(line: str) -> bool:
     stripped = (line or "").strip()
     if not stripped:
         return False
+    if STREAM_INFO_LOGS:
+        return True
     upper = stripped.upper()
     if any(marker in upper for marker in ("[WARNING]", "[ERROR]", "[CRITICAL]", "[EXCEPTION]")):
         return True
@@ -314,7 +354,13 @@ def _enter_impl(self):
         user=os.environ["ARTEFACT_METADATA_RDS_USER"],
         password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
         database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
-        port=rds_port
+        port=rds_port,
+        connect_timeout=10,
+        options="-c statement_timeout=50000",
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
     )
     logger.info("Connected to PostgreSQL RDS metadata_db")
 
@@ -332,10 +378,14 @@ def _enter_impl(self):
     logger.info("Authorized and got B2 bucket: %s", os.environ["ARTEFACT_BLOB_B2_BUCKET"])
 
     # Initialize LLMs
+    llm_common = {
+        "location": VERTEX_LOCATION,
+        "api_endpoint": VERTEX_ENDPOINT,
+    }
     self.llms = {
-        "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1),
-        "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1),
-        "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1),
+        "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1, **llm_common),
+        "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1, **llm_common),
+        "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1, **llm_common),
     }
     logger.info("Initialized ChatVertexAI models: FAST, BALANCED, THINKING")
 
@@ -392,12 +442,19 @@ async def _run_impl(self,
     selected_project_key: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
     _ensure_basic_logging()
+    start_ts = perf_counter()
+
+    def log_stage(label: str) -> None:
+        elapsed = perf_counter() - start_ts
+        run_logger.info("[stage] %s | elapsed=%.3fs", label, elapsed)
+
     from tools.artefact_toolkit import WriteArtefactTool
     run_logger = logging.getLogger("modal_sandbox.run")
     run_logger.info("Starting sandbox execution | user_id=%s global_access=%s code_len=%s table_info=%s rel_graph_keys=%s",
                     user_id, global_hierarchy_access, len(code) if isinstance(code, str) else None,
                     len(table_info) if isinstance(table_info, list) else None,
                     list(table_relationship_graph.keys()) if isinstance(table_relationship_graph, dict) else None)
+    log_stage("after_start_log")
 
     function_call_id = getattr(modal, "current_function_call_id", lambda: None)()
     input_id = getattr(modal, "current_input_id", lambda: None)()
@@ -428,26 +485,43 @@ async def _run_impl(self,
     session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
     session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
     try:
+        log_stage("before_metadata_ping")
+        async def _ping_metadata_db() -> None:
+            def _do_ping() -> None:
+                with self.metadata_db.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+
+            return await asyncio.wait_for(asyncio.to_thread(_do_ping), timeout=10)
+
         # Verify PostgreSQL connection
         try:
             if self.metadata_db.closed != 0:
                 run_logger.info("PostgreSQL connection closed; reconnecting")
                 raise OperationalError("Connection closed")
-            with self.metadata_db.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
+            await _ping_metadata_db()
             run_logger.info("PostgreSQL connection is active")
-        except (OperationalError, psycopg2.InterfaceError) as e:
-            run_logger.warning("PostgreSQL connection failed: %s; reconnecting", e)
+        except (OperationalError, psycopg2.InterfaceError, asyncio.TimeoutError) as e:
+            run_logger.warning("PostgreSQL connection failed or timed out: %s; reconnecting", e)
             self.metadata_db.close()
             self.metadata_db = psycopg2.connect(
                 host=os.environ["ARTEFACT_METADATA_RDS_HOST"],
                 user=os.environ["ARTEFACT_METADATA_RDS_USER"],
                 password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
                 database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
-                port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432")
+                port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
+                connect_timeout=10,
+                options="-c statement_timeout=50000",
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
             )
             run_logger.info("Reconnected to PostgreSQL RDS metadata_db")
+            log_stage("after_metadata_reconnect")
+            await _ping_metadata_db()
+            run_logger.info("PostgreSQL reconnection validated")
+        log_stage("after_metadata_ping")
 
         def _get_db_for_project(project_key: Optional[str]) -> SQLDatabase:
             if project_key and project_key in self._db_cache:
@@ -462,8 +536,25 @@ async def _run_impl(self,
                 name = str(cfg.get("db_name"))
                 port = str(cfg.get("port", "3306"))
                 uri = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{name}"
-                run_logger.info("Creating project SQLAlchemy engine (project=%s host=%s db=%s port=%s)", project_key, host, name, port)
-                engine = create_engine(uri, echo=False, pool_pre_ping=True)
+                connect_args = {"connection_timeout": 10}
+                run_logger.info(
+                    "Creating project SQLAlchemy engine (project=%s host=%s db=%s port=%s connect_timeout=%ss pool_timeout=%ss pool_recycle=%ss)",
+                    project_key,
+                    host,
+                    name,
+                    port,
+                    connect_args["connection_timeout"],
+                    30,
+                    1800,
+                )
+                engine = create_engine(
+                    uri,
+                    echo=False,
+                    pool_pre_ping=True,
+                    pool_recycle=1800,
+                    pool_timeout=30,
+                    connect_args=connect_args,
+                )
                 metadata = MetaData()
                 Table('3d_condours', metadata, Column('id', Integer, primary_key=True), Column('contour_bound', Geometry))
                 _attach_session_configuration(engine, session_tmp_table_size, session_max_heap_table_size)
@@ -479,6 +570,7 @@ async def _run_impl(self,
             raise RuntimeError("PROJECT_DATA_JSON missing or project config not found/invalid for key: %s" % project_key)
 
         db = _get_db_for_project(selected_project_key)
+        log_stage("after_db_lookup")
         # Initialize tools
         extraction_tool = extraction_sandbox_agent(
             llm=self.llms['BALANCED'],
@@ -554,6 +646,7 @@ async def _run_impl(self,
             user_id=user_id,
         )
         run_logger.info("Initialized tools")
+        log_stage("after_tool_init")
 
         tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
         tool_limit = max(1, tool_limit)
@@ -633,6 +726,7 @@ async def _run_impl(self,
                     "PARALLEL_ENABLED": True,
                 }
                 run_logger.info("[%s] Executing user code via exec()", type(self).__name__)
+                log_stage("before_exec")
 
                 exec(code, local_namespace)
 
@@ -657,6 +751,7 @@ async def _run_impl(self,
                     return
 
                 run_logger.info("[%s] Running execute_strategy() with zero arguments ...", type(self).__name__)
+                log_stage("before_execute_strategy")
 
                 async def _yield_outputs(obj):
                     """Yield outputs from any kind of result (async gen, coroutine, sync iterable, dict)."""
@@ -714,6 +809,7 @@ async def _run_impl(self,
                 for payload in _collect_stream_payloads(flush=True):
                     yield payload
                 run_logger.info("[%s] execute_strategy completed", type(self).__name__)
+                log_stage("after_execute_strategy")
         finally:
             root_logger.removeHandler(queue_logging_handler)
             queue_logging_handler.close()
@@ -729,7 +825,7 @@ async def _run_impl(self,
     image=image,
     secrets=build_modal_secrets(),
     min_containers=1,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorA:
@@ -769,7 +865,7 @@ class SandboxExecutorA:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorB:
@@ -810,7 +906,7 @@ class SandboxExecutorB:
     secrets=build_modal_secrets(),
     # Keep C container optionally warm via warm-up (do not force always-on)
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorC:
@@ -850,7 +946,7 @@ class SandboxExecutorC:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorD:
@@ -890,7 +986,7 @@ class SandboxExecutorD:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorE:
@@ -930,7 +1026,7 @@ class SandboxExecutorE:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorF:
@@ -970,7 +1066,7 @@ class SandboxExecutorF:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=600
+    timeout=500
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorG:
@@ -1015,6 +1111,8 @@ def execute_remote_sandbox(
     selected_project_key: Optional[str] = None,
     container_slot: Optional[int] = None,
 ) -> Generator[dict, None, None]:
+
+    first_payload_timeout = _get_int_env("SANDBOX_FIRST_PAYLOAD_TIMEOUT_SECONDS", 20) or 20
 
     def _extract_modal_call(gen, slot_label: int, class_label: str) -> Optional[_FunctionCall]:
         to_visit: list[Any] = [gen]
@@ -1238,8 +1336,55 @@ def execute_remote_sandbox(
                 class_name,
             )
 
+        def _stream_with_timeout(gen):
+            q: queue.Queue[tuple[str, Any | None, BaseException | None]] = queue.Queue()
+
+            def _pump() -> None:
+                try:
+                    for item in gen:
+                        q.put(("item", item, None))
+                except BaseException as exc:
+                    q.put(("error", None, exc))
+                finally:
+                    q.put(("eof", None, None))
+
+            t = threading.Thread(target=_pump, daemon=True)
+            t.start()
+
+            got_first = False
+            try:
+                while True:
+                    try:
+                        kind, item, err = q.get(timeout=first_payload_timeout if not got_first else 1.0)
+                    except queue.Empty:
+                        if not got_first:
+                            raise TimeoutError(f"No sandbox output within {first_payload_timeout}s (likely not started)")
+                        # Keep checking cancellation regularly after first item
+                        if controller:
+                            if controller.is_cancelled():
+                                logger.info(
+                                    "[RemoteSandbox] Detected cancellation signal while waiting for stream | slot=%s class=%s",
+                                    slot,
+                                    class_name,
+                                )
+                            controller.raise_if_cancelled("modal_sandbox_stream")
+                        continue
+
+                    if kind == "item":
+                        got_first = True
+                        yield item
+                    elif kind == "error":
+                        assert err is not None
+                        raise err
+                    elif kind == "eof":
+                        break
+            finally:
+                with suppress(Exception):
+                    gen.close()
+                t.join(timeout=2)
+
         try:
-            for output in outputs:
+            for output in _stream_with_timeout(outputs):
                 if _maybe_process_control_message(output):
                     continue
                 if controller:

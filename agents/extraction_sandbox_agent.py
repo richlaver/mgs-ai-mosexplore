@@ -89,16 +89,25 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
     Previous errors (if any; avoid repeating the same mistakes and fix accordingly):
     {errors}
 
-    Task:
+    Instructions:
     1. Consider 3 to 5 possible SQL queries to achieve the desired outcome.
     2. If a reading value is stored in a `calculation` field and the value of the reading is an empty string you MUST regard this as an attempted but unsuccessful reading.
-    Therefore to extract successful readings you MUST use:
+    Therefore to extract successful readings you MUST guard `JSON_EXTRACT` with `JSON_VALID` inside the subquery (do NOT rely on WHERE ordering) and use:
     ```sql
     SELECT CAST(v.calc_value AS DECIMAL(10, 5))
     FROM (
-    SELECT NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(custom_fields, '$.calculationX'))), '') AS calc_value
+    SELECT NULLIF(
+        TRIM(
+            JSON_UNQUOTE(
+                JSON_EXTRACT(
+                    IF(JSON_VALID(custom_fields), custom_fields, '{{}}'),
+                    '$.calculationX'
+                )
+            )
+        ),
+        ''
+    ) AS calc_value
     FROM mydata
-    WHERE JSON_VALID(custom_fields)
     ) AS v
     WHERE v.calc_value IS NOT NULL;
     ```
@@ -113,6 +122,27 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
     SELECT JSON_UNQUOTE(JSON_EXTRACT(custom_fields, '$.calculationX')) AS calc_value
     FROM mydata
     WHERE JSON_VALID(custom_fields)
+    ) AS t;
+    ```
+    If a reading value is stored in a standard data field (data1, data2, ...), also treat empty strings as attempted but unsuccessful readings. To extract successful readings use:
+    ```sql
+    SELECT CAST(v.data_value AS DECIMAL(10, 5))
+    FROM (
+    SELECT NULLIF(TRIM(dataX), '') AS data_value
+    FROM mydata
+    ) AS v
+    WHERE v.data_value IS NOT NULL;
+    ```
+    To extract attempted unsuccessful readings from data fields, for example when checking monitoring frequency, use:
+    ```sql
+    SELECT
+    CASE
+        WHEN t.data_value IS NULL OR TRIM(t.data_value) = '' THEN NULL
+        ELSE CAST(t.data_value AS DECIMAL(10, 5))
+    END AS data_reading
+    FROM (
+    SELECT dataX AS data_value
+    FROM mydata
     ) AS t;
     ```
     3. If the prompt requests time series data, extract with timestamp as first column.
@@ -565,6 +595,29 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             df = df[expected_columns]
             logger.debug("[parse_results] Columns reordered to: %s", list(df.columns))
 
+        def _looks_like_datetime(col_series: pd.Series) -> bool:
+            if col_series.empty:
+                return False
+            non_empty = col_series.dropna()
+            non_empty = non_empty[non_empty != ""]
+            if non_empty.empty:
+                return False
+            sample = non_empty.head(20)
+            pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+            def _is_match(val) -> bool:
+                if isinstance(val, str):
+                    return bool(pattern.match(val.strip()))
+                if isinstance(val, datetime_module.datetime):
+                    return True
+                return False
+
+            return sample.apply(_is_match).all()
+
+        datetime_cols = [col for col in df.columns if _looks_like_datetime(df[col])]
+        for col in datetime_cols:
+            df[col] = pd.to_datetime(df[col], utc=True, errors='coerce')
+
         # Parse quoted numeric strings (e.g., '"-7.37"') to floats, handling scientific notation
         def safe_float(val):
             if isinstance(val, str) and val.startswith('"') and val.endswith('"'):
@@ -575,26 +628,27 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
             return val
 
         for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].apply(safe_float)
+            if df[col].dtype != 'object' or col in datetime_cols:
+                continue
 
-        # Robustly convert string numerics to float/int where possible (skip datetimes)
-        for col in df.columns:
-            if df[col].dtype == 'object' and col not in ['reading_timestamp', 'date1']:
-                converted = pd.to_numeric(df[col], errors='coerce')
-                non_numeric_count = converted.isna().sum()
-                if non_numeric_count < len(converted):
-                    df[col] = converted
-                    if df[col].dtype == 'float64' and df[col].notna().all() and df[col].eq(df[col].astype('int64')).all():
-                        df[col] = df[col].astype('int64')
-                    if non_numeric_count:
-                        logger.debug(
-                            "[parse_results] Column '%s' numeric coercion left %d non-numeric value(s) as NaN",
-                            col,
-                            non_numeric_count,
-                        )
-                    else:
-                        logger.debug(f"[parse_results] Converted column '{col}' to numeric (dtype: {df[col].dtype})")
+            series_safe = df[col].apply(safe_float)
+            converted = pd.to_numeric(series_safe, errors='coerce')
+            non_numeric_count = converted.isna().sum()
+
+            if non_numeric_count < len(converted):
+                df[col] = converted
+                if df[col].dtype == 'float64' and df[col].notna().all() and df[col].eq(df[col].astype('int64')).all():
+                    df[col] = df[col].astype('int64')
+                if non_numeric_count:
+                    logger.debug(
+                        "[parse_results] Column '%s' numeric coercion left %d non-numeric value(s) as NaN",
+                        col,
+                        non_numeric_count,
+                    )
+                else:
+                    logger.debug(f"[parse_results] Converted column '{col}' to numeric (dtype: {df[col].dtype})")
+            else:
+                df[col] = series_safe
 
         messages.append(AIMessage(
             name="ExtractionSandboxAgent",

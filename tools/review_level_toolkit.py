@@ -17,6 +17,26 @@ _VALID_DB_FIELD_RE = re.compile(r"^(data|calculation)\d+$")
 
 NO_DATA_MSG = "No data was found in the database matching the specified search criteria."
 
+def _parse_any_datetime(dt_str: str) -> datetime:
+    """Parse datetime from ISO or verbose string, handling 00:00:00 AM edge case."""
+    if "00:00:00 AM" in dt_str:
+        dt_str = dt_str.replace("00:00:00 AM", "12:00:00 AM")
+        
+    try:
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+
+    # Verbose formats (matching create_output_toolkit)
+    # Note: %#d is Windows-specific, %d is standard
+    for fmt in ("%d %B %Y %I:%M:%S %p", "%#d %B %Y %#I:%M:%S %p"):
+        try:
+            return datetime.strptime(dt_str, fmt)
+        except ValueError:
+            pass
+            
+    raise ValueError("Invalid datetime format")
+
 def _quote(val: Union[str, float, int, datetime, None]) -> str:
     """Return a safely quoted SQL literal (basic). For GeneralSQLQueryTool which accepts final SQL string only."""
     if val is None:
@@ -138,7 +158,15 @@ def _coerce_int(val: Any) -> Optional[int]:
 class _BaseQueryTool(BaseModel):
     """Base tool for review-level operations using SQL."""
     sql_tool: GeneralSQLQueryTool = Field(exclude=True)
+    mysql_version_major: int = Field(8, description="MySQL major version used to select legacy-safe SQL paths.", exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def _use_legacy_sql(self) -> bool:
+        try:
+            return int(self.mysql_version_major) < 8
+        except Exception:
+            return False
 
 class _ReviewStatusOutput(BaseModel):
     """Output schema for review status with value and timestamp."""
@@ -175,11 +203,11 @@ class _ReviewChangeAcrossPeriod(BaseModel):
     """Schema describing a change in review status between two timestamps."""
     instrument_id: str = Field(..., description="Instrument ID (from instrum.instr_id).")
     db_field_name: str = Field(..., description="System field name (dataN or calculationN).")
-    start_review_name: Optional[str] = Field(None, description="Review level breached just before start_timestamp, None if unbreached.")
+    start_review_name: Optional[str] = Field(None, description="Review level breached just before start_timestamp; DataFrame output shows NaN when unbreached.")
     start_review_value: Optional[float] = Field(None, description="Threshold value for the breached start review level (if any).")
     start_field_value: float = Field(..., description="Reading value immediately before start_timestamp within buffer.")
     start_field_value_timestamp: datetime = Field(..., description="Timestamp of the start reading.")
-    end_review_name: Optional[str] = Field(None, description="Review level breached just before end_timestamp, None if unbreached.")
+    end_review_name: Optional[str] = Field(None, description="Review level breached just before end_timestamp; DataFrame output shows NaN when unbreached.")
     end_review_value: Optional[float] = Field(None, description="Threshold value for the breached end review level (if any).")
     end_field_value: float = Field(..., description="Reading value immediately before end_timestamp within buffer.")
     end_field_value_timestamp: datetime = Field(..., description="Timestamp of the end reading.")
@@ -222,8 +250,14 @@ class _ReviewChangesAcrossPeriodInput(BaseModel):
     db_field_name: Optional[str] = Field(None, description="Optional data/calculation field to restrict review discovery.")
     start_timestamp: Union[str, datetime] = Field(..., description="Period start boundary (ISO string or datetime).")
     end_timestamp: Union[str, datetime] = Field(..., description="Period end boundary (ISO string or datetime).")
-    start_buffer: Optional[Union[int, float]] = Field(None, description="Maximum days before start_timestamp allowed for the start reading (None means unbounded).")
-    end_buffer: Optional[Union[int, float]] = Field(None, description="Maximum days before end_timestamp allowed for the end reading (defaults to half the period, capped at the full period).")
+    start_buffer: Optional[Union[int, float]] = Field(
+        None,
+        description="Maximum days before start_timestamp allowed for the start reading.",
+    )
+    end_buffer: Optional[Union[int, float]] = Field(
+        None,
+        description="Maximum days before end_timestamp allowed for the end reading.",
+    )
     change_direction: Literal["up", "down", "both"] = Field(
         "up",
         description="Return only more-severe ('up'), less-severe ('down'), or all ('both') review changes.",
@@ -232,7 +266,7 @@ class _ReviewChangesAcrossPeriodInput(BaseModel):
 
 class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
     """
-    Returns the review level status (most severe breached review level name) for one or more database field values at specified instruments and fields. Returns None if no review is breached or no reviews exist.
+    Returns the review level status (most severe breached review level name) for one or more database field values at specified instruments and fields. Non-breaching outputs appear with NaN review_name in the DataFrame; returns None only when no active reviews are found.
 
     Input:
     List of dictionaries with keys:
@@ -252,7 +286,7 @@ class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
     name: str = "get_review_status_by_value_tool"
     description: str = (
         """
-        Returns the review level status (most severe breached review level name) for one or more database field values at specified instruments and fields. Returns None if no review is breached or no reviews exist.
+        Returns the review level status (most severe breached review level name) for one or more database field values at specified instruments and fields. Non-breaching outputs appear with NaN review_name in the DataFrame; returns None only when no active reviews are found.
 
         Input:
         List of dictionaries with keys:
@@ -305,27 +339,21 @@ class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
                         f"{_quote(field)} AS review_field, "
                         f"CAST({_quote(it['db_field_value'])} AS DECIMAL(20,6)) AS field_value"
                     )
-                params_cte = " WITH params AS ( " + " UNION ALL ".join(values_sql_parts) + " ) "
+                params_inline = "( " + " UNION ALL ".join(values_sql_parts) + " ) AS p"
             except Exception as e:
                 return f"ERROR: render parameters failed: {e}"
-
             sql = (
-                params_cte +
-                " , breaches AS ( "
-                " SELECT p.param_id, rl.review_name, riv.review_direction, "
-                " CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
-                " ROW_NUMBER() OVER (PARTITION BY p.param_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
-                " FROM params p "
-                " JOIN review_instruments ri ON ri.instr_id = p.instr_id AND ri.review_field = p.review_field AND ri.review_status = 'ON' "
-                " JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
-                " JOIN review_levels rl ON riv.review_level_id = rl.id "
-                " WHERE REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                " AND ((riv.review_direction = 1 AND p.field_value > CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
-                " OR (riv.review_direction = -1 AND p.field_value < CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) "
-                " ) "
-                " SELECT p.instr_id AS instrument_id, p.review_field AS db_field_name, p.field_value AS db_field_value, b.review_name "
-                " FROM params p "
-                " LEFT JOIN (SELECT param_id, review_name FROM breaches WHERE severity_rank = 1) b ON b.param_id = p.param_id "
+                "SELECT p.instr_id AS instrument_id, p.review_field AS db_field_name, p.field_value AS db_field_value, "
+                " (SELECT rl.review_name "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "  WHERE ri.instr_id = p.instr_id AND ri.review_field = p.review_field AND ri.review_status = 'ON' "
+                "  AND ((riv.review_direction = 1 AND p.field_value > CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))) "
+                "       OR (riv.review_direction = -1 AND p.field_value < CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)))) "
+                "  ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END "
+                "  LIMIT 1) AS review_name "
+                "FROM " + params_inline + " "
             )
 
             try:
@@ -403,9 +431,9 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
             return "ERROR: items must be a non-empty list of {instrument_id, db_field_name}."
         if isinstance(timestamp, str):
             try:
-                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                timestamp = _parse_any_datetime(timestamp)
             except Exception:
-                return "ERROR: Invalid timestamp format (use ISO)."
+                return "ERROR: Invalid timestamp format (use ISO or 'D Month YYYY H:MM:SS AM/PM')."
 
         grouped: Dict[str, List[str]] = {}
         try:
@@ -428,7 +456,7 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
                         "SELECT "
                         f"{i} AS rn, {_quote(instr)} AS instr_id"
                     )
-                params_cte = "WITH params AS ( " + " UNION ALL ".join(values_sql_parts) + " ) "
+                params_inline = "( " + " UNION ALL ".join(values_sql_parts) + " ) AS p"
             except Exception as e:
                 return f"ERROR: render parameters failed: {e}"
 
@@ -436,14 +464,14 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
                 json_path = f"$.$FIELD$"
                 json_path = json_path.replace("$FIELD$", field)
                 field_expr = (
-                    "CASE WHEN JSON_VALID(m.custom_fields) "
-                    f"AND JSON_EXTRACT(m.custom_fields, {_quote(json_path)}) IS NOT NULL "
-                    f"AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, {_quote(json_path)}))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    f"THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, {_quote(json_path)}))), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                    "CASE WHEN JSON_VALID(m1.custom_fields) "
+                    f"AND JSON_EXTRACT(m1.custom_fields, {_quote(json_path)}) IS NOT NULL "
+                    f"AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, {_quote(json_path)}))), '') IS NOT NULL "
+                    f"THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, {_quote(json_path)})), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    f"JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, {_quote(json_path)}) IS NOT NULL "
-                    f"AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, {_quote(json_path)}))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    f"JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, {_quote(json_path)}) IS NOT NULL "
+                    f"AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, {_quote(json_path)}))), '') IS NOT NULL"
                 )
                 valid_col = field
             else:
@@ -452,37 +480,39 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
                 except ValueError as e:
                     return f"ERROR: {e}"
                 field_expr = (
-                    f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                    f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                    f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
                 )
 
+            reading_is_not_null_sub = reading_is_not_null.replace("m1.", "m2.")
+            reading_is_not_null_legacy = reading_is_not_null
+
+            review_value_expr = "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
             sql = (
-                params_cte +
-                " , latest_reading AS ( "
-                " SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value, "
-                " ROW_NUMBER() OVER (PARTITION BY m.instr_id ORDER BY m.date1 DESC) AS rnk "
-                " FROM mydata m JOIN params p ON p.instr_id = m.instr_id "
-                f" WHERE m.date1 < {_quote(timestamp)} AND " + reading_is_not_null + " ), "
-                " chosen AS ( SELECT instr_id, reading_time, field_value FROM latest_reading WHERE rnk = 1 ), "
-                " reviews AS ( "
-                " SELECT ri.instr_id, rl.review_name, "
-                " CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
-                " riv.review_direction "
-                " FROM review_instruments ri "
-                " JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
-                " JOIN review_levels rl ON riv.review_level_id = rl.id "
-                f" WHERE ri.review_field = {_quote(valid_col)} AND ri.review_status = 'ON' ), "
-                " breaches AS ( "
-                " SELECT c.instr_id, c.field_value, c.reading_time, r.review_name, r.review_value, r.review_direction, "
-                " ROW_NUMBER() OVER (PARTITION BY c.instr_id ORDER BY CASE WHEN r.review_direction = 1 THEN -r.review_value ELSE r.review_value END) AS severity_rank "
-                " FROM chosen c JOIN reviews r ON r.instr_id = c.instr_id "
-                " WHERE ((r.review_direction = 1 AND c.field_value > r.review_value) OR (r.review_direction = -1 AND c.field_value < r.review_value)) ), "
-                " best AS ( SELECT instr_id, review_name FROM breaches WHERE severity_rank = 1 ) "
-                " SELECT c.instr_id AS instrument_id, " + _quote(valid_col) + " AS db_field_name, c.field_value AS db_field_value, c.reading_time AS db_field_value_timestamp, b.review_name "
-                " FROM chosen c LEFT JOIN best b ON b.instr_id = c.instr_id "
+                "SELECT lr.instr_id AS instrument_id, " + _quote(valid_col) + " AS db_field_name, "
+                " lr.field_value AS db_field_value, lr.reading_time AS db_field_value_timestamp, "
+                " (SELECT rl.review_name "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  JOIN review_levels rl ON riv.review_level_id = rl.id "
+                f"  WHERE ri.instr_id = lr.instr_id AND ri.review_field = {_quote(valid_col)} AND ri.review_status = 'ON' "
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                "  ORDER BY CASE WHEN riv.review_direction = 1 THEN -" + review_value_expr + " ELSE " + review_value_expr + " END "
+                "  LIMIT 1) AS review_name "
+                "FROM ( "
+                "  SELECT m1.instr_id, m1.date1 AS reading_time, " + field_expr + " AS field_value "
+                "  FROM mydata m1 JOIN " + params_inline + " ON p.instr_id = m1.instr_id "
+                f"  WHERE m1.date1 < {_quote(timestamp)} AND " + reading_is_not_null_legacy + " "
+                "    AND NOT EXISTS ("
+                "      SELECT 1 FROM mydata m2 "
+                "      WHERE m2.instr_id = m1.instr_id AND m2.date1 < " + _quote(timestamp) + " AND " + reading_is_not_null_sub + " "
+                "        AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id))"
+                "    )"
+                " ) lr "
             )
 
             try:
@@ -590,20 +620,22 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
                 f"SELECT {i} AS rn, {_quote(instr)} AS instr_id" for i, instr in enumerate(instr_list)
             ]
             params_cte = "WITH params AS ( " + " UNION ALL ".join(values_sql_parts) + " ) "
+            params_inline = "( " + " UNION ALL ".join(values_sql_parts) + " ) AS p"
 
-            sql = (
-                params_cte +
-                " SELECT ri.instr_id AS instrument_id, " + _quote(field) + " AS db_field_name, rl.review_name, "
+            legacy_sql = (
+                "SELECT ri.instr_id AS instrument_id, " + _quote(field) + " AS db_field_name, rl.review_name, "
                 " CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
                 " CASE WHEN riv.review_direction = 1 THEN 'upper' ELSE 'lower' END AS review_direction, "
                 " CONCAT('#', aci.aaa_color) AS review_color "
-                " FROM params p "
+                " FROM " + params_inline +
                 " JOIN review_instruments ri ON ri.instr_id = p.instr_id AND ri.review_status = 'ON' AND ri.review_field = " + _quote(field) +
                 " JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
                 " JOIN review_levels rl ON riv.review_level_id = rl.id "
                 " JOIN aaa_color_info aci ON rl.id = aci.review_id "
                 " ORDER BY aci.`order`"
             )
+
+            sql = legacy_sql
 
             try:
                 logger.info("[get_review_schema/batch] SQL=%s", sql)
@@ -703,8 +735,9 @@ class GetReviewValueTool(BaseTool, _BaseQueryTool):
                     f"{i} AS rn, {_quote(t['instrument_id'])} AS instr_id, {_quote(t['review_name'])} AS review_name"
                 )
             params_cte = "WITH params AS ( " + " UNION ALL ".join(values_sql_parts) + " ) "
+            params_inline = "( " + " UNION ALL ".join(values_sql_parts) + " ) AS p"
 
-            sql = (
+            modern_sql = (
                 params_cte +
                 " SELECT p.instr_id AS instrument_id, " + _quote(field) + " AS db_field_name, p.review_name, "
                 " CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
@@ -715,6 +748,19 @@ class GetReviewValueTool(BaseTool, _BaseQueryTool):
                 " JOIN review_levels rl ON riv.review_level_id = rl.id AND rl.review_name = p.review_name "
                 " WHERE (ri.effective_from IS NULL OR ri.effective_from <= NOW()) "
             )
+
+            legacy_sql = (
+                " SELECT p.instr_id AS instrument_id, " + _quote(field) + " AS db_field_name, p.review_name, "
+                " CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
+                " CASE WHEN riv.review_direction = 1 THEN 'upper' ELSE 'lower' END AS review_direction "
+                " FROM " + params_inline +
+                " JOIN review_instruments ri ON ri.instr_id = p.instr_id AND ri.review_field = " + _quote(field) + " AND ri.review_status = 'ON' "
+                " JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                " JOIN review_levels rl ON riv.review_level_id = rl.id AND rl.review_name = p.review_name "
+                " WHERE (ri.effective_from IS NULL OR ri.effective_from <= NOW()) "
+            )
+
+            sql = legacy_sql if self._use_legacy_sql else modern_sql
 
             try:
                 logger.info("[get_review_value/batch] SQL=%s", sql)
@@ -772,9 +818,9 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
     ) -> Union[pd.DataFrame, None, str]:
         if isinstance(timestamp, str):
             try:
-                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                timestamp = _parse_any_datetime(timestamp)
             except Exception:
-                return "ERROR: Invalid timestamp format. Use ISO format."
+                return "ERROR: Invalid timestamp format. Use ISO format or 'D Month YYYY H:MM:SS AM/PM'."
 
         instrument_type = instrument_type or None
         instrument_subtype = instrument_subtype or None
@@ -811,57 +857,90 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
             if valid_col.startswith("calculation"):
                 json_path = f"$.{valid_col}"
                 field_expr = (
-                    "CASE WHEN JSON_VALID(m.custom_fields) "
-                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "CASE WHEN JSON_VALID(m1.custom_fields) "
+                    "AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL "
+                    "THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s)), ',', '') AS DECIMAL(20,6)) "
                     "ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    "JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL"
                 )
             else:
                 field_expr = (
-                    f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                    f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                    f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
                 )
 
-            result_join, result_where = _result_join_and_where("r")
+            severity_order = (
+                "CASE WHEN riv.review_direction = 1 "
+                "THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) "
+                "ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END"
+            )
+            review_value_expr = "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
+
+            filters_join = ""
+            filters_where: List[str] = []
+            if instrument_type or instrument_subtype:
+                filters_join = "JOIN instrum i ON lr.instr_id = i.instr_id "
+                if instrument_type:
+                    filters_where.append("i.type1 = %(instrument_type)s")
+                if instrument_subtype:
+                    filters_where.append("i.subtype1 = %(instrument_subtype)s")
+            filters_where_clause = ("WHERE " + " AND ".join(filters_where)) if filters_where else ""
+
+            review_name_filter = " AND rl.review_name = %(review_name)s" if review_name else ""
+
+            reading_clause_m2 = reading_is_not_null.replace("m1.", "m2.")
 
             sql = (
-                "WITH latest_reading AS ( "
-                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
-                "FROM mydata m "
-                "JOIN review_instruments ri ON m.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
-                "WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
-                "ranked AS ( "
-                "SELECT instr_id, reading_time, field_value, ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
-                "FROM latest_reading ), "
-                "active_reviews AS ( "
-                "SELECT ri.instr_id, rl.review_name, "
-                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
-                "riv.review_direction, "
-                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
-                "FROM review_instruments ri "
-                "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
-                "JOIN review_levels rl ON riv.review_level_id = rl.id "
-                "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
-                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
-                "breaches AS ( "
-                "SELECT r.instr_id, r.field_value, r.reading_time, ar.review_name, ar.review_value_clean, ar.review_direction, ar.severity_rank "
-                "FROM ranked r "
-                "JOIN active_reviews ar ON ar.instr_id = r.instr_id "
-                "WHERE r.rn = 1 AND ((ar.review_direction = 1 AND r.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND r.field_value < ar.review_value_clean)) ) "
-                "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
-                "FROM ranked r "
-                "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
-                + result_join +
-                " " + result_where +
-                " ORDER BY r.reading_time DESC"
+                "SELECT lr.instr_id AS instrument_id, %(review_field)s AS db_field_name, "
+                " (SELECT rl.review_name "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                "  ORDER BY " + severity_order + " "
+                "  LIMIT 1) AS review_name, "
+                " (SELECT " + review_value_expr + " "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                "  ORDER BY " + severity_order + " "
+                "  LIMIT 1) AS review_value, "
+                " lr.field_value, lr.reading_time AS field_value_timestamp "
+                "FROM ( "
+                "  SELECT m1.instr_id, m1.date1 AS reading_time, " + field_expr + " AS field_value "
+                "  FROM mydata m1 "
+                "  JOIN review_instruments ri ON m1.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "  WHERE m1.date1 < %(ts)s AND " + reading_is_not_null + " "
+                "    AND NOT EXISTS ( "
+                "      SELECT 1 FROM mydata m2 "
+                "      WHERE m2.instr_id = m1.instr_id AND " + reading_clause_m2 + " AND m2.date1 < %(ts)s "
+                "        AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id)) "
+                "    ) "
+                ") lr "
+                + filters_join + " " + filters_where_clause + " "
+                "WHERE EXISTS ( "
+                "  SELECT 1 "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                ") "
+                "ORDER BY lr.reading_time DESC"
             )
 
             params: Dict[str, Any] = {
@@ -963,57 +1042,90 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
             if valid_col.startswith("calculation"):
                 json_path = f"$.{valid_col}"
                 field_expr = (
-                    "CASE WHEN JSON_VALID(m.custom_fields) "
-                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "CASE WHEN JSON_VALID(m1.custom_fields) "
+                    "AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL "
+                    "THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s)), ',', '') AS DECIMAL(20,6)) "
                     "ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    "JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL"
                 )
             else:
                 field_expr = (
-                    f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                    f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                    f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
                 )
                 reading_is_not_null = (
-                    f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
                 )
 
-            result_join, result_where = _result_join_and_where("r")
+            severity_order = (
+                "CASE WHEN riv.review_direction = 1 "
+                "THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) "
+                "ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END"
+            )
+            review_value_expr = "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
+
+            filters_join = ""
+            filters_where: List[str] = []
+            if instrument_type or instrument_subtype:
+                filters_join = "JOIN instrum i ON lr.instr_id = i.instr_id "
+                if instrument_type:
+                    filters_where.append("i.type1 = %(instrument_type)s")
+                if instrument_subtype:
+                    filters_where.append("i.subtype1 = %(instrument_subtype)s")
+            filters_where_clause = ("WHERE " + " AND ".join(filters_where)) if filters_where else ""
+
+            review_name_filter = " AND rl.review_name = %(review_name)s" if review_name else ""
+
+            reading_clause_m2 = reading_is_not_null.replace("m1.", "m2.")
 
             sql = (
-                "WITH latest_reading AS ( "
-                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
-                "FROM mydata m "
-                "JOIN review_instruments ri ON m.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
-                "WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
-                "ranked AS ( "
-                "SELECT instr_id, reading_time, field_value, ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
-                "FROM latest_reading ), "
-                "active_reviews AS ( "
-                "SELECT ri.instr_id, rl.review_name, "
-                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
-                "riv.review_direction, "
-                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
-                "FROM review_instruments ri "
-                "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
-                "JOIN review_levels rl ON riv.review_level_id = rl.id "
-                "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
-                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
-                "breaches AS ( "
-                "SELECT r.instr_id, r.field_value, r.reading_time, ar.review_name, ar.review_value_clean, ar.review_direction, ar.severity_rank "
-                "FROM ranked r "
-                "JOIN active_reviews ar ON ar.instr_id = r.instr_id "
-                "WHERE r.rn = 1 AND ((ar.review_direction = 1 AND r.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND r.field_value < ar.review_value_clean)) ) "
-                "SELECT r.instr_id AS instrument_id, %(review_field)s AS db_field_name, b.review_name, r.field_value, r.reading_time AS field_value_timestamp, b.review_value_clean AS review_value "
-                "FROM ranked r "
-                "JOIN breaches b ON b.instr_id = r.instr_id AND r.rn = 1 "
-                + result_join +
-                " " + result_where +
-                " ORDER BY r.reading_time DESC"
+                "SELECT lr.instr_id AS instrument_id, %(review_field)s AS db_field_name, "
+                " (SELECT rl.review_name "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  JOIN review_levels rl ON riv.review_level_id = rl.id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                "  ORDER BY " + severity_order + " "
+                "  LIMIT 1) AS review_name, "
+                " (SELECT " + review_value_expr + " "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                "  ORDER BY " + severity_order + " "
+                "  LIMIT 1) AS review_value, "
+                " lr.field_value, lr.reading_time AS field_value_timestamp "
+                "FROM ( "
+                "  SELECT m1.instr_id, m1.date1 AS reading_time, " + field_expr + " AS field_value "
+                "  FROM mydata m1 "
+                "  JOIN review_instruments ri ON m1.instr_id = ri.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                "  WHERE m1.date1 < %(ts)s AND " + reading_is_not_null + " "
+                "    AND NOT EXISTS ( "
+                "      SELECT 1 FROM mydata m2 "
+                "      WHERE m2.instr_id = m1.instr_id AND " + reading_clause_m2 + " AND m2.date1 < %(ts)s "
+                "        AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id)) "
+                "    ) "
+                ") lr "
+                + filters_join + " " + filters_where_clause + " "
+                "WHERE EXISTS ( "
+                "  SELECT 1 "
+                "  FROM review_instruments ri "
+                "  JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
+                "  WHERE ri.instr_id = lr.instr_id AND ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
+                + review_name_filter +
+                "    AND ((riv.review_direction = 1 AND lr.field_value > " + review_value_expr + ") "
+                "         OR (riv.review_direction = -1 AND lr.field_value < " + review_value_expr + ")) "
+                ") "
+                "ORDER BY lr.reading_time DESC"
             )
 
             params: Dict[str, Any] = {
@@ -1082,9 +1194,7 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
     description: str = (
         """
         Detects review-level status changes between two timestamps for instruments filtered by type/subtype and optional db_field_name.
-        Takes `start_timestamp`, `end_timestamp`, optional buffer durations in days (`start_buffer`, `end_buffer`), and a
-        `change_direction` flag ('up', 'down', 'both'). Returns only combinations where the breached review status differs between
-        the two readings (including transitions to/from unbreached) provided both readings exist within their respective buffers.
+        Takes `start_timestamp`, `end_timestamp`, optional buffer durations in days (`start_buffer`, `end_buffer`) and a `change_direction` flag ('up', 'down', 'both'). Returns only combinations where the breached review status differs between the two readings (including transitions to/from unbreached) provided both readings exist within their respective buffers.
         """
     )
 
@@ -1106,21 +1216,25 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
                 return val
             if isinstance(val, str):
                 try:
-                    return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    return _parse_any_datetime(val)
                 except Exception:
-                    return f"ERROR: Invalid {label} format (use ISO)."
+                    return f"ERROR: Invalid {label} format (use ISO or 'D Month YYYY H:MM:SS AM/PM')."
             return f"ERROR: {label} must be a datetime or ISO 8601 string."
 
-        def _parse_buffer_days_to_seconds(val: Optional[Union[int, float]], label: str) -> Union[Optional[float], str]:
+        MAX_BUFFER_SECONDS = 7 * 86400.0
+
+        def _coerced_buffer_seconds(val: Optional[Union[int, float]]) -> Optional[float]:
+            """Best-effort buffer parsing in seconds; returns None when missing/invalid."""
             if val is None:
                 return None
             try:
                 days = float(val)
             except Exception:
-                return f"ERROR: {label} must be numeric days or None."
+                return None
             if days < 0:
-                return f"ERROR: {label} must be non-negative."
-            return days * 86400.0
+                return None
+            seconds = days * 86400.0
+            return min(seconds, MAX_BUFFER_SECONDS)
 
         start_ts = _parse_timestamp(start_timestamp, "start_timestamp")
         if isinstance(start_ts, str):
@@ -1135,16 +1249,16 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
         if total_seconds <= 0:
             return "ERROR: start_timestamp and end_timestamp must be distinct with end > start."
 
-        parsed_start_buffer = _parse_buffer_days_to_seconds(start_buffer, "start_buffer")
-        if isinstance(parsed_start_buffer, str):
-            return parsed_start_buffer
-        parsed_end_buffer = _parse_buffer_days_to_seconds(end_buffer, "end_buffer")
-        if isinstance(parsed_end_buffer, str):
-            return parsed_end_buffer
-        if parsed_end_buffer is None:
-            parsed_end_buffer = total_seconds / 2.0
-        if parsed_end_buffer <= 0 or parsed_end_buffer > total_seconds:
-            return "ERROR: end_buffer must be > 0 and <= the period length (end_timestamp - start_timestamp)."
+        default_buffer = min(total_seconds / 2.0, MAX_BUFFER_SECONDS)
+
+        parsed_start_buffer = _coerced_buffer_seconds(start_buffer)
+        if parsed_start_buffer is None or parsed_start_buffer <= 0:
+            parsed_start_buffer = default_buffer
+
+        parsed_end_buffer = _coerced_buffer_seconds(end_buffer)
+        if parsed_end_buffer is None or parsed_end_buffer <= 0:
+            parsed_end_buffer = default_buffer
+        parsed_end_buffer = min(parsed_end_buffer, total_seconds, MAX_BUFFER_SECONDS)
 
         start_lower_bound = start_ts - timedelta(seconds=parsed_start_buffer) if parsed_start_buffer is not None else None
         end_lower_bound = end_ts - timedelta(seconds=parsed_end_buffer)
@@ -1212,23 +1326,23 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
             if valid_col.startswith("calculation"):
                 json_path = f"$.{valid_col}"
                 field_expr_local = (
-                    "CASE WHEN JSON_VALID(m.custom_fields) "
-                    "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                    "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                    "CASE WHEN JSON_VALID(m1.custom_fields) "
+                    "AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL "
+                    "THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s)), ',', '') AS DECIMAL(20,6)) "
                     "ELSE NULL END"
                 )
                 reading_clause = (
-                    "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                    "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                    "JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                    "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL"
                 )
                 return field_expr_local, reading_clause, {"json_path": json_path}
             field_expr_local = (
-                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
             )
             reading_clause = (
-                f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
             )
             return field_expr_local, reading_clause, {}
 
@@ -1245,7 +1359,7 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
                 active_instr_filters.append("i.subtype1 = %(instrument_subtype)s")
         active_instr_where = " AND ".join(active_instr_filters)
 
-        where_clause = "WHERE NOT (se.start_review_name <=> ee.end_review_name)"
+        where_clause = "WHERE NOT (sr.review_name <=> er.review_name)"
         if instrument_type or instrument_subtype:
             exists_conditions: List[str] = []
             if instrument_type:
@@ -1261,63 +1375,90 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
         for valid_col in fields:
             field_expr, reading_is_not_null, extra_params = _field_sql_parts(valid_col)
 
-            start_buffer_clause = " AND reading_time >= %(start_lower)s" if start_lower_bound is not None else ""
+            start_buffer_clause = " AND m1.date1 >= %(start_lower)s" if start_lower_bound is not None else ""
 
-            sql = (
-                "WITH active_instr AS ( "
+            active_instr_sql = (
                 "SELECT DISTINCT ri.instr_id FROM review_instruments ri "
                 + active_instr_join +
-                "WHERE " + active_instr_where + " ), "
-                "active_reviews AS ( "
+                "WHERE " + active_instr_where
+            )
+
+            review_value_expr = (
+                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
+            )
+            severity_sort_expr = (
+                "CASE WHEN riv.review_direction = 1 THEN -" + review_value_expr + " ELSE " + review_value_expr + " END"
+            )
+
+            reading_clause_m2 = reading_is_not_null.replace("m1.", "m2.")
+
+            start_latest_sql = (
+                "SELECT ai.instr_id, m1.date1 AS start_field_value_timestamp, "
+                + field_expr + " AS start_field_value "
+                "FROM mydata m1 "
+                "JOIN (" + active_instr_sql + ") ai ON ai.instr_id = m1.instr_id "
+                "WHERE " + reading_is_not_null +
+                " AND m1.date1 < %(start_ts)s" + start_buffer_clause +
+                " AND m1.id = ("
+                "SELECT m2.id FROM mydata m2 WHERE m2.instr_id = m1.instr_id AND "
+                + reading_clause_m2 + " AND m2.date1 < %(start_ts)s" + start_buffer_clause +
+                " ORDER BY m2.date1 DESC, m2.id DESC LIMIT 1)"
+            )
+
+            end_latest_sql = (
+                "SELECT ai.instr_id, m1.date1 AS end_field_value_timestamp, "
+                + field_expr + " AS end_field_value "
+                "FROM mydata m1 "
+                "JOIN (" + active_instr_sql + ") ai ON ai.instr_id = m1.instr_id "
+                "WHERE " + reading_is_not_null +
+                " AND m1.date1 < %(end_ts)s AND m1.date1 >= %(end_lower)s"
+                " AND m1.id = ("
+                "SELECT m2.id FROM mydata m2 WHERE m2.instr_id = m1.instr_id AND "
+                + reading_clause_m2 + " AND m2.date1 < %(end_ts)s AND m2.date1 >= %(end_lower)s"
+                " ORDER BY m2.date1 DESC, m2.id DESC LIMIT 1)"
+            )
+
+            base_reviews_sql = (
                 "SELECT ri.instr_id, rl.review_name, "
-                "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value_clean, "
+                + review_value_expr + " AS review_value_clean, "
                 "riv.review_direction, "
-                "ROW_NUMBER() OVER (PARTITION BY ri.instr_id ORDER BY CASE WHEN riv.review_direction = 1 THEN -CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) ELSE CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) END) AS severity_rank "
+                + severity_sort_expr + " AS severity_sort "
                 "FROM review_instruments ri "
                 "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
                 "JOIN review_levels rl ON riv.review_level_id = rl.id "
                 "WHERE ri.review_status = 'ON' AND ri.review_field = %(review_field)s "
-                "AND REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' ), "
-                "valid_readings AS ( "
-                "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value "
-                "FROM mydata m JOIN active_instr ai ON ai.instr_id = m.instr_id "
-                "WHERE " + reading_is_not_null + " ), "
-                "start_candidates AS ( "
-                "SELECT instr_id, reading_time, field_value, "
-                "ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
-                "FROM valid_readings "
-                "WHERE reading_time < %(start_ts)s" + start_buffer_clause + " ), "
-                "start_latest AS ( SELECT instr_id, reading_time, field_value FROM start_candidates WHERE rn = 1 ), "
-                "start_ranked AS ( "
-                "SELECT sl.instr_id, sl.field_value, sl.reading_time, ar.review_name, ar.review_value_clean, ar.severity_rank, "
-                "ROW_NUMBER() OVER (PARTITION BY sl.instr_id ORDER BY ar.severity_rank) AS rn "
-                "FROM start_latest sl JOIN active_reviews ar ON ar.instr_id = sl.instr_id "
-                "WHERE ((ar.review_direction = 1 AND sl.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND sl.field_value < ar.review_value_clean)) ), "
-                "start_enriched AS ( "
-                "SELECT sl.instr_id, sl.field_value AS start_field_value, sl.reading_time AS start_field_value_timestamp, "
-                "sr.review_name AS start_review_name, sr.review_value_clean AS start_review_value, sr.severity_rank AS start_severity_rank "
-                "FROM start_latest sl LEFT JOIN (SELECT instr_id, review_name, review_value_clean, severity_rank FROM start_ranked WHERE rn = 1) sr ON sr.instr_id = sl.instr_id ), "
-                "end_candidates AS ( "
-                "SELECT instr_id, reading_time, field_value, "
-                "ROW_NUMBER() OVER (PARTITION BY instr_id ORDER BY reading_time DESC) AS rn "
-                "FROM valid_readings "
-                "WHERE reading_time < %(end_ts)s AND reading_time >= %(end_lower)s ), "
-                "end_latest AS ( SELECT instr_id, reading_time, field_value FROM end_candidates WHERE rn = 1 ), "
-                "end_ranked AS ( "
-                "SELECT el.instr_id, el.field_value, el.reading_time, ar.review_name, ar.review_value_clean, ar.severity_rank, "
-                "ROW_NUMBER() OVER (PARTITION BY el.instr_id ORDER BY ar.severity_rank) AS rn "
-                "FROM end_latest el JOIN active_reviews ar ON ar.instr_id = el.instr_id "
-                "WHERE ((ar.review_direction = 1 AND el.field_value > ar.review_value_clean) OR (ar.review_direction = -1 AND el.field_value < ar.review_value_clean)) ), "
-                "end_enriched AS ( "
-                "SELECT el.instr_id, el.field_value AS end_field_value, el.reading_time AS end_field_value_timestamp, "
-                "er.review_name AS end_review_name, er.review_value_clean AS end_review_value, er.severity_rank AS end_severity_rank "
-                "FROM end_latest el LEFT JOIN (SELECT instr_id, review_name, review_value_clean, severity_rank FROM end_ranked WHERE rn = 1) er ON er.instr_id = el.instr_id ) "
+            )
+
+            start_min_severity = (
+                "SELECT MIN(b2.severity_sort) FROM (" + base_reviews_sql + ") b2 "
+                "WHERE b2.instr_id = se.instr_id "
+                " AND ((b2.review_direction = 1 AND se.start_field_value > b2.review_value_clean) "
+                "OR (b2.review_direction = -1 AND se.start_field_value < b2.review_value_clean))"
+            )
+
+            end_min_severity = (
+                "SELECT MIN(b2.severity_sort) FROM (" + base_reviews_sql + ") b2 "
+                "WHERE b2.instr_id = se.instr_id "
+                " AND ((b2.review_direction = 1 AND ee.end_field_value > b2.review_value_clean) "
+                "OR (b2.review_direction = -1 AND ee.end_field_value < b2.review_value_clean))"
+            )
+
+            sql = (
                 "SELECT se.instr_id AS instrument_id, %(review_field)s AS db_field_name, "
-                "se.start_review_name, se.start_review_value, se.start_field_value, se.start_field_value_timestamp, "
-                "ee.end_review_name, ee.end_review_value, ee.end_field_value, ee.end_field_value_timestamp, "
-                "se.start_severity_rank, ee.end_severity_rank "
-                "FROM start_enriched se JOIN end_enriched ee ON ee.instr_id = se.instr_id "
-                " " + where_clause +
+                "sr.review_name AS start_review_name, sr.review_value_clean AS start_review_value, "
+                "se.start_field_value, se.start_field_value_timestamp, "
+                "er.review_name AS end_review_name, er.review_value_clean AS end_review_value, "
+                "ee.end_field_value, ee.end_field_value_timestamp, "
+                "sr.severity_sort AS start_severity_sort, er.severity_sort AS end_severity_sort "
+                "FROM (" + start_latest_sql + ") se "
+                "JOIN (" + end_latest_sql + ") ee ON ee.instr_id = se.instr_id "
+                "LEFT JOIN (" + base_reviews_sql + ") sr ON sr.instr_id = se.instr_id "
+                " AND ((sr.review_direction = 1 AND se.start_field_value > sr.review_value_clean) OR (sr.review_direction = -1 AND se.start_field_value < sr.review_value_clean)) "
+                " AND sr.severity_sort = (" + start_min_severity + ") "
+                "LEFT JOIN (" + base_reviews_sql + ") er ON er.instr_id = se.instr_id "
+                " AND ((er.review_direction = 1 AND ee.end_field_value > er.review_value_clean) OR (er.review_direction = -1 AND ee.end_field_value < er.review_value_clean)) "
+                " AND er.severity_sort = (" + end_min_severity + ") "
+                + where_clause +
                 " ORDER BY ee.end_field_value_timestamp DESC"
             )
 
@@ -1361,14 +1502,14 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
                         raise ValueError("missing numeric readings")
                     start_review_value = _coerce_float(r.get("start_review_value"))
                     end_review_value = _coerce_float(r.get("end_review_value"))
-                    start_rank = _coerce_int(r.get("start_severity_rank"))
-                    end_rank = _coerce_int(r.get("end_severity_rank"))
+                    start_severity_sort = _coerce_float(r.get("start_severity_sort"))
+                    end_severity_sort = _coerce_float(r.get("end_severity_sort"))
 
-                    def _severity_score(rank: Optional[int]) -> int:
-                        return rank if rank is not None else 10**6
+                    def _severity_score(val: Optional[float]) -> float:
+                        return float(val) if val is not None else 10**9
 
-                    start_score = _severity_score(start_rank)
-                    end_score = _severity_score(end_rank)
+                    start_score = _severity_score(start_severity_sort)
+                    end_score = _severity_score(end_severity_sort)
 
                     changed = (
                         (r.get("start_review_name") != r.get("end_review_name"))
@@ -1480,9 +1621,9 @@ class GetMapSeriesReviewSnapshotTool(BaseTool, _BaseQueryTool):
 
         if isinstance(timestamp, str):
             try:
-                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                timestamp = _parse_any_datetime(timestamp)
             except Exception:
-                return "ERROR: Invalid timestamp format (use ISO)."
+                return "ERROR: Invalid timestamp format (use ISO or 'D Month YYYY H:MM:SS AM/PM')."
 
         try:
             min_e = float(min_e)
@@ -1495,23 +1636,23 @@ class GetMapSeriesReviewSnapshotTool(BaseTool, _BaseQueryTool):
         if valid_col.startswith("calculation"):
             json_path = f"$.{valid_col}"
             field_expr = (
-                "CASE WHEN JSON_VALID(m.custom_fields) "
-                "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                "CASE WHEN JSON_VALID(m1.custom_fields) "
+                "AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL "
+                "THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s)), ',', '') AS DECIMAL(20,6)) "
                 "ELSE NULL END"
             )
             reading_is_not_null = (
-                "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                "JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL"
             )
         else:
             field_expr = (
-                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
             )
             reading_is_not_null = (
-                f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
             )
 
         exclude_clause = ""
@@ -1523,43 +1664,59 @@ class GetMapSeriesReviewSnapshotTool(BaseTool, _BaseQueryTool):
             except Exception as e:
                 return f"ERROR: Failed to process exclude_instrument_ids: {e}"
 
-        sql = (
-            "WITH eligible AS ( "
+        reading_clause_m2 = reading_is_not_null.replace("m1.", "m2.")
+
+        eligible_sql = (
             "SELECT i.instr_id, "
             "CAST(REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') AS DECIMAL(20,6)) AS easting, "
             "CAST(REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') AS DECIMAL(20,6)) AS northing "
             "FROM instrum i JOIN location l ON i.location_id = l.id "
             "WHERE i.type1 = %(instrument_type)s "
             "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
-            "AND REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-            "AND REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
             "AND CAST(REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') AS DECIMAL(20,6)) BETWEEN %(min_e)s AND %(max_e)s "
             "AND CAST(REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') AS DECIMAL(20,6)) BETWEEN %(min_n)s AND %(max_n)s "
-            + exclude_clause +
-            "), latest_reading AS ( "
-            "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value, "
-            "ROW_NUMBER() OVER (PARTITION BY m.instr_id ORDER BY m.date1 DESC) AS rn "
-            "FROM mydata m JOIN eligible e ON e.instr_id = m.instr_id "
-            "WHERE m.date1 < %(ts)s AND " + reading_is_not_null + " ), "
-            "chosen AS ( SELECT instr_id, reading_time, field_value FROM latest_reading WHERE rn = 1 ), "
-            "reviews AS ( "
-            "SELECT ri.instr_id, rl.review_name, "
-            "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
-            "riv.review_direction "
+            + exclude_clause
+        )
+
+        latest_reading_sql = (
+            "SELECT e.instr_id, m1.date1 AS reading_time, " + field_expr + " AS field_value "
+            "FROM mydata m1 JOIN (" + eligible_sql + ") AS e ON e.instr_id = m1.instr_id "
+            "WHERE " + reading_is_not_null + " AND m1.date1 < %(ts)s "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM mydata m2 WHERE m2.instr_id = m1.instr_id AND " + reading_clause_m2 + " AND m2.date1 < %(ts)s "
+            "    AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id))"
+            ")"
+        )
+
+        review_value_expr = (
+            "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
+        )
+        severity_sort_expr = (
+            "CASE WHEN riv.review_direction = 1 THEN -" + review_value_expr + " ELSE " + review_value_expr + " END"
+        )
+
+        active_reviews_base = (
+            "SELECT ri.instr_id, rl.review_name, " + review_value_expr + " AS review_value, riv.review_direction, " + severity_sort_expr + " AS severity_sort "
             "FROM review_instruments ri "
             "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
             "JOIN review_levels rl ON riv.review_level_id = rl.id "
-            "WHERE ri.review_field = %(review_field)s AND ri.review_status = 'ON' ), "
-            "breaches AS ( "
-            "SELECT c.instr_id, c.field_value, c.reading_time, r.review_name, r.review_value, r.review_direction, "
-            "ROW_NUMBER() OVER (PARTITION BY c.instr_id ORDER BY CASE WHEN r.review_direction = 1 THEN -r.review_value ELSE r.review_value END) AS severity_rank "
-            "FROM chosen c JOIN reviews r ON r.instr_id = c.instr_id "
-            "WHERE ((r.review_direction = 1 AND c.field_value > r.review_value) OR (r.review_direction = -1 AND c.field_value < r.review_value)) ) "
-            "SELECT e.instr_id AS instrument_id, e.easting, e.northing, b.review_name AS review_status, b.review_value, "
-            "c.field_value AS db_field_value, c.reading_time AS db_field_value_timestamp "
-            "FROM eligible e JOIN chosen c ON c.instr_id = e.instr_id "
-            "LEFT JOIN (SELECT instr_id, review_name, review_value FROM breaches WHERE severity_rank = 1) b ON b.instr_id = e.instr_id "
-            "ORDER BY c.reading_time DESC"
+            "WHERE ri.review_field = %(review_field)s AND ri.review_status = 'ON'"
+        )
+
+        active_reviews_ranked = (
+            "SELECT ar_base.instr_id, ar_base.review_name, ar_base.review_value, ar_base.review_direction, ar_base.severity_sort, "
+            "(SELECT COUNT(*) + 1 FROM (" + active_reviews_base + ") AS ar2 WHERE ar2.instr_id = ar_base.instr_id AND ar2.severity_sort < ar_base.severity_sort) AS severity_rank "
+            "FROM (" + active_reviews_base + ") AS ar_base"
+        )
+
+        sql = (
+            "SELECT e.instr_id AS instrument_id, e.easting, e.northing, "
+            "(SELECT CONCAT_WS('|', ar1.review_name, ar1.review_value) FROM (" + active_reviews_ranked + ") AS ar1 WHERE ar1.instr_id = e.instr_id "
+            " AND ((ar1.review_direction = 1 AND lr.field_value > ar1.review_value) OR (ar1.review_direction = -1 AND lr.field_value < ar1.review_value)) "
+            " ORDER BY ar1.severity_rank LIMIT 1) AS review_pair, "
+            "lr.field_value AS db_field_value, lr.reading_time AS db_field_value_timestamp "
+            "FROM (" + eligible_sql + ") AS e "
+            "JOIN (" + latest_reading_sql + ") AS lr ON lr.instr_id = e.instr_id "
         )
 
         params: Dict[str, Any] = {
@@ -1603,15 +1760,24 @@ class GetMapSeriesReviewSnapshotTool(BaseTool, _BaseQueryTool):
                 e = _coerce_float(r.get("easting"))
                 n = _coerce_float(r.get("northing"))
                 fv = _coerce_float(r.get("db_field_value"))
-                rv = _coerce_float(r.get("review_value")) if r.get("review_value") is not None else None
+                pair_raw = r.get("review_pair")
+                rv_status: Optional[str] = None
+                rv_value: Optional[float] = None
+                if pair_raw is not None:
+                    try:
+                        status_part, value_part = str(pair_raw).split("|", 1)
+                        rv_status = status_part or None
+                        rv_value = _coerce_float(value_part) if value_part != "" else None
+                    except ValueError:
+                        rv_status = str(pair_raw) or None
                 if e is None or n is None or fv is None:
                     raise ValueError("required numeric conversion failed")
                 out.append(_MapSeriesReviewStatusRow(
                     instrument_id=r.get("instrument_id"),
                     easting=e,
                     northing=n,
-                    review_status=r.get("review_status"),
-                    review_value=rv,
+                    review_status=rv_status,
+                    review_value=rv_value,
                     db_field_value=fv,
                     db_field_value_timestamp=r.get("db_field_value_timestamp"),
                 ).model_dump())
@@ -1674,9 +1840,9 @@ class GetMapSeriesReviewChangeTool(BaseTool, _BaseQueryTool):
         for name, ts in [("start_timestamp", start_timestamp), ("end_timestamp", end_timestamp)]:
             if isinstance(ts, str):
                 try:
-                    parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    parsed = _parse_any_datetime(ts)
                 except Exception:
-                    return "ERROR: Invalid timestamp format (use ISO)."
+                    return "ERROR: Invalid timestamp format (use ISO or 'D Month YYYY H:MM:SS AM/PM')."
                 if name == "start_timestamp":
                     start_timestamp = parsed
                 else:
@@ -1693,23 +1859,23 @@ class GetMapSeriesReviewChangeTool(BaseTool, _BaseQueryTool):
         if valid_col.startswith("calculation"):
             json_path = f"$.{valid_col}"
             field_expr = (
-                "CASE WHEN JSON_VALID(m.custom_fields) "
-                "AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                "THEN CAST(REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') AS DECIMAL(20,6)) "
+                "CASE WHEN JSON_VALID(m1.custom_fields) "
+                "AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL "
+                "THEN CAST(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s)), ',', '') AS DECIMAL(20,6)) "
                 "ELSE NULL END"
             )
             reading_is_not_null = (
-                "JSON_VALID(m.custom_fields) AND JSON_EXTRACT(m.custom_fields, %(json_path)s) IS NOT NULL "
-                "AND REPLACE(NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.custom_fields, %(json_path)s))), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                "JSON_VALID(m1.custom_fields) AND JSON_EXTRACT(m1.custom_fields, %(json_path)s) IS NOT NULL "
+                "AND NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(m1.custom_fields, %(json_path)s))), '') IS NOT NULL"
             )
         else:
             field_expr = (
-                f"CASE WHEN REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-                f"THEN CAST(REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') AS DECIMAL(20,6)) ELSE NULL END"
+                f"CASE WHEN NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL "
+                f"THEN CAST(REPLACE(m1.{valid_col}, ',', '') AS DECIMAL(20,6)) ELSE NULL END"
             )
             reading_is_not_null = (
-                f"REPLACE(NULLIF(TRIM(m.{valid_col}), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$'"
+                f"NULLIF(TRIM(REPLACE(m1.{valid_col}, ',', '')), '') IS NOT NULL"
             )
 
         exclude_clause = ""
@@ -1721,61 +1887,80 @@ class GetMapSeriesReviewChangeTool(BaseTool, _BaseQueryTool):
             except Exception as e:
                 return f"ERROR: Failed to process exclude_instrument_ids: {e}"
 
-        sql = (
-            "WITH eligible AS ( "
+        reading_clause_m2 = reading_is_not_null.replace("m1.", "m2.")
+
+        eligible_sql = (
             "SELECT i.instr_id, "
             "CAST(REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') AS DECIMAL(20,6)) AS easting, "
             "CAST(REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') AS DECIMAL(20,6)) AS northing "
             "FROM instrum i JOIN location l ON i.location_id = l.id "
             "WHERE i.type1 = %(instrument_type)s "
             "AND (%(instrument_subtype)s IS NULL OR i.subtype1 = %(instrument_subtype)s) "
-            "AND REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
-            "AND REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') REGEXP '^-?[0-9]+(\\.[0-9]+)?$' "
             "AND CAST(REPLACE(NULLIF(TRIM(l.easting), ''), ',', '') AS DECIMAL(20,6)) BETWEEN %(min_e)s AND %(max_e)s "
             "AND CAST(REPLACE(NULLIF(TRIM(l.northing), ''), ',', '') AS DECIMAL(20,6)) BETWEEN %(min_n)s AND %(max_n)s "
-            + exclude_clause +
-            "), start_latest AS ( "
-            "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value, "
-            "ROW_NUMBER() OVER (PARTITION BY m.instr_id ORDER BY m.date1 DESC) AS rn "
-            "FROM mydata m JOIN eligible e ON e.instr_id = m.instr_id "
-            "WHERE m.date1 < %(start_ts)s AND " + reading_is_not_null + " ), "
-            "start_chosen AS ( SELECT instr_id, reading_time, field_value FROM start_latest WHERE rn = 1 ), "
-            "end_latest AS ( "
-            "SELECT m.instr_id, m.date1 AS reading_time, " + field_expr + " AS field_value, "
-            "ROW_NUMBER() OVER (PARTITION BY m.instr_id ORDER BY m.date1 DESC) AS rn "
-            "FROM mydata m JOIN eligible e ON e.instr_id = m.instr_id "
-            "WHERE m.date1 < %(end_ts)s AND " + reading_is_not_null + " ), "
-            "end_chosen AS ( SELECT instr_id, reading_time, field_value FROM end_latest WHERE rn = 1 ), "
-            "reviews AS ( "
-            "SELECT ri.instr_id, rl.review_name, "
-            "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6)) AS review_value, "
-            "riv.review_direction "
+            + exclude_clause
+        )
+
+        start_latest_sql = (
+            "SELECT e.instr_id, m1.date1 AS start_field_value_timestamp, " + field_expr + " AS start_field_value "
+            "FROM mydata m1 JOIN (" + eligible_sql + ") AS e ON e.instr_id = m1.instr_id "
+            "WHERE " + reading_is_not_null + " AND m1.date1 < %(start_ts)s "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM mydata m2 WHERE m2.instr_id = m1.instr_id AND " + reading_clause_m2 + " AND m2.date1 < %(start_ts)s "
+            "    AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id))"
+            ")"
+        )
+
+        end_latest_sql = (
+            "SELECT e.instr_id, m1.date1 AS end_field_value_timestamp, " + field_expr + " AS end_field_value "
+            "FROM mydata m1 JOIN (" + eligible_sql + ") AS e ON e.instr_id = m1.instr_id "
+            "WHERE " + reading_is_not_null + " AND m1.date1 < %(end_ts)s "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM mydata m2 WHERE m2.instr_id = m1.instr_id AND " + reading_clause_m2 + " AND m2.date1 < %(end_ts)s "
+            "    AND (m2.date1 > m1.date1 OR (m2.date1 = m1.date1 AND m2.id > m1.id))"
+            ")"
+        )
+
+        review_value_expr = (
+            "CAST(REPLACE(NULLIF(TRIM(riv.review_value), ''), ',', '') AS DECIMAL(20,6))"
+        )
+        severity_sort_expr = (
+            "CASE WHEN riv.review_direction = 1 THEN -" + review_value_expr + " ELSE " + review_value_expr + " END"
+        )
+
+        active_reviews_base = (
+            "SELECT ri.instr_id, rl.review_name, " + review_value_expr + " AS review_value, riv.review_direction, " + severity_sort_expr + " AS severity_sort "
             "FROM review_instruments ri "
             "JOIN review_instruments_values riv ON ri.id = riv.review_instr_id "
             "JOIN review_levels rl ON riv.review_level_id = rl.id "
-            "WHERE ri.review_field = %(review_field)s AND ri.review_status = 'ON' ), "
-            "start_breaches AS ( "
-            "SELECT c.instr_id, c.field_value, c.reading_time, r.review_name, r.review_value, r.review_direction, "
-            "ROW_NUMBER() OVER (PARTITION BY c.instr_id ORDER BY CASE WHEN r.review_direction = 1 THEN -r.review_value ELSE r.review_value END) AS severity_rank "
-            "FROM start_chosen c JOIN reviews r ON r.instr_id = c.instr_id "
-            "WHERE ((r.review_direction = 1 AND c.field_value > r.review_value) OR (r.review_direction = -1 AND c.field_value < r.review_value)) ), "
-            "end_breaches AS ( "
-            "SELECT c.instr_id, c.field_value, c.reading_time, r.review_name, r.review_value, r.review_direction, "
-            "ROW_NUMBER() OVER (PARTITION BY c.instr_id ORDER BY CASE WHEN r.review_direction = 1 THEN -r.review_value ELSE r.review_value END) AS severity_rank "
-            "FROM end_chosen c JOIN reviews r ON r.instr_id = c.instr_id "
-            "WHERE ((r.review_direction = 1 AND c.field_value > r.review_value) OR (r.review_direction = -1 AND c.field_value < r.review_value)) ) "
+            "WHERE ri.review_field = %(review_field)s AND ri.review_status = 'ON'"
+        )
+
+        active_reviews_ranked = (
+            "SELECT ar_base.instr_id, ar_base.review_name, ar_base.review_value, ar_base.review_direction, ar_base.severity_sort, "
+            "(SELECT COUNT(*) + 1 FROM (" + active_reviews_base + ") AS ar2 WHERE ar2.instr_id = ar_base.instr_id AND ar2.severity_sort < ar_base.severity_sort) AS severity_rank "
+            "FROM (" + active_reviews_base + ") AS ar_base"
+        )
+
+        inner_select = (
             "SELECT e.instr_id AS instrument_id, e.easting, e.northing, "
-            "sb.review_name AS start_review_status, sb.review_value AS start_review_value, "
-            "sc.field_value AS start_db_field_value, sc.reading_time AS start_db_field_value_timestamp, "
-            "eb.review_name AS end_review_status, eb.review_value AS end_review_value, "
-            "ec.field_value AS end_db_field_value, ec.reading_time AS end_db_field_value_timestamp "
-            "FROM eligible e "
-            "JOIN start_chosen sc ON sc.instr_id = e.instr_id "
-            "JOIN end_chosen ec ON ec.instr_id = e.instr_id "
-            "LEFT JOIN (SELECT instr_id, review_name, review_value FROM start_breaches WHERE severity_rank = 1) sb ON sb.instr_id = e.instr_id "
-            "LEFT JOIN (SELECT instr_id, review_name, review_value FROM end_breaches WHERE severity_rank = 1) eb ON eb.instr_id = e.instr_id "
-            "WHERE ((sb.review_name IS NULL AND eb.review_name IS NOT NULL) OR (sb.review_name IS NOT NULL AND eb.review_name IS NULL) OR (sb.review_name <> eb.review_name)) "
-            "ORDER BY ec.reading_time DESC"
+            "(SELECT CONCAT_WS('|', ar1.review_name, ar1.review_value) FROM (" + active_reviews_ranked + ") AS ar1 WHERE ar1.instr_id = e.instr_id "
+            " AND ((ar1.review_direction = 1 AND sl.start_field_value > ar1.review_value) OR (ar1.review_direction = -1 AND sl.start_field_value < ar1.review_value)) "
+            " ORDER BY ar1.severity_rank LIMIT 1) AS start_review_pair, "
+            "sl.start_field_value AS start_db_field_value, sl.start_field_value_timestamp AS start_db_field_value_timestamp, "
+            "(SELECT CONCAT_WS('|', ar1.review_name, ar1.review_value) FROM (" + active_reviews_ranked + ") AS ar1 WHERE ar1.instr_id = e.instr_id "
+            " AND ((ar1.review_direction = 1 AND el.end_field_value > ar1.review_value) OR (ar1.review_direction = -1 AND el.end_field_value < ar1.review_value)) "
+            " ORDER BY ar1.severity_rank LIMIT 1) AS end_review_pair, "
+            "el.end_field_value AS end_db_field_value, el.end_field_value_timestamp AS end_db_field_value_timestamp "
+            "FROM (" + eligible_sql + ") AS e "
+            "JOIN (" + start_latest_sql + ") AS sl ON sl.instr_id = e.instr_id "
+            "JOIN (" + end_latest_sql + ") AS el ON el.instr_id = e.instr_id"
+        )
+
+        sql = (
+            "SELECT * FROM (" + inner_select + ") AS t "
+            "WHERE NOT (SUBSTRING_INDEX(t.start_review_pair, '|', 1) <=> SUBSTRING_INDEX(t.end_review_pair, '|', 1)) "
+            "ORDER BY t.end_db_field_value_timestamp DESC"
         )
 
         params: Dict[str, Any] = {
@@ -1821,19 +2006,30 @@ class GetMapSeriesReviewChangeTool(BaseTool, _BaseQueryTool):
                 n = _coerce_float(r.get("northing"))
                 s_fv = _coerce_float(r.get("start_db_field_value"))
                 e_fv = _coerce_float(r.get("end_db_field_value"))
-                s_rv = _coerce_float(r.get("start_review_value")) if r.get("start_review_value") is not None else None
-                e_rv = _coerce_float(r.get("end_review_value")) if r.get("end_review_value") is not None else None
+
+                def _split_pair(val: Any) -> Tuple[Optional[str], Optional[float]]:
+                    if val is None:
+                        return None, None
+                    try:
+                        status_part, value_part = str(val).split("|", 1)
+                        return status_part or None, _coerce_float(value_part) if value_part != "" else None
+                    except ValueError:
+                        return str(val) or None, None
+
+                start_status, s_rv = _split_pair(r.get("start_review_pair"))
+                end_status, e_rv = _split_pair(r.get("end_review_pair"))
+
                 if e is None or n is None or s_fv is None or e_fv is None:
                     raise ValueError("required numeric conversion failed")
                 out.append(_MapSeriesReviewChangeRow(
                     instrument_id=r.get("instrument_id"),
                     easting=e,
                     northing=n,
-                    start_review_status=r.get("start_review_status"),
+                    start_review_status=start_status,
                     start_review_value=s_rv,
                     start_db_field_value=s_fv,
                     start_db_field_value_timestamp=r.get("start_db_field_value_timestamp"),
-                    end_review_status=r.get("end_review_status"),
+                    end_review_status=end_status,
                     end_review_value=e_rv,
                     end_db_field_value=e_fv,
                     end_db_field_value_timestamp=r.get("end_db_field_value_timestamp"),

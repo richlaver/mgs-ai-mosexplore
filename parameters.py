@@ -157,7 +157,8 @@ When readings are missed there is a risk that critical issues may pass undetecte
 Missed readings are also called **overdue** readings.
 A special set of review levels called **elapsed time** review levels thus provides thresholds on the time elapsed since the most recent reading was taken so that relevant parties can be notified when a reading is overdue.
 Like other review levels, elapsed time review levels can comprise progressive levels of severity, although usually only a single level is necessary and is defined with a value.
-Review levels for elapsed time are stored just like other review levels and are identified by the label “elapsed_time” in {{table: review_instruments, column: review_field}}.
+Instruments defined with an elapsed time review level are identified by the label “elapsed_time” in {{table: review_instruments, column: review_field}} for an instrument with instrument ID in {{table: review_instruments, column: instr_id}}.
+Do **not** extract elapsed time review level data like other review levels because the data is stored differently.
 Values for elapsed time review level thresholds are stored in {{table: review_instruments_values, column: review_value}} in units of seconds.
 Exceedances of elapsed time review levels can be readily extracted from table `overdue_notif` with columns as follows:
 - `instr_id`: instrument ID

@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import re
@@ -39,6 +40,10 @@ def apply_general_layout(fig: go.Figure) -> None:
 
 def parse_datetime(dt_str: str) -> datetime:
     """Parse datetime string in format 'D Month YYYY H:MM:SS AM/PM'."""
+    # Fix incorrect midnight format 00:00:00 AM -> 12:00:00 AM
+    if "00:00:00 AM" in dt_str:
+        dt_str = dt_str.replace("00:00:00 AM", "12:00:00 AM")
+
     # Try Windows format (no leading zeros)
     try:
         return datetime.strptime(dt_str, "%#d %B %Y %#I:%M:%S %p")
@@ -1150,12 +1155,12 @@ class SeriesDict(BaseModel):
         ...,
         description="The field name in mydata table to plot, e.g., 'data1' or 'calculation1'. For 'calculationN', value is extracted from custom_fields JSON."
     )
-    measured_quantity_name: str = Field(
-        ...,
+    measured_quantity_name: Optional[str] = Field(
+        None,
         description="Descriptive name for the quantity being measured, used in legend (e.g., 'Settlement')."
     )
-    abbreviated_unit: str = Field(
-        ...,
+    abbreviated_unit: Optional[str] = Field(
+        None,
         description="Abbreviated unit for the quantity, used in legend (e.g., 'mm')."
     )
 
@@ -1164,6 +1169,23 @@ class SeriesDict(BaseModel):
         if not re.match(r'^(data|calculation)\d+$', v):
             raise ValueError("database_field_name must be 'dataN' or 'calculationN'")
         return v
+
+    @validator('measured_quantity_name', pre=True)
+    def _normalize_measure_name(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return str(v)
+
+    @validator('abbreviated_unit', pre=True)
+    def _normalize_unit(cls, v):
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        return str(v)
 
 class MapPlotInput(BaseModel):
     """Input schema for the map plotting tool."""
@@ -1184,12 +1206,12 @@ class MapPlotInput(BaseModel):
         description="End datetime (or single time for 'value_at_time'). Must be after start_time if provided."
     )
     buffer_period_hours: Optional[int] = Field(
-        72,
+        None,
         description="Hours before specified times to search for nearest reading."
     )
     series: List[SeriesDict] = Field(
         ...,
-        description="List of up to 3 series to plot."
+        description="List of up to 5 series to plot; extras beyond 5 are ignored."
     )
     center_instrument_id: Optional[str] = Field(
         None,
@@ -1204,8 +1226,8 @@ class MapPlotInput(BaseModel):
         description="Northing coordinate for map center."
     )
     radius_meters: Optional[float] = Field(
-        500,
-        description="Radius for spatial filter (square bounding box of side 2*radius). >0."
+        None,
+        description="Radius for spatial filter (square bounding box of side 2*radius)."
     )
     exclude_instrument_ids: Optional[List[str]] = Field(
         default_factory=list,
@@ -1224,15 +1246,16 @@ class MapPlotInput(BaseModel):
 
     @validator('buffer_period_hours', pre=True)
     def _coerce_buffer(cls, v):
-        if v is None:
-            return 72
-        return v
+        return v if v is not None else None
 
     @validator('radius_meters', pre=True)
     def _coerce_radius(cls, v):
         if v is None:
-            return 500
-        return v
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
 
     @validator('exclude_instrument_ids', pre=True)
     def _coerce_exclude(cls, v):
@@ -1240,36 +1263,85 @@ class MapPlotInput(BaseModel):
 
     @validator('buffer_period_hours')
     def validate_buffer(cls, v, values):
-        if v < 0:
-            raise ValueError("buffer_period_hours must be non-negative")
-        if 'plot_type' in values and values['plot_type'] == 'change_over_period' and 'start_time' in values and 'end_time' in values:
-            period_hours = (values['end_time'] - values['start_time']).total_seconds() / 3600
-            if v > period_hours / 2:
-                raise ValueError("Buffer cannot exceed half the period for changes")
-        return v
+        max_hours = 168.0
+        plot_type = values.get('plot_type')
+        start_time = values.get('start_time')
+        end_time = values.get('end_time')
+        period_hours = None
+        if plot_type == 'change_over_period' and start_time and end_time:
+            delta_hours = (end_time - start_time).total_seconds() / 3600
+            if delta_hours > 0:
+                period_hours = delta_hours
+
+        default_hours = 72.0
+        if period_hours is not None:
+            default_hours = min(period_hours / 2, max_hours)
+
+        def _normalize(val: Optional[Union[int, float]]) -> float:
+            if val is None:
+                return default_hours
+            try:
+                hours = float(val)
+            except Exception:
+                return default_hours
+            if hours < 0:
+                return default_hours
+            if period_hours is not None:
+                return min(hours, max_hours, period_hours / 2)
+            return min(hours, max_hours)
+
+        return _normalize(v)
 
     @validator('data_type')
     def validate_data_type(cls, v):
-        if v not in ['review_levels', 'readings']:
+        valid = ['review_levels', 'readings']
+        if v in valid:
+            return v
+        if v is None:
             raise ValueError("data_type must be 'review_levels' or 'readings'")
-        return v
+        v_str = str(v).lower()
+        synonyms = {
+            'readings': ["data", "reading", "measure", "field", "value"],
+            'review_levels': ["review", "level", "breach", "exceedance", "threshold", "status", "aaa", "trigger", "limit"],
+        }
+        for target, hints in synonyms.items():
+            if any(h in v_str for h in hints):
+                return target
+        raise ValueError("data_type must be 'review_levels' or 'readings'")
 
     @validator('plot_type')
     def validate_plot_type(cls, v):
-        if v not in ['value_at_time', 'change_over_period']:
+        valid = ['value_at_time', 'change_over_period']
+        if v in valid:
+            return v
+        if v is None:
             raise ValueError("plot_type must be 'value_at_time' or 'change_over_period'")
-        return v
+        v_str = str(v).lower()
+        synonyms = {
+            'value_at_time': ["snapshot", "time", "value", "at", "date"],
+            'change_over_period': ["change", "delta", "diff", "period", "over", "across"],
+        }
+        for target, hints in synonyms.items():
+            if any(h in v_str for h in hints):
+                return target
+        raise ValueError("plot_type must be 'value_at_time' or 'change_over_period'")
 
     @validator('series')
     def validate_series(cls, v):
-        if len(v) == 0 or len(v) > 3:
-            raise ValueError("1-3 series required")
-        return v
-
-    @validator('radius_meters')
-    def validate_radius(cls, v):
-        if v <= 0:
-            raise ValueError("radius_meters must be positive")
+        if not v:
+            raise ValueError("At least one series is required")
+        if len(v) > 5:
+            logger.warning("Series list exceeds 5; truncating to first five entries")
+            v = v[:5]
+        for idx, s in enumerate(v):
+            try:
+                if not s.measured_quantity_name:
+                    s.measured_quantity_name = f"Series {idx + 1}"
+                if s.abbreviated_unit is None:
+                    s.abbreviated_unit = ""
+            except Exception:
+                # If not a SeriesDict yet, rely on Pydantic to coerce later
+                pass
         return v
 
  
@@ -1285,7 +1357,7 @@ Input schema:
 - plot_type: String, either 'value_at_time' or 'change_over_period'.
 - start_time: Optional datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 August 2025 12:00:00 AM'), required for 'change_over_period'.
 - end_time: Datetime string in same format (e.g., '31 August 2025 11:59:59 PM'). Required.
-- buffer_period_hours: Optional integer, buffer period in hours (default 72).
+- buffer_period_hours: Optional integer, buffer period in hours.
 - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa').
  - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa'). NOTE: When data_type='review_levels' ONLY the FIRST series element is used to derive and plot review statuses; additional series entries are ignored.
 - center_instrument_id: Optional string, instrument ID to center the map.
@@ -1298,9 +1370,114 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
 """
     args_schema: Type[MapPlotInput] = MapPlotInput
     response_format: str = "content"
+    default_center: Optional[Tuple[float, float]] = Field(default=None, exclude=True)
+    default_radius_meters: Optional[float] = Field(default=None, exclude=True)
+    spatial_defaults_cache: Optional[Dict[str, float]] = Field(default=None, exclude=True)
+
+    def _compute_spatial_defaults_via_db(self) -> Optional[Dict[str, float]]:
+        """Compute median center and a radius covering ~90% of instruments using DB data."""
+        try:
+            query = (
+                """
+                SELECT l.easting, l.northing
+                FROM instrum i
+                JOIN location l ON i.location_id = l.id
+                WHERE l.easting IS NOT NULL AND l.northing IS NOT NULL;
+                """
+            )
+            raw = self.sql_tool._run(query)
+        except Exception as exc:
+            logger.warning("Failed to fetch spatial defaults from DB: %s", exc)
+            return None
+
+        parsed = raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(raw)
+                except Exception:
+                    logger.warning("Could not parse spatial defaults response: %s", raw)
+                    return None
+
+        eastings: List[float] = []
+        northings: List[float] = []
+        for row in parsed or []:
+            if isinstance(row, dict):
+                e_val = row.get('easting') or row.get('l.easting') or row.get('EASTING')
+                n_val = row.get('northing') or row.get('l.northing') or row.get('NORTHING')
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                e_val, n_val = row[0], row[1]
+            else:
+                continue
+            e_clean = self._extract_numeric(e_val)
+            n_clean = self._extract_numeric(n_val)
+            if e_clean is None or n_clean is None:
+                continue
+            try:
+                eastings.append(float(e_clean))
+                northings.append(float(n_clean))
+            except Exception:
+                continue
+
+        if not eastings or not northings:
+            return None
+
+        arr_e = np.array(eastings)
+        arr_n = np.array(northings)
+        med_e = float(np.median(arr_e))
+        med_n = float(np.median(arr_n))
+        try:
+            p5_e, p95_e = np.percentile(arr_e, [5, 95])
+            p5_n, p95_n = np.percentile(arr_n, [5, 95])
+            radius = float(max(p95_e - p5_e, p95_n - p5_n) / 2.0)
+        except Exception:
+            radius = 500.0
+        if not math.isfinite(radius) or radius <= 0:
+            radius = 500.0
+        return {
+            'median_easting': med_e,
+            'median_northing': med_n,
+            'radius_90_extent': radius,
+        }
+
+    def _get_spatial_defaults(self) -> Dict[str, float]:
+        """Return cached or computed spatial defaults (median center and radius)."""
+        if self.spatial_defaults_cache:
+            return self.spatial_defaults_cache
+
+        defaults: Dict[str, float] = {}
+        if self.default_center:
+            defaults['median_easting'] = float(self.default_center[0])
+            defaults['median_northing'] = float(self.default_center[1])
+        if self.default_radius_meters is not None:
+            defaults['radius_90_extent'] = abs(float(self.default_radius_meters))
+
+        if not all(k in defaults for k in ('median_easting', 'median_northing', 'radius_90_extent')):
+            computed = self._compute_spatial_defaults_via_db()
+            if computed:
+                defaults.setdefault('median_easting', computed.get('median_easting'))
+                defaults.setdefault('median_northing', computed.get('median_northing'))
+                defaults.setdefault('radius_90_extent', computed.get('radius_90_extent'))
+
+        if 'median_easting' not in defaults or defaults.get('median_easting') is None:
+            defaults['median_easting'] = 0.0
+        if 'median_northing' not in defaults or defaults.get('median_northing') is None:
+            defaults['median_northing'] = 0.0
+        if 'radius_90_extent' not in defaults or defaults.get('radius_90_extent') is None:
+            defaults['radius_90_extent'] = 500.0
+
+        self.spatial_defaults_cache = defaults
+        return defaults
 
     def _get_center_coords(self, center_instrument_id: Optional[str], center_easting: Optional[float], center_northing: Optional[float]) -> Tuple[float, float]:
         logger.info(f"Fetching center coordinates for instrument_id={center_instrument_id}, easting={center_easting}, northing={center_northing}")
+        defaults = self._get_spatial_defaults()
+        fallback_center = (
+            defaults.get('median_easting', 0.0),
+            defaults.get('median_northing', 0.0)
+        )
         if center_instrument_id:
             query = f"""
             SELECT l.easting, l.northing
@@ -1312,7 +1489,8 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             result = self.sql_tool._run(query)
             logger.info(f"Query result: {result}")
             if result == "No data was found in the database matching the specified search criteria.":
-                raise ValueError(f"No location found for instrument ID {center_instrument_id}")
+                logger.info("No data for instrument center; using median fallback")
+                return fallback_center
             try:
                 # Attempt JSON load first, fallback to eval
                 if isinstance(result, str):
@@ -1348,12 +1526,14 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 return e_f, n_f
             except Exception as e:
                 logger.error(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
-                raise ValueError(f"Error processing location for instrument ID {center_instrument_id}: {str(e)}")
+                logger.info("Falling back to median center due to invalid instrument ID")
+                return fallback_center
         elif center_easting is not None and center_northing is not None:
             logger.info(f"Using provided center coords: easting={center_easting}, northing={center_northing}")
             return center_easting, center_northing
         else:
-            raise ValueError("Either center_instrument_id or both center_easting and center_northing must be provided")
+            logger.info("No center provided; using median center fallback")
+            return fallback_center
 
     def _get_bounds(self, center_e: float, center_n: float, radius_m: float) -> Tuple[float, float, float, float]:
         logger.info(f"Calculating bounds with center_e={center_e}, center_n={center_n}, radius_m={radius_m}")
@@ -2208,8 +2388,6 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
     ) -> Dict[str, Any]:
         logger.info(f"MapPlotTool._run called with data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}, buffer_period_hours={buffer_period_hours}, series_count={len(series) if series else 0}, center_instrument_id={center_instrument_id}, center_easting={center_easting}, center_northing={center_northing}, radius_meters={radius_meters}, exclude_instrument_ids={exclude_instrument_ids}")
         try:
-            if buffer_period_hours is None:
-                buffer_period_hours = 72
             if radius_meters is None:
                 radius_meters = 500.0
             if exclude_instrument_ids is None:
@@ -2219,6 +2397,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             if series is None:
                 raise ValueError("series is required and must be a non-empty list")
 
+            original_series_count = len(series) if series else 0
             inputs = MapPlotInput(
                 data_type=data_type,
                 plot_type=plot_type,
@@ -2234,6 +2413,14 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             )
             logger.info(f"Validated inputs: {inputs}")
 
+            if original_series_count and original_series_count > len(inputs.series):
+                logger.info("Series list truncated from %d to %d", original_series_count, len(inputs.series))
+            for idx, s in enumerate(inputs.series):
+                if not s.measured_quantity_name:
+                    s.measured_quantity_name = f"Series {idx + 1}"
+                if s.abbreviated_unit is None:
+                    s.abbreviated_unit = ""
+
             if inputs.plot_type == 'change_over_period' and inputs.start_time is None:
                 raise ValueError("start_time is required for 'change_over_period'")
             if inputs.start_time is not None and inputs.end_time <= inputs.start_time:
@@ -2241,8 +2428,10 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             if not inputs.series:
                 raise ValueError("At least one series is required")
 
+            spatial_defaults = self._get_spatial_defaults()
+            radius_to_use = inputs.radius_meters if inputs.radius_meters is not None and inputs.radius_meters > 0 else spatial_defaults.get('radius_90_extent', 500.0)
             center_e, center_n = self._get_center_coords(inputs.center_instrument_id, inputs.center_easting, inputs.center_northing)
-            min_e, max_e, min_n, max_n = self._get_bounds(center_e, center_n, inputs.radius_meters)
+            min_e, max_e, min_n, max_n = self._get_bounds(center_e, center_n, radius_to_use)
             exclude_str = ','.join(f"'{id}'" for id in inputs.exclude_instrument_ids)
             exclude_clause = f"AND i.instr_id NOT IN ({exclude_str})" if exclude_str else ""
             logger.info(f"Exclude clause: {exclude_clause}")
@@ -2314,7 +2503,7 @@ class MapPlotWrapperTool(BaseTool):
 
             # Extract optional fields with defaults
             start_time_str = input_dict.get('start_time')
-            buffer_period_hours = input_dict.get('buffer_period_hours', 72)
+            buffer_period_hours = input_dict.get('buffer_period_hours')
             center_instrument_id = input_dict.get('center_instrument_id')
             center_easting = input_dict.get('center_easting')
             center_northing = input_dict.get('center_northing')

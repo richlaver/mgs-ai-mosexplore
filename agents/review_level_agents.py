@@ -777,7 +777,7 @@ class ReviewChangesAcrossPeriodAgentTool(BaseGenericReviewAgentTool):
     ]
     instructions: ClassVar[str] = (
         "Extract ISO8601 start_timestamp and end_timestamp (end must be later).\n"
-        "Provide numeric buffers in DAYS (floats allowed) for start_buffer/end_buffer when mentioned; otherwise set null.\n"
+        "Provide numeric buffers in DAYS (floats allowed) for start_buffer/end_buffer when mentioned.\n"
         "Instrument filters (instrument_type/instrument_subtype) or db_field_name should be null when absent.\n"
         "change_direction must be one of 'up', 'down', or 'both' when present; lowercase it."
     )
@@ -808,10 +808,10 @@ class ReviewChangesAcrossPeriodAgentTool(BaseGenericReviewAgentTool):
                 out[key] = None
                 return
             if isinstance(val, (int, float)):
-                out[key] = float(val)
+                out[key] = min(float(val), 7.0)
                 return
             try:
-                out[key] = float(str(val).strip())
+                out[key] = min(float(str(val).strip()), 7.0)
             except (TypeError, ValueError):
                 # Leave as-is; tool will raise a clear error downstream.
                 pass

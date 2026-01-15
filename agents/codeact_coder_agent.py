@@ -6,9 +6,10 @@ from datetime import datetime
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from classes import Execution, Context
+from utils.timezone_utils import tzinfo_from_offset
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ codeact_coder_prompt = PromptTemplate(
         "verified_instrument_info_json",
         "word_context_json",
         "relevant_date_ranges_json",
+    "timezone_context_json",
         "platform_context",
         "project_specific_context",
         "tools_str",
@@ -61,11 +63,11 @@ codeact_coder_prompt = PromptTemplate(
 You are an expert in creating robust execution plans and implementing them in Python code to answer queries on instrumentation monitoring data in a database.
 
 # Task
-Generate code to answer the following user query:
+Generate code to answer the following user query, using plots wherever possible to visualise data:
 {retrospective_query}
 
 # Context
-- Current date:
+- Current date (project timezone):
 {current_date}
 - Validated instrument types and subtypes referenced in the query (complete list from the database; do not infer additional types or subtypes):
 {validated_type_info_json}
@@ -75,6 +77,11 @@ Generate code to answer the following user query:
 {word_context_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
+- Timezones (project vs user vs sandbox):
+{timezone_context_json}
+  * Project timezone: use this for all database queries, time comparisons and in times stated in yielded output.
+  * User timezone: use to interpret times in the query **only** if the query timezone interpretation explicitly states that times in the query are stated with respect to the user timezone.
+  * Sandbox timezone: `datetime.datetime.now()` in the sandbox which runs your generated code returns this timezone; always convert it to the project timezone before using it.
 - Platform-specific terminology and semantics:
 {platform_context}
 - Additional context on database:
@@ -94,6 +101,7 @@ Generate code to answer the following user query:
   * `review_by_time_agent`
   * `review_schema_agent`
   * `breach_instr_agent`
+  * `review_changes_across_period_agent`
   * `csv_saver_tool`
   * `pandas` module as `pd`
   * `numpy` module as `np`
@@ -111,7 +119,14 @@ Generate code to answer the following user query:
 - Omit docstrings.
 - Dynamically respond to extracted data and errors for robustness.
 - Use `try`-`except` blocks to handle exceptions but continue where possible.
-- When running multiple named asyncio Tasks where the result needs to be identified by the task name (e.g., differentiating between a 'plot' task and a 'data' task), ALWAYS use `asyncio.wait(tasks)`. Never use `asyncio.as_completed` for named tasks, as it strips task identity.
+- When running multiple named asyncio Tasks where the result needs to be identified by the task name (e.g., differentiating between a 'plot' task and a 'data' task), ALWAYS use `asyncio.wait(tasks)` and ensure task objects are passed to `asyncio.wait()`. Never use `asyncio.as_completed` for named tasks, as it strips task identity.
+- If you use `set_name` and `get_name` methods, make sure they are executed on `asyncio` tasks and not co-routines.
+
+## Timezone Handling
+- Adopt the project timezone for all database queries and datetime calculations.
+- If you need the current time inside the sandbox which runs your generated code, convert `datetime.datetime.now()` from sandbox timezone to the project timezone before using it.
+- When interpreting times specified in the query, honour the query timezone interpretation above; assume project timezone if unspecified.
+- State all times in yielded outputs with respect to the project timezone and explicitly note that the project timezone is being used in the final output so downstream agents can correctly interpret the times.
 
 ## Yielded Output
 - Yield dictionaries as:
@@ -126,7 +141,7 @@ Generate code to answer the following user query:
 }}
 - When to yield different types:
   * "progress": at start of each step
-  * "error": on exceptions, with error message
+  * "error": on exceptions, with error message. **Never** yield error output relating to failure to generate *supporting* plots, only for plots that are directly requested in the query.
   * "final": after all steps with result summary for query and optional extension, self-explanatory and comprehensive for downstream interpretation
   * "plot": when calling a plotting tool
   * "csv": when calling `csv_saver_tool`
@@ -209,6 +224,7 @@ await ainvoke(csv_saver_tool, {{
   * Whether to highlight y-axis zero line
 - Returns artefact ID to access plot in file system or `None`.
 - DO NOT use `extraction_sandbox_agent` to extract data for plotting because `timeseries_plot_sandbox_agent` extracts the data it needs.
+- DO NOT attempt to specify instrument types or subtypes in the prompt because the tool only accepts individual instrument IDs.
 ### Example Prompt
 "Plot temperature with time for instrument 0001-L-1 along with settlement with time for instruments 0003-L-1 and 0003-L-2:
 - Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM
@@ -234,7 +250,7 @@ await ainvoke(csv_saver_tool, {{
   * Whether plotting readings or review status
   * Whether plotting at single time or change over period
   * Time if single time or time range if change over period
-  * Buffer period to look for missing readings (>= 1 day, get from date ranges relevant to query)
+  * Buffer period to look for missing readings in hours.
   * For each series:
     + Instrument type
     + Instrument subtype
@@ -372,6 +388,7 @@ Schema Query 2
   * End buffer in days to extend end timestamp backwards
   * Change direction ('up', 'down', 'both')
 - Returns `pandas.DataFrame` with columns (instrument_id, db_field_name, start_review_name, start_review_value, start_field_value, start_field_value_timestamp, end_review_name, end_review_value, end_field_value, end_field_value_timestamp) or `None` or `ERROR: <error message>`.
+- start_review_name or end_review_name will be `NaN` in the DataFrame if no review level was breached at that time.
 ### Example Prompt 1
 "List review changes for:
 - Start timestamp: 14 May 2025 12:00:00 PM
@@ -397,19 +414,29 @@ Schema Query 2
 - SyntaxError: 'return' with value in async generator.
 - Assuming that `map_plot_sandbox_agent`, `timeseries_plot_sandbox_agent`, and `csv_saver_tool` return "artefact_id=<artefact_id>" instead of <artefact_id>. Only the artefact ID itself is returned as a string.
 - Assuming the `ainvoke` function does not exist and needs to be defined. Actually the `ainvoke` function is already imported and available for use.
+- Shadowing or redefining `ainvoke` or any tool stubs (e.g., adding local placeholders) — use the provided implementations only.
+- SyntaxError: unmatched '}}', ']' or ')'.
+- Line indenting errors: check all indents are correct.
+- Incorrectly formatted multiline strings in tool prompts.
+- Failure to close triple quotes for multiline strings. **Always** close triple quotes.
+- Failure to close double quotes immediately before line continuation characters (`\`) in multiline strings. **Always** close double quotes before line continuation characters.
+- Correct application of double and single quotes in strings.
+- 'coroutine' object has no attribute 'get_name': ensure `get_name` is called on `asyncio` Task objects, not coroutines.
+- No need to add `asyncio.run(execute_strategy())` at the end of the code. The execution environment will handle running the async function.
 
 # Sequential Instructions
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
 3. Produce a step-by-step execution plan to answer the query. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
-4. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`).
-5. Check code for:
+4. Consider what plots you can produce using the provided tools to best visualise the data to answer the query. If you identified one or more plots you can produce, include steps in the execution plan to create these plots using the appropriate plotting tools.
+5. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`). Apply timezone conversions so that any timestamps sent to or received from the database are in the project timezone.
+6. Check code for:
   - Common coding errors above
   - Logic to answer query
   - Adheres to constraints
   - Calls tools correctly with necessary inputs
   - Yielded outputs formed correctly
-6. Output only the code. Do not include any other text to save tokens.
+7. Output only the code. Do not include any other text to save tokens.
 
 # Output Schema
 - Return EXACTLY one JSON object with the following fields and no additional prose, Markdown, or prefixes:
@@ -468,6 +495,13 @@ def strip_code_tags(code: str) -> str:
   return code
 
 
+def strip_trailing_asyncio_run_notice(code: str) -> str:
+  lines = code.rstrip().splitlines()
+  while lines and "asyncio.run(execute_strategy())" in lines[-1]:
+    lines.pop()
+  return "\n".join(lines).strip()
+
+
 def _make_codeact_message(content: str) -> AIMessage:
     return AIMessage(
         name="CodeActCoder",
@@ -506,7 +540,20 @@ def codeact_coder_agent(
   platform_context = context.platform_context or ""
   project_specific_context = context.project_specific_context or ""
 
-  current_date = datetime.now().strftime('%B %d, %Y')
+  timezone_context_raw: Dict[str, Any] = {}
+  if context and context.timezone_context:
+    timezone_context_raw = (
+      context.timezone_context.model_dump()
+      if hasattr(context.timezone_context, "model_dump")
+      else context.timezone_context
+    ) or {}
+  timezone_context_json = json.dumps(timezone_context_raw, indent=2)
+
+  project_offset = timezone_context_raw.get("project_timezone_offset") if isinstance(timezone_context_raw, dict) else None
+  project_tzinfo = tzinfo_from_offset(project_offset) or datetime.now().astimezone().tzinfo
+  app_now = datetime.now().astimezone()
+  project_now = app_now.astimezone(project_tzinfo)
+  current_date = project_now.strftime('%B %d, %Y %H:%M (%Z%z) [project timezone]')
 
   tools_str = json.dumps([
     {"name": t.name, "description": t.description}
@@ -525,23 +572,56 @@ def codeact_coder_agent(
   generate_chain = codeact_coder_prompt | structured_llm
   check_chain = code_check_prompt | checking_llm
 
+  max_format_retries = 1
+
   try:
-    response = generate_chain.invoke({
-      "current_date": current_date,
-      "retrospective_query": retrospective_query,
-      "validated_type_info_json": validated_type_info_json,
-      "verified_instrument_info_json": verified_instrument_info_json,
-      "word_context_json": word_context_json,
-      "relevant_date_ranges_json": relevant_date_ranges_json,
-      "platform_context": platform_context,
-      "project_specific_context": project_specific_context,
-      "tools_str": tools_str,
-      "previous_attempts_summary": previous_attempts_summary,
-    })
+    response = None
+    last_err: Exception | None = None
+
+    for attempt in range(max_format_retries + 1):
+      try:
+        candidate = generate_chain.invoke({
+          "current_date": current_date,
+          "retrospective_query": retrospective_query,
+          "validated_type_info_json": validated_type_info_json,
+          "verified_instrument_info_json": verified_instrument_info_json,
+          "word_context_json": word_context_json,
+          "relevant_date_ranges_json": relevant_date_ranges_json,
+          "timezone_context_json": timezone_context_json,
+          "platform_context": platform_context,
+          "project_specific_context": project_specific_context,
+          "tools_str": tools_str,
+          "previous_attempts_summary": previous_attempts_summary,
+        })
+
+        cleaned_code = strip_trailing_asyncio_run_notice(strip_code_tags(candidate.code))
+        if not cleaned_code:
+          raise ValueError("Structured output contained no code.")
+
+        response = candidate
+        break
+      except Exception as exc:
+        last_err = exc
+        msg = str(exc).lower()
+        is_format_issue = isinstance(exc, ValidationError) or any(
+          hint in msg for hint in ["validation", "schema", "json", "parse", "format", "structured", "code"]
+        )
+        if is_format_issue and attempt < max_format_retries:
+          logger.warning(
+            "Structured code generation format issue (attempt %d/%d); retrying: %s",
+            attempt + 1,
+            max_format_retries + 1,
+            exc,
+          )
+          continue
+        raise
+
+    if response is None:
+      raise RuntimeError(f"Code generation failed after retries: {last_err}")
 
     objective = response.objective.strip()
     plan_steps = response.plan
-    cleaned_code = strip_code_tags(response.code)
+    cleaned_code = strip_trailing_asyncio_run_notice(strip_code_tags(response.code))
 
     logger.debug("Generated objective: %s", objective)
     logger.debug("Generated plan: %s", plan_steps)
@@ -564,6 +644,8 @@ def codeact_coder_agent(
     new_execution = Execution(
       parallel_agent_id=0,
       retry_number=len(previous_attempts),
+      objective=objective,
+      plan=list(plan_steps),
       codeact_code=cleaned_code,
       final_response=None,
       artefacts=[],
@@ -577,6 +659,8 @@ def codeact_coder_agent(
     new_execution = Execution(
       parallel_agent_id=0,
       retry_number=len(previous_attempts),
+      objective="",
+      plan=[],
       codeact_code="",
       final_response=None,
       artefacts=[],

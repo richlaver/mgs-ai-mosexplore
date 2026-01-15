@@ -4,8 +4,11 @@ This module initializes the LLM, embeddings, Qdrant vector store, and database,
 ensuring all components are ready for the RAG pipeline.
 """
 
+import ast
 import json
+import math
 import os
+import statistics
 import b2sdk.v1 as b2
 import psycopg2
 import streamlit as st
@@ -13,11 +16,11 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_community.utilities import SQLDatabase as BaseSQLDatabase
 from utils.cancelable_llm import InterruptibleChatVertexAI, clone_llm as clone_interruptible_llm
 from utils.cancelable_sql import CancelableSQLDatabase
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer
+from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict, Union, Optional
 import modal
 import logging
 from utils.project_selection import (
@@ -26,6 +29,23 @@ from utils.project_selection import (
 )
 
 logger = logging.getLogger(__name__)
+_map_spatial_defaults_cache: Optional[Dict[str, float]] = None
+
+def _normalize_api_endpoint(raw: str) -> str:
+    if not raw:
+        return ""
+    return raw.replace("https://", "").replace("http://", "").rstrip("/")
+
+
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
+VERTEX_ENDPOINT = _normalize_api_endpoint(
+    os.environ.get(
+        "VERTEX_ENDPOINT",
+        "aiplatform.googleapis.com"
+        if VERTEX_LOCATION == "global"
+        else f"{VERTEX_LOCATION}-aiplatform.googleapis.com",
+    )
+)
 
 def set_modal_credentials():
     """Set Modal credentials from Streamlit secrets."""
@@ -204,18 +224,25 @@ def get_llms() -> Dict[str, ChatVertexAI]:
         A dictionary of language model instances configured with Google APIs.
     """
     st.toast("Setting up Gemini LLMs...", icon=":material/build:")
+    common_kwargs = {
+        "location": VERTEX_LOCATION,
+        "api_endpoint": VERTEX_ENDPOINT,
+    }
     return {
         "FAST": InterruptibleChatVertexAI(
             model="gemini-2.0-flash-lite",
             temperature=0.3,
+            **common_kwargs,
         ),
         "BALANCED": InterruptibleChatVertexAI(
             model="gemini-2.0-flash",
             temperature=0.5,
+            **common_kwargs,
         ),
         "THINKING": InterruptibleChatVertexAI(
             model="gemini-2.5-pro",
             temperature=0.7,
+            **common_kwargs,
         ),
     }
 
@@ -289,6 +316,140 @@ def get_db() -> BaseSQLDatabase:
         return db
     except Exception as e:
         raise Exception(f"Failed to connect to database: {str(e)}")
+
+
+def _clean_numeric_value(val: Union[str, bytes, bytearray, float, int, None]) -> Optional[float]:
+    """Normalize numeric values returned from SQL into floats."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            return float(val)
+        except Exception:
+            return None
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            val = val.decode("utf-8")  # type: ignore
+        except Exception:
+            return None
+    if isinstance(val, str):
+        s = val.strip()
+        if len(s) >= 2 and ((s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'"))):
+            s = s[1:-1]
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+    return None
+
+
+def _percentile(sorted_vals: List[float], q: float) -> float:
+    """Return percentile using linear interpolation (q in [0,1])."""
+    if not sorted_vals:
+        return 0.0
+    if q <= 0:
+        return sorted_vals[0]
+    if q >= 1:
+        return sorted_vals[-1]
+    pos = (len(sorted_vals) - 1) * q
+    lower = math.floor(pos)
+    upper = math.ceil(pos)
+    if lower == upper:
+        return sorted_vals[int(pos)]
+    return sorted_vals[lower] + (sorted_vals[upper] - sorted_vals[lower]) * (pos - lower)
+
+
+def compute_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
+    """Compute median instrument center and a radius covering ~90% of instruments."""
+    query = (
+        """
+        SELECT l.easting, l.northing
+        FROM instrum i
+        JOIN location l ON i.location_id = l.id
+        WHERE l.easting IS NOT NULL AND l.northing IS NOT NULL;
+        """
+    )
+    try:
+        raw = db.run(query)
+    except Exception as exc:
+        logger.warning("Failed to query spatial defaults: %s", exc)
+        return {
+            "median_easting": 0.0,
+            "median_northing": 0.0,
+            "radius_90_extent": 500.0,
+        }
+
+    parsed = raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(raw)
+            except Exception:
+                logger.warning("Could not parse spatial defaults response; using fallbacks")
+                parsed = []
+
+    eastings: List[float] = []
+    northings: List[float] = []
+    for row in parsed or []:
+        if isinstance(row, dict):
+            e_val = row.get("easting") or row.get("l.easting") or row.get("EASTING")
+            n_val = row.get("northing") or row.get("l.northing") or row.get("NORTHING")
+        elif isinstance(row, (list, tuple)) and len(row) >= 2:
+            e_val, n_val = row[0], row[1]
+        else:
+            continue
+        e_clean = _clean_numeric_value(e_val)
+        n_clean = _clean_numeric_value(n_val)
+        if e_clean is None or n_clean is None:
+            continue
+        eastings.append(e_clean)
+        northings.append(n_clean)
+
+    if not eastings or not northings:
+        return {
+            "median_easting": 0.0,
+            "median_northing": 0.0,
+            "radius_90_extent": 500.0,
+        }
+
+    eastings_sorted = sorted(eastings)
+    northings_sorted = sorted(northings)
+    med_e = statistics.median(eastings_sorted)
+    med_n = statistics.median(northings_sorted)
+    p5_e = _percentile(eastings_sorted, 0.05)
+    p95_e = _percentile(eastings_sorted, 0.95)
+    p5_n = _percentile(northings_sorted, 0.05)
+    p95_n = _percentile(northings_sorted, 0.95)
+    radius = max(p95_e - p5_e, p95_n - p5_n) / 2.0
+    if not math.isfinite(radius) or radius <= 0:
+        radius = 500.0
+
+    return {
+        "median_easting": float(med_e),
+        "median_northing": float(med_n),
+        "radius_90_extent": float(radius),
+    }
+
+
+def get_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
+    """Return cached map spatial defaults, computing and storing if needed."""
+    global _map_spatial_defaults_cache
+    if _map_spatial_defaults_cache is not None:
+        return _map_spatial_defaults_cache
+
+    defaults = compute_map_spatial_defaults(db)
+    _map_spatial_defaults_cache = defaults
+    try:
+        if hasattr(st, "session_state"):
+            st.session_state.map_spatial_defaults = defaults
+    except Exception:
+        pass
+    return defaults
+
 
 
 def get_project_id() -> str:

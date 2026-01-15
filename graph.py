@@ -15,7 +15,7 @@ from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, Send
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agents.codeact_coder_agent import codeact_coder_agent
 from agents.context_orchestrator import get_context_graph
@@ -514,8 +514,18 @@ def build_graph(
         _ensure_run_not_cancelled("history_summariser")
         retrospective_query = history_summariser(messages=state.messages, llm=llms["BALANCED"])
         base_context = state.context if isinstance(state.context, Context) else None
+        timezone_context = None
+        if base_context and base_context.timezone_context:
+            timezone_context = base_context.timezone_context
+        elif st.session_state.get("timezone_context"):
+            timezone_context = st.session_state.get("timezone_context")
+
+        update_payload = {"retrospective_query": retrospective_query}
+        if timezone_context:
+            update_payload["timezone_context"] = timezone_context
+
         new_context = (base_context or Context(retrospective_query=retrospective_query)).model_copy(
-            update={"retrospective_query": retrospective_query}
+            update=update_payload
         )
         return {"context": new_context}
 
@@ -643,22 +653,33 @@ def build_graph(
                     return str(content)
             return str(content)
 
-        def _judge_sufficiency(final_msg: BaseMessage | None, user_query: str) -> bool:
+        def _judge_sufficiency(
+            final_msg: BaseMessage | None, user_query: str, branch_context: List[str] | None = None
+        ) -> bool:
             if not final_msg:
                 return False
             final_response_text = _flatten_message_content(final_msg)
-            prompt = (
-                "You are a fast, strict judge. Decide if the assistant's final reply fully answers the user's latest request.\n"
-                "Use a concise checklist: (1) directly answers the question; (2) uses provided artefacts/results when present;"
-                " (3) no unresolved TODOs, errors, or apologies; (4) actionable, specific, and contextually relevant;"
-                " (5) flags missing data if needed."
-                " Return ONLY compact JSON: {\\\"sufficient\\\": true|false, \\\"notes\\\": \\\"<=30 words why\\\"}."
-            )
+            context_notes = "\n".join([c for c in (branch_context or []) if isinstance(c, str) and c.strip()])
+            prompt = ("""
+                You are a fast, strict judge.
+                Decide if the assistant's final reply fully answers the user's latest request.
+                Use a concise checklist:
+                    (1) answers the question
+                    (2) no unresolved TODOs, errors, or apologies;
+                    (3) actionable, specific, and contextually relevant;
+                    (4) flags missing data if needed.
+                Return ONLY compact JSON: {"sufficient": true|false, "notes": "<=30 words why"}.
+            """)
             llm_input = [
                 ("system", prompt),
                 (
                     "human",
-                    f"User query:\n{user_query}\n\nAssistant final reply:\n{final_response_text}\n\nIs it sufficient?",
+                    (
+                        "User query:\n"
+                        f"{user_query}\n\n"
+                        f"Assistant plan/notes:\n{context_notes}\n\n"
+                        f"Assistant final reply:\n{final_response_text}\n\nIs it sufficient?"
+                    ),
                 ),
             ]
             try:
@@ -754,15 +775,43 @@ def build_graph(
                 "user_query": retrospective_query,
             }
 
-            try:
-                fact_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=768)
-                structured_llm = fact_llm.with_structured_output(FactsResponse)
-                llm_result: FactsResponse = structured_llm.invoke([
-                    ("system", system_prompt),
-                    ("human", json.dumps(payload)),
-                ])
-            except Exception as exc:
-                logger.error("Failed to invoke fact decomposition LLM: %s", exc)
+            fact_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=768)
+            structured_llm = fact_llm.with_structured_output(FactsResponse)
+
+            max_format_retries = 1
+            llm_result: FactsResponse | None = None
+            for attempt in range(max_format_retries + 1):
+                try:
+                    candidate = structured_llm.invoke([
+                        ("system", system_prompt),
+                        ("human", json.dumps(payload)),
+                    ])
+
+                    if not candidate or not getattr(candidate, "facts", None):
+                        raise ValueError("Fact decomposition returned no facts.")
+
+                    llm_result = candidate
+                    break
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    is_format_issue = isinstance(exc, (ValidationError, json.JSONDecodeError)) or any(
+                        hint in msg for hint in ["parse", "json", "schema", "pydantic", "format", "no facts"]
+                    )
+
+                    if is_format_issue and attempt < max_format_retries:
+                        logger.warning(
+                            "Fact decomposition format issue (attempt %d/%d); retrying: %s",
+                            attempt + 1,
+                            max_format_retries + 1,
+                            exc,
+                        )
+                        continue
+
+                    logger.error("Failed to invoke fact decomposition LLM: %s", exc)
+                    return []
+
+            if not llm_result:
+                logger.error("Fact decomposition failed: no response after retries.")
                 return []
 
             facts = [fact.model_dump() for fact in llm_result.facts]
@@ -825,7 +874,13 @@ def build_graph(
             )
             new_execution = coder_result["executions"][0]
             code = (new_execution.codeact_code or "").strip()
-            updated = ex.model_copy(update={"codeact_code": code})
+            updated = ex.model_copy(
+                update={
+                    "codeact_code": code,
+                    "objective": getattr(new_execution, "objective", "") or "",
+                    "plan": list(getattr(new_execution, "plan", []) or []),
+                }
+            )
 
             if termination_triggered:
                 payload["executions"] = [updated]
@@ -849,50 +904,53 @@ def build_graph(
                         selected_project_key=selected_project_key,
                         container_slot=branch_id,
                     )
-                    for out in gen:
-                        _ensure_run_not_cancelled(f"run_branch_{branch_id}:sandbox_stream")
-                        if termination_triggered:
-                            terminated_early = True
-                            break
-                        if not isinstance(out, dict) or "metadata" not in out:
-                            err = f"Invalid output: {out}"
-                            error_logs_all.append(err)
-                            error_logs_actionable.append(err)
-                            continue
-                        typ = out["metadata"].get("type")
-                        origin = out["metadata"].get("origin")
-                        content = out.get("content", "")
-                        if typ in ("progress", "error"):
-                            messages.append(_progress_msg(str(content), process=typ, origin=origin))
-                            if typ == "error":
-                                error_logs_all.append(str(content))
-                                if origin not in {"stdout", "stderr"}:
-                                    error_logs_actionable.append(str(content))
-                        elif typ == "final":
-                            final_msg = _progress_msg(str(content), process="final", origin=origin)
-                            messages.append(final_msg)
-                        elif typ in ("plot", "csv"):
-                            try:
-                                import json as _json
-
-                                jd = _json.loads(content) if isinstance(content, str) else content
-                            except Exception:
-                                jd = None
-                            if jd:
-                                msg = AIMessage(
-                                    name=f"Executor_{branch_id}",
-                                    content=jd.get("description", "(no description)"),
-                                    additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
-                                )
-                                messages.append(msg)
-                                artefacts.append(msg)
-                            else:
-                                err = f"Failed to parse {typ}: {str(content)[:200]}"
+                    if termination_triggered:
+                        terminated_early = True
+                    else:
+                        for out in gen:
+                            _ensure_run_not_cancelled(f"run_branch_{branch_id}:sandbox_stream")
+                            if termination_triggered:
+                                terminated_early = True
+                                break
+                            if not isinstance(out, dict) or "metadata" not in out:
+                                err = f"Invalid output: {out}"
                                 error_logs_all.append(err)
                                 error_logs_actionable.append(err)
-                                messages.append(_progress_msg(err, process="error"))
-                        else:
-                            messages.append(_progress_msg(str(content), process="progress", origin=origin))
+                                continue
+                            typ = out["metadata"].get("type")
+                            origin = out["metadata"].get("origin")
+                            content = out.get("content", "")
+                            if typ in ("progress", "error"):
+                                messages.append(_progress_msg(str(content), process=typ, origin=origin))
+                                if typ == "error":
+                                    error_logs_all.append(str(content))
+                                    if origin not in {"stdout", "stderr"}:
+                                        error_logs_actionable.append(str(content))
+                            elif typ == "final":
+                                final_msg = _progress_msg(str(content), process="final", origin=origin)
+                                messages.append(final_msg)
+                            elif typ in ("plot", "csv"):
+                                try:
+                                    import json as _json
+
+                                    jd = _json.loads(content) if isinstance(content, str) else content
+                                except Exception:
+                                    jd = None
+                                if jd:
+                                    msg = AIMessage(
+                                        name=f"Executor_{branch_id}",
+                                        content=jd.get("description", "(no description)"),
+                                        additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
+                                    )
+                                    messages.append(msg)
+                                    artefacts.append(msg)
+                                else:
+                                    err = f"Failed to parse {typ}: {str(content)[:200]}"
+                                    error_logs_all.append(err)
+                                    error_logs_actionable.append(err)
+                                    messages.append(_progress_msg(err, process="error"))
+                            else:
+                                messages.append(_progress_msg(str(content), process="progress", origin=origin))
                 except Exception as e:
                     err = f"Sandbox error: {e}"
                     error_logs_all.append(err)
@@ -927,7 +985,18 @@ def build_graph(
                 is_sufficient = False
             else:
                 user_query = state.context.retrospective_query if state.context else ""
-                is_sufficient = _judge_sufficiency(final_msg, user_query)
+                branch_context: List[str] = []
+                if getattr(updated, "objective", ""):
+                    branch_context.append(f"Objective:\n{updated.objective}")
+                if getattr(updated, "plan", None):
+                    try:
+                        plan_lines = [f"{idx + 1}. {step}" for idx, step in enumerate(updated.plan) if isinstance(step, str) and step.strip()]
+                    except Exception:
+                        plan_lines = []
+                    if plan_lines:
+                        branch_context.append("Plan:\n" + "\n".join(plan_lines))
+
+                is_sufficient = _judge_sufficiency(final_msg, user_query, branch_context)
 
             fact_numbers: List[int] = []
             if is_sufficient:

@@ -1,3 +1,4 @@
+/responses/
 /.streamlit/secrets.toml
 **/*.log
 **/__pycache__/

@@ -14,6 +14,66 @@ from utils.context_data import get_instrument_context
 logger = logging.getLogger(__name__)
 
 
+def _log_instrument_cache_summary(instrument_data: dict[str, Any]) -> None:
+    """Log a concise summary of the instrument context cache contents."""
+    if not instrument_data:
+        logger.info("Instrument context cache empty")
+        return
+    types = {}
+    for key, entry in instrument_data.items():
+        if not isinstance(entry, dict):
+            continue
+        types.setdefault(entry.get("type", "UNKNOWN"), 0)
+        types[entry.get("type", "UNKNOWN")] += 1
+    logger.info(
+        "Instrument context loaded: %d instruments across %d types (%s)",
+        len(instrument_data),
+        len(types),
+        ", ".join(f"{k}:{v}" for k, v in sorted(types.items())),
+    )
+
+# 20260115 This function can be circumvented once all instrument contexts are stored in normalized format.
+def _normalize_instrument_context(raw_data: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize instrument context to a TYPE_SUBTYPE keyed dict."""
+    if not raw_data:
+        return {}
+
+    data = raw_data
+    if isinstance(raw_data, dict) and isinstance(raw_data.get("instrument_types"), dict):
+        data = raw_data["instrument_types"]
+
+    normalized: dict[str, Any] = {}
+    if not isinstance(data, dict):
+        return normalized
+
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+
+        instr_type = entry.get("type")
+        instr_subtype = entry.get("subtype")
+
+        if (not instr_type or not instr_subtype) and isinstance(key, str):
+            if "/" in key:
+                parts = key.split("/", 1)
+            elif "_" in key:
+                parts = key.split("_", 1)
+            else:
+                parts = []
+
+            if len(parts) == 2:
+                instr_type = instr_type or parts[0]
+                instr_subtype = instr_subtype or parts[1]
+
+        if isinstance(instr_type, str) and isinstance(instr_subtype, str):
+            entry = {**entry, "type": instr_type, "subtype": instr_subtype}
+            normalized[f"{instr_type}_{instr_subtype}"] = entry
+        else:
+            normalized[str(key)] = entry
+
+    return normalized
+
+
 class InstrumentSelectionItem(BaseModel):
     """Structured representation of an instrument key and its selected fields."""
 
@@ -36,6 +96,9 @@ class InstrumentSelectionList(BaseModel):
         return [item.model_dump() for item in self.items]
 
 def create_instrument_search_context(instrument_data: dict[str, any]) -> str:
+    if not instrument_data:
+        logger.warning("No instrument data available when building search context")
+        return ""
     context_parts = []
     if isinstance(instrument_data, dict):
         context_parts.append("AVAILABLE INSTRUMENTS:")
@@ -61,9 +124,16 @@ def create_instrument_search_context(instrument_data: dict[str, any]) -> str:
                     for f in fields_to_show
                 )
                 context_parts.append(f"  - {instrument_key} ({name} - {subtype}): {purpose_snippet}\n    Fields: {fields_snippet}")
+    logger.debug("Instrument search context assembled with %d instruments", len(instrument_data))
     return "\n".join(context_parts)
 
 def identify_and_filter_instruments(llm: BaseLanguageModel, query: str, instrument_data: dict[str, any], verified_type_subtype: list[str]) -> list[dict[str, any]]:
+    logger.info(
+        "Identify instruments start | query len=%d | verified=%d | instruments=%d",
+        len(query),
+        len(verified_type_subtype),
+        len(instrument_data),
+    )
     context = create_instrument_search_context(instrument_data)
     verified_str = ", ".join(verified_type_subtype) if verified_type_subtype else "None"
 
@@ -114,9 +184,9 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         structured_chain = prompt | structured_llm
         structured_response = structured_chain.invoke(call_inputs)
         result = structured_response.to_dict_list()
-        logger.debug(f"Structured instrument selection produced {len(result)} items")
+        logger.info("Structured instrument selection succeeded with %d items", len(result))
     except Exception as structured_error:
-        logger.warning(f"Structured output generation failed, falling back to raw parsing: {structured_error}")
+        logger.warning("Structured output failed; falling back to raw parsing: %s", structured_error)
 
     if result is None:
         chain = prompt | llm
@@ -130,8 +200,8 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             else:
                 result = json.loads(response.content)
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-            logger.error(f"Raw response content: {repr(response.content)}")
+            logger.error("JSON decode error: %s", e)
+            logger.error("Raw response content: %r", response.content)
             if verified_type_subtype:
                 logger.info("JSON parsing failed but verified instruments exist, using intelligent field selection fallback")
                 default_items = []
@@ -145,7 +215,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
                 return default_items
             return []
         except Exception as e:
-            logger.error(f"Unexpected error parsing identified instruments: {e}")
+            logger.error("Unexpected error parsing identified instruments: %s", e)
             if verified_type_subtype:
                 logger.info("Error occurred but verified instruments exist, using intelligent field selection")
                 fallback_items = []
@@ -180,7 +250,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
                     "database_field_names": relevant_fields
                 })
 
-    logger.debug(f"Successfully parsed {len(valid_items)} instrument items")
+    logger.info("Instrument identification complete with %d valid items", len(valid_items))
     return valid_items
 
 def get_instrument_metadata_from_json(instrument_data: dict[str, any], instr_type: str, instr_subtype: str) -> dict[str, any]:
@@ -226,11 +296,13 @@ def _select_relevant_fields_with_llm(llm: BaseLanguageModel, query: str, type_su
     """
     Use LLM to intelligently select relevant fields based on query context and field metadata
     """
+    logger.debug("Selecting fields via LLM | type_subtype=%s | query=%s", type_subtype, query)
     try:
         instrument_info = instrument_data.get(type_subtype, {})
         fields = instrument_info.get('fields', [])
         
         if not fields:
+            logger.info("No fields available for %s; returning empty selection", type_subtype)
             return []
         
         field_descriptions = []
@@ -299,7 +371,9 @@ If no fields are relevant, return: []"""
             if isinstance(selected_fields, list):
                 # Validate that selected fields exist in the instrument data
                 valid_field_names = [f.get('database_field_name') for f in fields]
-                return [field for field in selected_fields if field in valid_field_names]
+                chosen = [field for field in selected_fields if field in valid_field_names]
+                logger.debug("LLM field selection for %s produced %d valid entries", type_subtype, len(chosen))
+                return chosen
             else:
                 logger.warning(f"LLM returned non-list response: {selected_fields}")
                 return []
@@ -321,7 +395,7 @@ If no fields are relevant, return: []"""
             return _fallback_field_selection(query, fields)
             
     except Exception as e:
-        logger.error(f"Error in LLM field selection: {e}")
+        logger.error("Error in LLM field selection for %s: %s", type_subtype, e)
         # Fallback to basic heuristic
         return _fallback_field_selection(query, fields)
 
@@ -330,6 +404,7 @@ def _fallback_field_selection(query: str, fields: List[Dict[str, Any]]) -> List[
     Fallback field selection using simplified LLM approach when main LLM fails
     Uses a simpler prompt that's more resilient to LLM connection issues
     """
+    logger.info("Fallback field selection triggered | fields=%d", len(fields))
     try:
         # Try a simplified LLM approach first
         return _simple_llm_field_selection(query, fields)
@@ -373,6 +448,7 @@ def _metadata_based_selection(query: str, fields: List[Dict[str, Any]]) -> List[
     Pure metadata-based field selection as ultimate fallback
     Uses semantic matching of query words with field metadata
     """
+    logger.debug("Metadata-based selection | query='%s' | fields=%d", query, len(fields))
     query_words = set(query.lower().split())
     
     # Score each field based on metadata matches
@@ -428,6 +504,7 @@ def _metadata_based_selection(query: str, fields: List[Dict[str, Any]]) -> List[
         top_score = field_scores[0][1]
         selected_fields = [field_name for field_name, score in field_scores 
                           if score >= top_score and score > 2]
+        logger.debug("Metadata selection strong match; returning %s", selected_fields[:2])
         return selected_fields[:2]  # Limit to top 2 fields
     
     # If no strong semantic matches, be more conservative
@@ -457,10 +534,11 @@ def _metadata_based_selection(query: str, fields: List[Dict[str, Any]]) -> List[
     # Return top 1-2 fields based on score
     return selected_fields[:2]
 
-def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
+def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, selected_project_key: str | None = None) -> dict:
     """Database expert agent: Retrieves and updates word_context if no clarification needed.
     Returns a Command to update state in the graph.
     """
+    logger.info("Database expert invoked")
     try:
         clar = []
         if isinstance(state.context, dict):
@@ -468,6 +546,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
         else:
             clar = getattr(state.context, "clarification_requests", []) or []
         if clar:
+            logger.info("Clarifications present; deferring to supervisor")
             return Command(
                 goto="supervisor",
                 update={
@@ -475,9 +554,13 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
                 }
             )
     except Exception:
+        logger.exception("Clarification check failed; continuing")
         pass
 
-    instrument_data = get_instrument_context()
+    logger.debug("Database expert using project key: %s", selected_project_key or "<session_default>")
+    raw_instrument_data = get_instrument_context(selected_project_key)
+    instrument_data = _normalize_instrument_context(raw_instrument_data)
+    _log_instrument_cache_summary(instrument_data)
     if isinstance(state.context, dict):
         query = state.context.get("retrospective_query", "")
         verif_id_info = state.context.get("verif_ID_info") or {}
@@ -486,6 +569,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
         query = getattr(state.context, "retrospective_query", "")
         verif_id_info = getattr(state.context, "verif_ID_info", {}) or {}
         verif_type_info = getattr(state.context, "verif_type_info", []) or []
+    logger.debug("Query extracted: %s", query)
     query_words_list: list[QueryWords] = []
     type_subtype_groups: dict[tuple, list[str]] = {}
     verified_type_subtype: list[str] = []
@@ -508,6 +592,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
                 type_subtype_groups[key_tuple] = []
             type_subtype_groups[key_tuple].append(instr_id)
             _add_verified_type(db_type, db_subtype)
+    logger.info("Verified IDs processed: %d groups", len(type_subtype_groups))
 
     if verif_type_info:
         for type_entry in verif_type_info:
@@ -517,6 +602,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
             subtypes = type_entry.get("subtypes") or []
             for subtype in subtypes:
                 _add_verified_type(instr_type, subtype)
+    logger.info("Verified type/subtype pairs collected: %d", len(verified_type_subtype))
     semantic_filtered = identify_and_filter_instruments(llm, query, instrument_data, verified_type_subtype)
     verified_type_subtype_set = verified_type_subtype_keys
     for item in semantic_filtered:
@@ -557,9 +643,14 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dic
                         query_words=query_words_str,
                         data_sources=[db_sources]
                     ))
+                else:
+                    logger.info("No db_fields selected for %s; skipping QueryWords", key)
+            else:
+                logger.info("No instrument metadata found for key %s", key)
     context_update = {
         "word_context": query_words_list
     }
+    logger.info("Database expert completed with %d word_context entries", len(query_words_list))
 
     return Command(
         goto="supervisor",
