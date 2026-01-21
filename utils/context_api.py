@@ -44,6 +44,21 @@ class ContextAPIClient:
             headers["x-api-key"] = self._api_key
         return headers
 
+    def _encode_query_value(self, value: str, *, encode_dots: bool = False) -> str:
+        if value is None:
+            return ""
+        encoded = quote(str(value), safe="")
+        if encode_dots:
+            encoded = encoded.replace(".", "%2E")
+        return encoded
+
+    def _context_query_url(self, path: str, db_host: str, db_name: str) -> str:
+        host_value = self._encode_query_value(db_host, encode_dots=True)
+        name_value = self._encode_query_value(db_name)
+        key_value = self._encode_query_value(self._api_key)
+        query = f"db_host={host_value}&db_name={name_value}&api_key={key_value}"
+        return f"{self._base_url.rstrip('/')}/{path.lstrip('/')}?{query}"
+
     def check_health(self) -> bool:
         """Return True if the API reports a healthy status."""
         try:
@@ -81,19 +96,21 @@ class ContextAPIClient:
         except Exception as exc:  # noqa: BLE001
             raise ContextAPIError(f"Unable to parse project list: {exc}") from exc
 
-    def fetch_instrument_context(self, db_name: str) -> Dict[str, Any]:
+    def fetch_instrument_context(self, db_host: str, db_name: str) -> Dict[str, Any]:
         """Retrieve the instrument context JSON for the given database."""
-        safe_name = quote(db_name, safe="")
-        headers = self._headers()
+        safe_host = self._encode_query_value(db_host, encode_dots=True)
+        safe_name = self._encode_query_value(db_name)
+        headers = self._headers(include_auth=False)
         LOGGER.debug(
-            "Fetching instrument context for db=%s (encoded=%s); auth header=%s",
+            "Fetching instrument context for host=%s (encoded=%s) db=%s (encoded=%s)",
+            db_host,
+            safe_host,
             db_name,
             safe_name,
-            "present" if "x-api-key" in headers else "missing",
         )
         try:
             response = self._session.get(
-                self._url(f"api/v1/context/{safe_name}/json"),
+                self._context_query_url("json", db_host, db_name),
                 headers=headers,
                 timeout=self._timeout,
             )
@@ -107,19 +124,21 @@ class ContextAPIClient:
         except Exception as exc:  # noqa: BLE001
             raise ContextAPIError(f"Unable to parse instrument context: {exc}") from exc
 
-    def fetch_project_nl_context(self, db_name: str) -> Optional[str]:
+    def fetch_project_nl_context(self, db_host: str, db_name: str) -> Optional[str]:
         """Retrieve the natural-language project context string for the database."""
-        safe_name = quote(db_name, safe="")
-        headers = self._headers()
+        safe_host = self._encode_query_value(db_host, encode_dots=True)
+        safe_name = self._encode_query_value(db_name)
+        headers = self._headers(include_auth=False)
         LOGGER.debug(
-            "Fetching project NL context for db=%s (encoded=%s); auth header=%s",
+            "Fetching project NL context for host=%s (encoded=%s) db=%s (encoded=%s)",
+            db_host,
+            safe_host,
             db_name,
             safe_name,
-            "present" if "x-api-key" in headers else "missing",
         )
         try:
             response = self._session.get(
-                self._url(f"api/v1/context/{safe_name}/nl-context"),
+                self._context_query_url("nl-context", db_host, db_name),
                 headers=headers,
                 timeout=self._timeout,
             )

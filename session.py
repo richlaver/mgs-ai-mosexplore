@@ -51,9 +51,11 @@ def setup_session() -> None:
     if "completion_strategy" not in st.session_state:
         st.session_state.completion_strategy = "Intelligent"
     if "min_successful_responses" not in st.session_state:
-        st.session_state.min_successful_responses = 3
+        # st.session_state.min_successful_responses = 3
+        st.session_state.min_successful_responses = 2
     if "min_explained_variance" not in st.session_state:
-        st.session_state.min_explained_variance = 0.7
+        # st.session_state.min_explained_variance = 0.7
+        st.session_state.min_explained_variance = 0.6
     if "num_completions_before_response" not in st.session_state:
         st.session_state.num_completions_before_response = 2
     if "setup_complete" not in st.session_state:
@@ -61,8 +63,8 @@ def setup_session() -> None:
     if "need_rebuild_graph" not in st.session_state:
         st.session_state.need_rebuild_graph = False
     if "selected_project_key" not in st.session_state:
-        st.session_state.selected_project_key = "project_data.18_167_246_137__db_lpp"
-        # st.session_state.selected_project_key = "project_data.cp03monitoringlive_cmvxgc0aonjr_ap_southeast_1_rds_amazonaws_com__db_cp03monitoring"
+        # st.session_state.selected_project_key = "project_data.18_167_246_137__db_lpp"
+        st.session_state.selected_project_key = "project_data.cp03monitoringlive_cmvxgc0aonjr_ap_southeast_1_rds_amazonaws_com__db_cp03monitoring"
     if "project_context_cache" not in st.session_state:
         st.session_state.project_context_cache = {}
     if "container_warm" not in st.session_state:

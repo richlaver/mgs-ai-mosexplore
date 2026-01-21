@@ -295,7 +295,7 @@ def ensure_project_context(
 
     if fetch_instrument:
         try:
-            payload["instrument_context"] = client.fetch_instrument_context(db_name) or {}
+            payload["instrument_context"] = client.fetch_instrument_context(host, db_name) or {}
             payload["_instrument_loaded"] = True
             _log_context_snapshot(
                 display_name,
@@ -316,7 +316,7 @@ def ensure_project_context(
 
     if fetch_project_specific:
         try:
-            payload["project_specific_context"] = client.fetch_project_nl_context(db_name) or ""
+            payload["project_specific_context"] = client.fetch_project_nl_context(host, db_name) or ""
             payload["_project_context_loaded"] = True
             _log_context_snapshot(
                 display_name,
