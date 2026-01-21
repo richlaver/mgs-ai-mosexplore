@@ -180,10 +180,11 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
 
     result: list[dict[str, Any]] | None = None
     try:
-        structured_llm = llm.with_structured_output(InstrumentSelectionList)
-        structured_chain = prompt | structured_llm
-        structured_response = structured_chain.invoke(call_inputs)
-        result = structured_response.to_dict_list()
+        # structured_llm = llm.with_structured_output(InstrumentSelectionList)
+        # structured_chain = prompt | structured_llm
+        # structured_response = structured_chain.invoke(call_inputs)
+        # result = structured_response.to_dict_list()
+        result = [] # Comment out to revert to LLM output
         logger.info("Structured instrument selection succeeded with %d items", len(result))
     except Exception as structured_error:
         logger.warning("Structured output failed; falling back to raw parsing: %s", structured_error)
