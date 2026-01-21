@@ -582,6 +582,11 @@ def render_initial_ui() -> None:
                     help="Select which MissionOS user to query as.",
                     on_change=_on_user_change,
                 )
+        st.toggle(
+            label="Show Sandbox Logs",
+            key="show_sandbox_stream_logs",
+            help="Toggle streaming of sandbox stdout/stderr in intermediate steps.",
+        )
         plan_keys = list(parallel_plans.keys())
         st.selectbox(
             label="Subscription Plan",

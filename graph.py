@@ -921,7 +921,10 @@ def build_graph(
                             origin = out["metadata"].get("origin")
                             content = out.get("content", "")
                             if typ in ("progress", "error"):
-                                messages.append(_progress_msg(str(content), process=typ, origin=origin))
+                                if origin in {"stdout", "stderr"} and not st.session_state.get("show_sandbox_stream_logs", False):
+                                    pass
+                                else:
+                                    messages.append(_progress_msg(str(content), process=typ, origin=origin))
                                 if typ == "error":
                                     error_logs_all.append(str(content))
                                     if origin not in {"stdout", "stderr"}:
