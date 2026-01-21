@@ -397,7 +397,10 @@ def _enter_impl(self):
             if isinstance(parsed, dict):
                 for key, cfg in parsed.items():
                     if isinstance(cfg, dict):
-                        self.project_configs[f"project_data.{key}"] = cfg
+                        from utils.project_selection import make_project_key
+                        derived_key = make_project_key(str(cfg.get("db_host", "")), str(cfg.get("db_name", "")))
+                        resolved_key = derived_key or str(key)
+                        self.project_configs[f"project_data.{resolved_key}"] = cfg
             logger.info("Loaded %d project configs from PROJECT_DATA_JSON", len(self.project_configs))
         except Exception as e:
             logger.warning("Failed to parse PROJECT_DATA_JSON: %s", e)

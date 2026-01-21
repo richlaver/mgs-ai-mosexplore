@@ -278,24 +278,42 @@ progress_messages = {
 }
 users = [
     {
-        'id': 1,
-        'display_name': 'Super Admin' 
+        'project_key': 'project_data.cp03monitoringlive_cmvxgc0aonjr_ap_southeast_1_rds_amazonaws_com__db_cp03monitoring',
+        'users': [
+            {
+                'id': 1,
+                'display_name': 'Super Admin'
+            },
+            {
+                'id': 200,
+                'display_name': 'User (Osvaldo Moro)'
+            },
+            {
+                'id': 26,
+                'display_name': 'MGS Developer (Charuthu)'
+            },
+            {
+                'id': 185,
+                'display_name': 'User (Tran Nguyen Quan)'
+            },
+            {
+                'id': 7777777,
+                'display_name': 'Not-Existent User'
+            },
+        ]
     },
     {
-        'id': 200,
-        'display_name': 'User (Osvaldo Moro)'
-    },
-    {
-        'id': 26,
-        'display_name': 'MGS Developer (Charuthu)' 
-    },
-    {
-        'id': 185,
-        'display_name': 'User (Tran Nguyen Quan)' 
-    },
-    {
-        'id': 7777777,
-        'display_name': 'Not-Existent User' 
+        'project_key': 'project_data.18_167_246_137__db_lpp',
+        'users': [
+            {
+                'id': 1,
+                'display_name': 'Super Admin'
+            },
+            {
+                'id': 241,
+                'display_name': 'Caim Chan'
+            },
+        ]
     },
 ]
 table_info = [

@@ -1205,7 +1205,7 @@ class MapPlotInput(BaseModel):
         ...,
         description="End datetime (or single time for 'value_at_time'). Must be after start_time if provided."
     )
-    buffer_period_hours: Optional[int] = Field(
+    buffer_period_hours: Optional[float] = Field(
         None,
         description="Hours before specified times to search for nearest reading."
     )
@@ -1246,7 +1246,12 @@ class MapPlotInput(BaseModel):
 
     @validator('buffer_period_hours', pre=True)
     def _coerce_buffer(cls, v):
-        return v if v is not None else None
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
 
     @validator('radius_meters', pre=True)
     def _coerce_radius(cls, v):
@@ -1277,7 +1282,7 @@ class MapPlotInput(BaseModel):
         if period_hours is not None:
             default_hours = min(period_hours / 2, max_hours)
 
-        def _normalize(val: Optional[Union[int, float]]) -> float:
+        def _normalize(val: Optional[float]) -> float:
             if val is None:
                 return default_hours
             try:
@@ -1357,7 +1362,7 @@ Input schema:
 - plot_type: String, either 'value_at_time' or 'change_over_period'.
 - start_time: Optional datetime string in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 August 2025 12:00:00 AM'), required for 'change_over_period'.
 - end_time: Datetime string in same format (e.g., '31 August 2025 11:59:59 PM'). Required.
-- buffer_period_hours: Optional integer, buffer period in hours.
+- buffer_period_hours: Optional float, buffer period in hours.
 - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa').
  - series: List of objects with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str, e.g., 'data1'), 'measured_quantity_name' (str, e.g., 'Pressure'), 'abbreviated_unit' (str, e.g., 'kPa'). NOTE: When data_type='review_levels' ONLY the FIRST series element is used to derive and plot review statuses; additional series entries are ignored.
 - center_instrument_id: Optional string, instrument ID to center the map.
@@ -1366,7 +1371,7 @@ Input schema:
 - radius_meters: Optional float, radius in meters for map extent (default 500).
 - exclude_instrument_ids: Optional list of strings, instrument IDs to exclude.
 
-Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31 August 2025 11:59:59 PM", "buffer_period_hours": 72, "series": [{"instrument_type": "sensor", "instrument_subtype": "pressure", "database_field_name": "data1", "measured_quantity_name": "Pressure", "abbreviated_unit": "kPa"}], "radius_meters": 1000.0}
+Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31 August 2025 11:59:59 PM", "buffer_period_hours": 72.0, "series": [{"instrument_type": "sensor", "instrument_subtype": "pressure", "database_field_name": "data1", "measured_quantity_name": "Pressure", "abbreviated_unit": "kPa"}], "radius_meters": 1000.0}
 """
     args_schema: Type[MapPlotInput] = MapPlotInput
     response_format: str = "content"
@@ -2378,7 +2383,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
         plot_type: str,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
-        buffer_period_hours: Optional[int] = None,
+        buffer_period_hours: Optional[float] = None,
         series: Optional[List[SeriesDict]] = None,
         center_instrument_id: Optional[str] = None,
         center_easting: Optional[float] = None,

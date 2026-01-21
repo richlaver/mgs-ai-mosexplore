@@ -1,3 +1,8 @@
+map_plot_*
+run_*
+/nl_context/
+/output/
+/outputs/
 /responses/
 /.streamlit/secrets.toml
 **/*.log

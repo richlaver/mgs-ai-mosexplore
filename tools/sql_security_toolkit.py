@@ -11,6 +11,7 @@ from utils.run_cancellation import get_active_run_controller, RunCancelledError
 import sqlparse
 from collections import deque
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ Only the first statement will be executed. Discarded statements:
             len(original_query),
             self.user_id,
             self.global_hierarchy_access,
-            _truncate(original_query, 300)
+                original_query
         )
         # First strip any markdown formatting that might wrap a JSON string
         if query.startswith("```"):
@@ -222,218 +223,228 @@ Only the first statement will be executed. Discarded statements:
             return None
 
         def extend_query(query: str) -> str:
-            """Dynamically rewrite the query to add JOIN and WHERE EXISTS clauses for user permissions."""
-            logging.debug(f'Original query: {query}')
-            query = query.rstrip(';')
-            logger.info("[GeneralSQLQueryTool] Extending query for permissions: %s", _truncate(query, 300))
-            
-            table_aliases = get_all_tables(query)
-            if not table_aliases:
-                logging.debug('Didn\'t find any tables in the query. Returning the original query.')
+            """Apply deterministic permissions filtering without rewriting joins."""
+            logging.debug(f"Original query: {query}")
+            query = query.rstrip().rstrip(";")
+            logger.info("[GeneralSQLQueryTool] Applying permissions filter: %s", _truncate(query, 300))
+
+            parsed = sqlparse.parse(query)
+            if not parsed:
                 return query
+            statement = parsed[0]
 
-            # Check if location, contracts, projects, or sites tables are in the query
-            location_alias = None
-            contracts_alias = None
-            projects_alias = None
-            sites_alias = None
-            for table_name, alias in table_aliases:
-                if table_name == "location":
-                    location_alias = alias
-                elif table_name == "contracts":
-                    contracts_alias = alias
-                elif table_name == "projects":
-                    projects_alias = alias
-                elif table_name == "sites":
-                    sites_alias = alias
-
-            parsed = sqlparse.parse(query)[0]
-            where_clause = None
-            where_index = None
-            for i, token in enumerate(parsed.tokens):
-                if token.ttype is sqlparse.tokens.Keyword and token.value.upper() == 'WHERE':
-                    where_clause = token
-                    where_index = i
-                    for j in range(i + 1, len(parsed.tokens)):
-                        if parsed.tokens[j].ttype is sqlparse.tokens.Keyword and parsed.tokens[j].value.upper() in ('GROUP', 'ORDER', 'LIMIT'):
+            def _select_clause(stmt: sqlparse.sql.Statement) -> str:
+                in_select = False
+                parts: List[str] = []
+                for token in stmt.tokens:
+                    if token.ttype is sqlparse.tokens.DML and token.value.upper() == "SELECT":
+                        in_select = True
+                        continue
+                    if in_select:
+                        if token.ttype is sqlparse.tokens.Keyword and token.value.upper() == "FROM":
                             break
-                        where_clause = ''.join(str(t) for t in parsed.tokens[i:j + 1])
-                    break
+                        parts.append(str(token))
+                return "".join(parts)
 
-            tokens = list(parsed.tokens)
-            # Set default alias for location if not already set
-            location_alias = location_alias or "location"
-
-            # Define the EXISTS clause for permission checks
-            exists_clause = (
-                f"EXISTS ("
-                f"SELECT 1 "
-                f"FROM user_access_groups_permissions uagp "
-                f"JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
-                f"JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
-                f"JOIN geo_12_users u ON uagu.user_id = u.id "
-                f"WHERE u.id = {self.user_id} "
-                f"AND uagu.user_deleted = 0 "
-                f"AND u.prohibit_portal_access NOT IN (1, 2, 3) "
-                f"AND ("
-                f"(uagp.project = 0 OR uagp.project = {location_alias}.project_id) "
-                f"AND (uagp.contract = 0 OR uagp.contract = {location_alias}.contract_id OR uagp.project = 0) "
-                f"AND (uagp.site = 0 OR uagp.site = {location_alias}.site_id OR uagp.contract = 0 OR uagp.project = 0)"
-                f")"
-                f")"
-            )
-
-            # Define valid target tables that exist in the table_relationship_graph
-            valid_targets = [t for t in ["location", "contracts", "projects", "sites"] if t in self.table_relationship_graph]
-
-            if location_alias and location_alias != "location":
-                # Location is in the query with a custom alias
-                join_clauses = [
-                    f" LEFT JOIN projects p ON {location_alias}.project_id = p.id ",
-                    f" LEFT JOIN contracts c ON {location_alias}.contract_id = c.id ",
-                    f" LEFT JOIN sites s ON {location_alias}.site_id = s.id ",
-                ]
-                if where_clause:
-                    new_where = f"{where_clause} AND {exists_clause}"
-                    tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
-                else:
-                    new_where = f" WHERE {exists_clause}"
-                    tokens = tokens + [new_where]
-                tokens = tokens + join_clauses
-            elif contracts_alias:
-                # Contracts is in the query
-                join_clauses = [
-                    f" LEFT JOIN projects p ON {contracts_alias}.project_id = p.id ",
-                    f" LEFT JOIN location ON {contracts_alias}.id = location.contract_id ",
-                    f" LEFT JOIN sites s ON location.site_id = s.id ",
-                ]
-                if where_clause:
-                    new_where = f"{where_clause} AND {exists_clause}"
-                    tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
-                else:
-                    new_where = f" WHERE {exists_clause}"
-                    tokens = tokens + [new_where]
-                tokens = tokens + join_clauses
-            elif projects_alias:
-                # Projects is in the query
-                join_clauses = [
-                    f" LEFT JOIN contracts c ON {projects_alias}.id = c.project_id ",
-                    f" LEFT JOIN location ON c.id = location.contract_id ",
-                    f" LEFT JOIN sites s ON location.site_id = s.id ",
-                ]
-                if where_clause:
-                    new_where = f"{where_clause} AND {exists_clause}"
-                    tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
-                else:
-                    new_where = f" WHERE {exists_clause}"
-                    tokens = tokens + [new_where]
-                tokens = tokens + join_clauses
-            elif sites_alias:
-                # Sites is in the query
-                join_clauses = [
-                    f" LEFT JOIN contracts c ON {sites_alias}.contract_id = c.id ",
-                    f" LEFT JOIN projects p ON c.project_id = p.id ",
-                    f" LEFT JOIN location ON {sites_alias}.id = location.site_id ",
-                ]
-                if where_clause:
-                    new_where = f"{where_clause} AND {exists_clause}"
-                    tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
-                else:
-                    new_where = f" WHERE {exists_clause}"
-                    tokens = tokens + [new_where]
-                tokens = tokens + join_clauses
-            else:
-                # Find path to location, contracts, projects, or sites
-                min_distance = float('inf')
-                selected_path = None
-                selected_alias = None
-                target_table = None
-                for table_name, alias in table_aliases:
-                    for target in valid_targets:
-                        path = find_shortest_path(table_name, target)
-                        if path and len(path) - 1 < min_distance:
-                            min_distance = len(path) - 1
-                            selected_path = path
-                            selected_alias = alias
-                            target_table = target
-
-                if not selected_path:
-                    logging.debug('No table connects to location, contracts, projects, or sites in table_relationship_graph. Returning original query.')
-                    return query
-
-                join_clauses = []
-                prev_table = selected_alias
-                for table, src_col, tgt_col in selected_path[1:]:
-                    join_clauses.append(f" LEFT JOIN {table} ON {prev_table}.{src_col} = {table}.{tgt_col} ")
-                    prev_table = table
-
-                if target_table == "location":
-                    join_clauses.extend([
-                        f" LEFT JOIN projects p ON {prev_table}.project_id = p.id ",
-                        f" LEFT JOIN contracts c ON {prev_table}.contract_id = c.id ",
-                        f" LEFT JOIN sites s ON {prev_table}.site_id = s.id ",
-                    ])
-                elif target_table == "contracts":
-                    join_clauses.extend([
-                        f" LEFT JOIN projects p ON {prev_table}.project_id = p.id ",
-                        f" LEFT JOIN location ON {prev_table}.id = location.contract_id ",
-                        f" LEFT JOIN sites s ON location.site_id = s.id ",
-                    ])
-                elif target_table == "projects":
-                    join_clauses.extend([
-                        f" LEFT JOIN contracts c ON {prev_table}.id = c.project_id ",
-                        f" LEFT JOIN location ON c.id = location.contract_id ",
-                        f" LEFT JOIN sites s ON location.site_id = s.id ",
-                    ])
-                elif target_table == "sites":
-                    join_clauses.extend([
-                        f" LEFT JOIN contracts c ON {prev_table}.contract_id = c.id ",
-                        f" LEFT JOIN projects p ON c.project_id = p.id ",
-                        f" LEFT JOIN location ON {prev_table}.id = location.site_id ",
-                    ])
-
-                from_index = None
-                table_index = None
-                for i, token in enumerate(parsed.tokens):
-                    if token.ttype is sqlparse.tokens.Keyword and token.value.upper() == 'FROM':
-                        from_index = i
-                        for j in range(i + 1, len(parsed.tokens)):
-                            if isinstance(tokens[j], sqlparse.sql.Identifier):
-                                table_index = j
-                                break
-                            elif isinstance(tokens[j], sqlparse.sql.IdentifierList):
-                                table_index = j
-                                break
-                            elif tokens[j].ttype is sqlparse.tokens.Keyword and tokens[j].value.upper().startswith('JOIN'):
-                                break
-                        break
-                if from_index is None or table_index is None:
-                    logging.error("Invalid FROM clause in query")
-                    raise ValueError("Invalid FROM clause")
-
-                insert_index = table_index + 1
-                logging.debug(f'Inserting join clauses at index {insert_index}: {join_clauses}')
-                tokens = (
-                    tokens[:insert_index] +
-                    [join_clause for join_clause in join_clauses] +
-                    tokens[insert_index:]
+            def _permission_clause_for_location(location_ref: str) -> str:
+                return (
+                    "EXISTS ("
+                    "SELECT 1 "
+                    "FROM user_access_groups_permissions uagp "
+                    "JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                    "JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                    "JOIN geo_12_users u ON uagu.user_id = u.id "
+                    f"WHERE u.id = {self.user_id} "
+                    "AND uagu.user_deleted = 0 "
+                    "AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                    "AND ("
+                    f"(uagp.project = 0 OR uagp.project = {location_ref}.project_id) "
+                    f"AND (uagp.contract = 0 OR uagp.contract = {location_ref}.contract_id OR uagp.project = 0) "
+                    f"AND (uagp.site = 0 OR uagp.site = {location_ref}.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                    ")"
+                    ")"
                 )
 
-                if where_clause:
-                    new_where = f"{where_clause} AND {exists_clause}"
-                    tokens = tokens[:where_index] + [new_where] + tokens[where_index + 1:]
-                else:
-                    new_where = f" WHERE {exists_clause}"
-                    tokens = tokens + [new_where]
+            def _permission_clause_for_instr_id(instr_id_ref: str) -> str:
+                return (
+                    "EXISTS ("
+                    "SELECT 1 "
+                    "FROM instrum i_perm "
+                    "JOIN location l_perm ON i_perm.location_id = l_perm.id "
+                    "JOIN user_access_groups_permissions uagp ON 1=1 "
+                    "JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                    "JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                    "JOIN geo_12_users u ON uagu.user_id = u.id "
+                    f"WHERE i_perm.instr_id = {instr_id_ref} "
+                    f"AND u.id = {self.user_id} "
+                    "AND uagu.user_deleted = 0 "
+                    "AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                    "AND ("
+                    "(uagp.project = 0 OR uagp.project = l_perm.project_id) "
+                    "AND (uagp.contract = 0 OR uagp.contract = l_perm.contract_id OR uagp.project = 0) "
+                    "AND (uagp.site = 0 OR uagp.site = l_perm.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                    ")"
+                    ")"
+                )
 
-            extended_query = "".join(str(token) for token in tokens)
-            logging.debug(f'Returning extended query: {extended_query}')
-            logger.info(
-                "[GeneralSQLQueryTool] Extended query (len=%d): %s",
-                len(extended_query),
-                _truncate(extended_query, 300)
+            def _allowed_instr_subquery() -> str:
+                return (
+                    "SELECT DISTINCT i_perm.instr_id "
+                    "FROM instrum i_perm "
+                    "JOIN location l_perm ON i_perm.location_id = l_perm.id "
+                    "JOIN user_access_groups_permissions uagp ON 1=1 "
+                    "JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                    "JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                    "JOIN geo_12_users u ON uagu.user_id = u.id "
+                    f"WHERE u.id = {self.user_id} "
+                    "AND uagu.user_deleted = 0 "
+                    "AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                    "AND ("
+                    "(uagp.project = 0 OR uagp.project = l_perm.project_id) "
+                    "AND (uagp.contract = 0 OR uagp.contract = l_perm.contract_id OR uagp.project = 0) "
+                    "AND (uagp.site = 0 OR uagp.site = l_perm.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                    ")"
+                )
+
+            def _append_where_predicate(stmt: sqlparse.sql.Statement, predicate: str) -> str:
+                where_token = None
+                for token in stmt.tokens:
+                    if isinstance(token, sqlparse.sql.Where):
+                        where_token = token
+                        break
+                if where_token:
+                    new_where = str(where_token).rstrip() + " AND " + predicate
+                    rendered = []
+                    for token in stmt.tokens:
+                        if token is where_token:
+                            rendered.append(new_where)
+                        else:
+                            rendered.append(str(token))
+                    return "".join(rendered)
+
+                insert_at = len(stmt.tokens)
+                for i, token in enumerate(stmt.tokens):
+                    if token.ttype is sqlparse.tokens.Keyword and token.value.upper() in {"GROUP", "ORDER", "LIMIT", "HAVING"}:
+                        insert_at = i
+                        break
+                rendered = []
+                for i, token in enumerate(stmt.tokens):
+                    if i == insert_at:
+                        rendered.append(" WHERE " + predicate + " ")
+                    rendered.append(str(token))
+                if insert_at == len(stmt.tokens):
+                    rendered.append(" WHERE " + predicate + " ")
+                return "".join(rendered)
+
+            select_clause = _select_clause(statement)
+            select_lower = select_clause.lower()
+            output_instr_col = None
+            if re.search(r"\binstrument_id\b", select_lower):
+                output_instr_col = "instrument_id"
+            elif re.search(r"\binstr_id\b", select_lower):
+                output_instr_col = "instr_id"
+
+            raw = str(statement)
+
+            if output_instr_col:
+                allowed_instr = _allowed_instr_subquery()
+                wrapped = (
+                    "SELECT __perm_q.* FROM (" + query + ") AS __perm_q "
+                    "JOIN (" + allowed_instr + ") AS __perm_allow "
+                    f"ON __perm_allow.instr_id = __perm_q.{output_instr_col}"
+                )
+                logger.info("[GeneralSQLQueryTool] Applied outer permissions join via %s", output_instr_col)
+                return wrapped
+
+            if re.search(r"\bas\s+instrument_id\b", raw, re.IGNORECASE):
+                allowed_instr = _allowed_instr_subquery()
+                wrapped = (
+                    "SELECT __perm_q.* FROM (" + query + ") AS __perm_q "
+                    "JOIN (" + allowed_instr + ") AS __perm_allow "
+                    "ON __perm_allow.instr_id = __perm_q.instrument_id"
+                )
+                logger.info("[GeneralSQLQueryTool] Applied outer permissions join via instrument_id (projected)")
+                return wrapped
+            if re.search(r"\bas\s+instr_id\b", raw, re.IGNORECASE):
+                allowed_instr = _allowed_instr_subquery()
+                wrapped = (
+                    "SELECT __perm_q.* FROM (" + query + ") AS __perm_q "
+                    "JOIN (" + allowed_instr + ") AS __perm_allow "
+                    "ON __perm_allow.instr_id = __perm_q.instr_id"
+                )
+                logger.info("[GeneralSQLQueryTool] Applied outer permissions join via instr_id (projected)")
+                return wrapped
+
+            # No instrument identifier in output; attempt correlated filtering using known table aliases.
+            alias_pattern = re.compile(
+                r"\b(from|join)\s+([`\"\[]?[\w\.]+[`\"\]]?)\s+(?:as\s+)?([`\"\[]?[\w]+[`\"\]]?)",
+                re.IGNORECASE,
             )
-            return extended_query
+            table_aliases: Dict[str, str] = {}
+            for _, table, alias in alias_pattern.findall(raw):
+                clean_table = table.strip("`\"[]").split(".")[-1].lower()
+                clean_alias = alias.strip("`\"[]")
+                table_aliases[clean_table] = clean_alias
+
+            if "location" in table_aliases:
+                predicate = _permission_clause_for_location(table_aliases["location"])
+                logger.info("[GeneralSQLQueryTool] Applied permissions using location alias %s", table_aliases["location"])
+                return _append_where_predicate(statement, predicate)
+
+            if "instrum" in table_aliases:
+                instr_alias = table_aliases["instrum"]
+                predicate = (
+                    "EXISTS (SELECT 1 FROM location l_perm "
+                    "JOIN user_access_groups_permissions uagp ON 1=1 "
+                    "JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                    "JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                    "JOIN geo_12_users u ON uagu.user_id = u.id "
+                    f"WHERE l_perm.id = {instr_alias}.location_id "
+                    f"AND u.id = {self.user_id} "
+                    "AND uagu.user_deleted = 0 "
+                    "AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                    "AND ("
+                    "(uagp.project = 0 OR uagp.project = l_perm.project_id) "
+                    "AND (uagp.contract = 0 OR uagp.contract = l_perm.contract_id OR uagp.project = 0) "
+                    "AND (uagp.site = 0 OR uagp.site = l_perm.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                    ")"
+                    ")"
+                )
+                logger.info("[GeneralSQLQueryTool] Applied permissions using instrum alias %s", instr_alias)
+                return _append_where_predicate(statement, predicate)
+
+            alias_instr_match = re.search(r"\b([A-Za-z_][\w]*)\.instr_id\b", raw)
+            if alias_instr_match:
+                instr_alias = alias_instr_match.group(1)
+                predicate = _permission_clause_for_instr_id(f"{instr_alias}.instr_id")
+                logger.info("[GeneralSQLQueryTool] Applied permissions using instr_id alias %s", instr_alias)
+                return _append_where_predicate(statement, predicate)
+
+            for table_name, col in (("contracts", "contract_id"), ("projects", "project_id"), ("sites", "site_id")):
+                if table_name in table_aliases:
+                    t_alias = table_aliases[table_name]
+                    predicate = (
+                        "EXISTS (SELECT 1 FROM location l_perm "
+                        "JOIN user_access_groups_permissions uagp ON 1=1 "
+                        "JOIN user_access_groups uag ON uagp.user_group_id = uag.id "
+                        "JOIN user_access_groups_users uagu ON uag.id = uagu.group_id "
+                        "JOIN geo_12_users u ON uagu.user_id = u.id "
+                        f"WHERE l_perm.{col} = {t_alias}.id "
+                        f"AND u.id = {self.user_id} "
+                        "AND uagu.user_deleted = 0 "
+                        "AND u.prohibit_portal_access NOT IN (1, 2, 3) "
+                        "AND ("
+                        "(uagp.project = 0 OR uagp.project = l_perm.project_id) "
+                        "AND (uagp.contract = 0 OR uagp.contract = l_perm.contract_id OR uagp.project = 0) "
+                        "AND (uagp.site = 0 OR uagp.site = l_perm.site_id OR uagp.contract = 0 OR uagp.project = 0)"
+                        ")"
+                        ")"
+                    )
+                    logger.info("[GeneralSQLQueryTool] Applied permissions using %s alias %s", table_name, t_alias)
+                    return _append_where_predicate(statement, predicate)
+
+            logger.warning("[GeneralSQLQueryTool] Unable to apply permissions filter to query; executing unmodified")
+            return query
 
         def process_results(results):
             """Process query results, handling empty results consistently."""
@@ -453,10 +464,12 @@ Only the first statement will be executed. Discarded statements:
                 controller.raise_if_cancelled("sql-tool:before-exec")
             if self.global_hierarchy_access:
                 logger.info("[GeneralSQLQueryTool] Global hierarchy access granted; executing original query")
+                logger.info("[GeneralSQLQueryTool] Executing query full: %s", query)
                 results = self.db.run_no_throw(query, include_columns=True)
             else:
                 extended_query = extend_query(query=query)
-                logger.info("[GeneralSQLQueryTool] Executing extended query")
+                logger.info("[GeneralSQLQueryTool] Executing permissions-filtered query")
+                logger.info("[GeneralSQLQueryTool] Executing query full: %s", extended_query)
                 results = self.db.run_no_throw(extended_query, include_columns=True)
 
             if isinstance(results, list):

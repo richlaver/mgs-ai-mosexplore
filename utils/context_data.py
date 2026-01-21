@@ -154,7 +154,13 @@ def _get_api_client() -> Optional[ContextAPIClient]:
 
 
 def _select_project(projects: List[Dict[str, Any]], host: str, database_name: str) -> Optional[Dict[str, Any]]:
-    matches = [p for p in projects if str(p.get("host")) == host and str(p.get("database_name")) == database_name]
+    matches = [
+        p
+        for p in projects
+        if str(p.get("host")) == host
+        and str(p.get("database") or p.get("database_name") or p.get("db_name") or p.get("project_name"))
+        == database_name
+    ]
     if not matches:
         return None
     matches.sort(key=lambda item: _parse_version(item.get("latest_version")), reverse=True)
@@ -278,20 +284,6 @@ def ensure_project_context(
         return _store_payload(project_key, _empty_payload())
 
     project_name = _project_name(entry)
-    if not project_name:
-        LOGGER.error("Matching context entry missing project name for host=%s db=%s", host, db_name)
-        _toast("Context entry missing project name", ":material/error:", quiet)
-        if cached_payload and not strict:
-            _log_context_snapshot(
-                display_name,
-                cached_payload,
-                source="cache-fallback",
-                log_instrument=need_instrument,
-                log_project_ctx=need_project_ctx,
-            )
-            return cached_payload
-        return _store_payload(project_key, _empty_payload())
-
     payload = dict(cached_payload) if cached_payload else _empty_payload()
     payload.update({
         "project_name": project_name,
@@ -303,7 +295,7 @@ def ensure_project_context(
 
     if fetch_instrument:
         try:
-            payload["instrument_context"] = client.fetch_instrument_context(project_name) or {}
+            payload["instrument_context"] = client.fetch_instrument_context(db_name) or {}
             payload["_instrument_loaded"] = True
             _log_context_snapshot(
                 display_name,
@@ -317,14 +309,14 @@ def ensure_project_context(
             else:
                 _toast(f"Instrument context loaded for {display_name}", ":material/precision_manufacturing:", quiet)
         except ContextAPIError as exc:
-            LOGGER.error("Instrument context fetch failed for %s: %s", project_name, exc)
+            LOGGER.error("Instrument context fetch failed for db=%s: %s", db_name, exc)
             _toast("Instrument context unavailable; using fallback", ":material/error:", quiet)
     else:
         payload["_instrument_loaded"] = payload.get("_instrument_loaded", False)
 
     if fetch_project_specific:
         try:
-            payload["project_specific_context"] = client.fetch_project_nl_context(project_name) or ""
+            payload["project_specific_context"] = client.fetch_project_nl_context(db_name) or ""
             payload["_project_context_loaded"] = True
             _log_context_snapshot(
                 display_name,
@@ -338,7 +330,7 @@ def ensure_project_context(
             else:
                 _toast(f"Project insights loaded for {display_name}", ":material/menu_book:", quiet)
         except ContextAPIError as exc:
-            LOGGER.error("Project NL context fetch failed for %s: %s", project_name, exc)
+            LOGGER.error("Project NL context fetch failed for db=%s: %s", db_name, exc)
             _toast("Project insights unavailable; using fallback", ":material/error:", quiet)
     else:
         payload["_project_context_loaded"] = payload.get("_project_context_loaded", False)

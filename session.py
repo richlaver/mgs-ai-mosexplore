@@ -61,8 +61,8 @@ def setup_session() -> None:
     if "need_rebuild_graph" not in st.session_state:
         st.session_state.need_rebuild_graph = False
     if "selected_project_key" not in st.session_state:
-        # st.session_state.selected_project_key = "project_data.lpp"
-        st.session_state.selected_project_key = "project_data.hanoi_live"
+        st.session_state.selected_project_key = "project_data.18_167_246_137__db_lpp"
+        # st.session_state.selected_project_key = "project_data.cp03monitoringlive_cmvxgc0aonjr_ap_southeast_1_rds_amazonaws_com__db_cp03monitoring"
     if "project_context_cache" not in st.session_state:
         st.session_state.project_context_cache = {}
     if "container_warm" not in st.session_state:

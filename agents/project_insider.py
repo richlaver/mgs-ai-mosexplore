@@ -8,45 +8,13 @@ from langgraph.types import Command
 
 from classes import ContextState
 from utils.context_data import get_project_specific_context
+from utils.project_selection import get_project_config
 
 LOGGER = logging.getLogger(__name__)
 
 
 def _lookup_project_context(selected_project_key: str) -> Optional[str]:
     """Return the project-specific context string for the selected project."""
-    # Delete the following block when the project-specific context in the API has been corrected.
-    if 'hanoi' in selected_project_key:
-        return """
-**IMPORTANT**:
-# Using Review Level Tools with Calculation Fields for Equivalent Data Fields
-You MUST ensure that whenever you call review level tools or extract review levels ALWAYS specify a `data` field in the tool prompt.
-If you want to check review levels for a `calculation` field, you MUST convert it to the corresponding `data` field first.
-For example, if you want to check review levels for `calculation2`, you MUST specify `data2` in the tool prompt instead.
-"""
-    if 'lpp' in selected_project_key:
-        return """
-**IMPORTANT**:
-# Empty String Readings in Calculation Fields Representing Missing Readings
-If a reading value is stored in a `calculation` field and the value of the reading is an empty string you MUST regard this as a missing reading.
-Therefore when you are extracting such values you MUST use:
-```sql
-CASE WHEN JSON_VALID(column) AND NULLIF(JSON_VALUE(column, '$.path'), '') IS NOT NULL THEN JSON_VALUE(column, '$.path') ELSE NULL END
-```
-and:
-```sql
-WHERE NULLIF(JSON_VALUE(column, '$.path1'), '') IS NOT NULL
-```
-For `calculation` field values which are not reading values simply use:
-```sql
-CASE WHEN JSON_VALID(column) THEN JSON_EXTRACT(column, '$.path') ELSE NULL END
-```
-# Contract Naming
-The three contracts in {{table: contracts, column: contract_name}} are named precisely as:
-- "Contract 1201"
-- "Contract 1202"
-- "Contract 1701"
-The query may abbreviate these as "1201", "1202" or "1701" but you must always stipulate the **exact** contract name when querying the database.
-"""
     context_value = get_project_specific_context(selected_project_key)
     if isinstance(context_value, str) and context_value.strip():
         return context_value.strip()

@@ -65,7 +65,7 @@ def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQ
     - plot_type: Str, either 'value_at_time' or 'change_over_period'.
     - start_time: Optional str in 'D Month YYYY H:MM:SS AM/PM' (e.g., '1 January 2025 12:00:00 PM'). Required for 'change_over_period'.
     - end_time: Str in same format.
-    - buffer_period_hours: Optional int.
+    - buffer_period_hours: Optional float.
     - series: List of dicts with 'instrument_type' (str), 'instrument_subtype' (str), 'database_field_name' (str like 'dataN' or 'calculationN'), 'measured_quantity_name' (str), 'abbreviated_unit' (str).
     - center_instrument_id: Optional str.
     - center_easting: Optional float.

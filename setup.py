@@ -536,7 +536,7 @@ def set_db_env() -> None:
         DB_NAME
         DB_PORT (defaults to 3306 if not provided)
 
-    Values are sourced from st.secrets['project_data.hanoi_clone'] mirroring get_db().
+    Values are sourced from st.secrets['project_data'] entry matching the selected project key.
     """
     st.toast("Setting primary DB environment variables...", icon=":material/package_2:")
     selected_project_key = get_selected_project_key()

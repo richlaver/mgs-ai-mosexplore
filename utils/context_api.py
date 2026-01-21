@@ -81,13 +81,13 @@ class ContextAPIClient:
         except Exception as exc:  # noqa: BLE001
             raise ContextAPIError(f"Unable to parse project list: {exc}") from exc
 
-    def fetch_instrument_context(self, project_name: str) -> Dict[str, Any]:
-        """Retrieve the instrument context JSON for the given project."""
-        safe_name = quote(project_name, safe="")
+    def fetch_instrument_context(self, db_name: str) -> Dict[str, Any]:
+        """Retrieve the instrument context JSON for the given database."""
+        safe_name = quote(db_name, safe="")
         headers = self._headers()
         LOGGER.debug(
-            "Fetching instrument context for %s (encoded=%s); auth header=%s",
-            project_name,
+            "Fetching instrument context for db=%s (encoded=%s); auth header=%s",
+            db_name,
             safe_name,
             "present" if "x-api-key" in headers else "missing",
         )
@@ -107,13 +107,13 @@ class ContextAPIClient:
         except Exception as exc:  # noqa: BLE001
             raise ContextAPIError(f"Unable to parse instrument context: {exc}") from exc
 
-    def fetch_project_nl_context(self, project_name: str) -> Optional[str]:
-        """Retrieve the natural-language project context string."""
-        safe_name = quote(project_name, safe="")
+    def fetch_project_nl_context(self, db_name: str) -> Optional[str]:
+        """Retrieve the natural-language project context string for the database."""
+        safe_name = quote(db_name, safe="")
         headers = self._headers()
         LOGGER.debug(
-            "Fetching project NL context for %s (encoded=%s); auth header=%s",
-            project_name,
+            "Fetching project NL context for db=%s (encoded=%s); auth header=%s",
+            db_name,
             safe_name,
             "present" if "x-api-key" in headers else "missing",
         )
@@ -128,7 +128,7 @@ class ContextAPIClient:
             if isinstance(data, dict):
                 nl_context = data.get("nl_context")
                 if nl_context is None:
-                    LOGGER.warning("Project NL context response missing 'nl_context' key for %s", project_name)
+                    LOGGER.warning("Project NL context response missing 'nl_context' key for db=%s", db_name)
                 return nl_context
             elif isinstance(data, str):
                 return data

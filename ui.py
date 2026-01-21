@@ -28,6 +28,41 @@ from utils.run_cancellation import (
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_project_key(project_key: str) -> str:
+    if not project_key:
+        return ""
+    if project_key.startswith("project_data."):
+        return project_key
+    return f"project_data.{project_key}"
+
+
+def _get_project_users(project_key: str) -> list[dict]:
+    if not project_key:
+        return []
+    normalized = _normalize_project_key(project_key)
+    matched: list[dict] = []
+    for entry in users:
+        entry_key = entry.get("project_key")
+        if not entry_key:
+            continue
+        entry_normalized = _normalize_project_key(str(entry_key))
+        if entry_key == project_key or entry_normalized == normalized:
+            matched.extend(entry.get("users", []))
+    return matched
+
+
+def _sync_selected_user_for_project(project_key: str, force_reset: bool = False) -> list[dict]:
+    project_users = _get_project_users(project_key)
+    if not project_users:
+        return project_users
+    user_ids = [user.get("id") for user in project_users]
+    if force_reset or st.session_state.get("selected_user_id") not in user_ids:
+        st.session_state.selected_user_id = project_users[0].get("id")
+    if st.session_state.get("user_selector_id") not in user_ids:
+        st.session_state.user_selector_id = st.session_state.selected_user_id
+    return project_users
+
 def is_code_like(text: str) -> bool:
     """Heuristically determine if a text chunk looks like code.
 
@@ -132,34 +167,6 @@ def login_modal():
                 st.rerun()
             else:
                 st.error("Incorrect password")
-
-@st.dialog("Change User")
-def user_modal():
-    """Renders the user selection modal using Streamlit dialog."""
-    with st.form("user_form", enter_to_submit=True):
-        display_names = [user['display_name'] for user in users]
-        
-        selected_user = next((user for user in users 
-                            if user['id'] == st.session_state.get('selected_user_id', None)), None)
-        default_index = display_names.index(selected_user['display_name']) if selected_user else 0
-        
-        selected_display_name = st.selectbox(
-            "Change User",
-            display_names,
-            key="user_select",
-            label_visibility="visible",
-            index=default_index
-        )
-        
-        if st.form_submit_button("Select"):
-            if selected_display_name:
-                selected_user = next(user for user in users 
-                                   if user['display_name'] == selected_display_name)
-                st.session_state.selected_user_id = selected_user['id']
-                st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access()
-                st.rerun()
-            else:
-                st.error("Please select a user")
 
 @st.dialog("Sandbox")
 def sandbox_modal():
@@ -473,6 +480,7 @@ def render_initial_ui() -> None:
                     except Exception as e:
                         st.error(f"Failed to switch project database: {e}")
                         return
+                    _sync_selected_user_for_project(selected_key, force_reset=True)
                     try:
                         st.session_state.modal_secrets = setup.build_modal_secrets()
                     except Exception:
@@ -514,6 +522,36 @@ def render_initial_ui() -> None:
                             st.error(f"Failed to rebuild agent graph after project switch: {e}")
                     st.toast(f"Switched to project: {selected_display}", icon=":material/database:")
 
+            def _on_user_change():
+                selected_user_id = st.session_state.get("user_selector_id")
+                if selected_user_id and selected_user_id != st.session_state.get("selected_user_id"):
+                    st.session_state.selected_user_id = selected_user_id
+                    try:
+                        st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+                    except Exception:
+                        pass
+                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "num_parallel_executions"]):
+                        try:
+                            st.session_state.graph = build_graph(
+                                llms=st.session_state.llms,
+                                db=st.session_state.db,
+                                blob_db=st.session_state.blob_db,
+                                metadata_db=st.session_state.metadata_db,
+                                table_info=table_info,
+                                table_relationship_graph=st.session_state.table_relationship_graph,
+                                thread_id=st.session_state.thread_id,
+                                user_id=st.session_state.selected_user_id,
+                                global_hierarchy_access=st.session_state.global_hierarchy_access,
+                                num_parallel_executions=st.session_state.num_parallel_executions,
+                                num_completions_before_response=st.session_state.get("num_completions_before_response", 1),
+                                response_mode=st.session_state.get("completion_strategy", "Intelligent"),
+                                min_successful_responses=st.session_state.get("min_successful_responses", 3),
+                                min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
+                                selected_project_key=st.session_state.get("selected_project_key"),
+                            )
+                        except Exception as e:
+                            st.error(f"Failed to rebuild agent graph after user switch: {e}")
+
             st.selectbox(
                 label="Project",
                 options=display_names,
@@ -522,6 +560,28 @@ def render_initial_ui() -> None:
                 help="Select which project database to query.",
                 on_change=_on_project_change,
             )
+            previous_user_id = st.session_state.get("selected_user_id")
+            project_users = _sync_selected_user_for_project(current_project_key)
+            if project_users:
+                user_ids = [user.get("id") for user in project_users]
+                user_label_by_id = {user.get("id"): user.get("display_name") for user in project_users}
+                if st.session_state.get("user_selector_id") not in user_ids:
+                    st.session_state.user_selector_id = st.session_state.get("selected_user_id", user_ids[0])
+                if st.session_state.get("selected_user_id") not in user_ids:
+                    st.session_state.selected_user_id = user_ids[0]
+                if st.session_state.get("selected_user_id") != previous_user_id:
+                    try:
+                        st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+                    except Exception:
+                        pass
+                st.selectbox(
+                    label="User",
+                    options=user_ids,
+                    format_func=lambda user_id: user_label_by_id.get(user_id, str(user_id)),
+                    key="user_selector_id",
+                    help="Select which MissionOS user to query as.",
+                    on_change=_on_user_change,
+                )
         plan_keys = list(parallel_plans.keys())
         st.selectbox(
             label="Subscription Plan",
@@ -581,7 +641,6 @@ def render_initial_ui() -> None:
                 use_container_width=False
             ):
                 st.toggle(label="Developer View", key="developer_view", help="Toggle to show or hide internal LLM responses")
-                st.button(label="Switch User", icon=":material/account_circle:", key="user_button", help="Change user", on_click=user_modal, use_container_width=True)
                 st.button(
                     label="Sandbox App",
                     icon=":material/developer_board:",
