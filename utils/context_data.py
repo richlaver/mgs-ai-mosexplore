@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import streamlit as st
-
-from utils.project_selection import get_project_config
+from utils.project_selection import make_project_key
 from utils.context_api import (
     ContextAPIClient,
     ContextAPIError,
@@ -18,9 +18,6 @@ from utils.context_api import (
 )
 
 LOGGER = logging.getLogger(__name__)
-_CACHE_KEY = "project_context_cache"
-_CLIENT_KEY = "context_api_client"
-_PROJECT_LIST_KEY = "context_api_project_list"
 _DEFAULT_PAYLOAD = {
     "instrument_context": {},
     "project_specific_context": "",
@@ -30,23 +27,90 @@ _DEFAULT_PAYLOAD = {
     "_project_context_loaded": False,
 }
 
+_CACHE_LOCK = threading.RLock()
+_CONTEXT_CACHE: Dict[str, Dict[str, Any]] = {}
+_PROJECT_LIST_CACHE: Optional[List[Dict[str, Any]]] = None
+_CONTEXT_CLIENT: Optional[ContextAPIClient] = None
+_CONTEXT_CONFIG: Optional[ContextApiConfig] = None
+_PROJECT_CONFIGS: Dict[str, Dict[str, Any]] = {}
+_DEFAULT_PROJECT_KEY: Optional[str] = None
+
+
+def configure_context_api(config: Optional[ContextApiConfig] = None, client: Optional[ContextAPIClient] = None) -> None:
+    """Configure the default context API client or config for background-safe usage."""
+    global _CONTEXT_CONFIG, _CONTEXT_CLIENT
+    if config is not None:
+        _CONTEXT_CONFIG = config
+    if client is not None:
+        _CONTEXT_CLIENT = client
+
+
+def configure_context_api_from_secrets(secrets: Mapping[str, Any]) -> None:
+    """Configure the context API from a Streamlit secrets mapping (call from main thread)."""
+    cfg_section = secrets.get("context_api", {}) if isinstance(secrets, Mapping) else {}
+    base_url = cfg_section.get("base_url") or DEFAULT_BASE_URL
+    api_key = cfg_section.get("api_key")
+    timeout = cfg_section.get("timeout", DEFAULT_TIMEOUT)
+    if not api_key:
+        LOGGER.error("context_api.api_key missing from secrets; cannot configure context API")
+        return
+    config = ContextApiConfig(base_url=base_url, api_key=api_key, timeout=timeout)
+    configure_context_api(config=config)
+
+
+def register_project_configs(project_root: Mapping[str, Any]) -> None:
+    """Register project configs so background threads avoid Streamlit secrets access."""
+    if not isinstance(project_root, Mapping):
+        return
+    configs: Dict[str, Dict[str, Any]] = {}
+    for sub_key, sub_val in project_root.items():
+        if not isinstance(sub_val, Mapping):
+            continue
+        derived_key = make_project_key(str(sub_val.get("db_host", "")), str(sub_val.get("db_name", "")))
+        project_key = f"project_data.{derived_key or sub_key}"
+        configs[project_key] = dict(sub_val)
+    with _CACHE_LOCK:
+        _PROJECT_CONFIGS.clear()
+        _PROJECT_CONFIGS.update(configs)
+
+
+def set_default_project_key(project_key: Optional[str]) -> None:
+    """Set the default project key used when none is explicitly provided."""
+    global _DEFAULT_PROJECT_KEY
+    _DEFAULT_PROJECT_KEY = project_key
+
+
+def _has_streamlit_context() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
 
 def _toast(message: str, icon: str, quiet: bool) -> None:
-    if not quiet:
+    if quiet:
+        return
+    if not _has_streamlit_context():
+        return
+    try:
+        import streamlit as st
+
         st.toast(message, icon=icon)
+    except Exception:
+        return
 
 
 def _get_cache() -> Dict[str, Dict[str, Any]]:
-    cache = st.session_state.setdefault(_CACHE_KEY, {})
-    if not isinstance(cache, dict):
-        cache = {}
-        st.session_state[_CACHE_KEY] = cache
-    return cache
+    with _CACHE_LOCK:
+        return _CONTEXT_CACHE
 
 
 def _store_payload(project_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     cache = _get_cache()
-    cache[project_key] = payload
+    with _CACHE_LOCK:
+        cache[project_key] = payload
     return payload
 
 
@@ -108,14 +172,14 @@ def _parse_version(value: Any) -> datetime:
 
 
 def _get_cached_project_list() -> Optional[List[Dict[str, Any]]]:
-    projects = st.session_state.get(_PROJECT_LIST_KEY)
-    if isinstance(projects, list) and projects:
-        return projects
-    return None
+    with _CACHE_LOCK:
+        return _PROJECT_LIST_CACHE if _PROJECT_LIST_CACHE else None
 
 
 def _cache_project_list(projects: List[Dict[str, Any]]) -> None:
-    st.session_state[_PROJECT_LIST_KEY] = projects
+    global _PROJECT_LIST_CACHE
+    with _CACHE_LOCK:
+        _PROJECT_LIST_CACHE = projects
 
 
 def _obtain_project_list(client: ContextAPIClient, quiet: bool) -> Optional[List[Dict[str, Any]]]:
@@ -137,20 +201,49 @@ def _obtain_project_list(client: ContextAPIClient, quiet: bool) -> Optional[List
 
 
 def _get_api_client() -> Optional[ContextAPIClient]:
-    client = st.session_state.get(_CLIENT_KEY)
-    if isinstance(client, ContextAPIClient):
-        return client
-    cfg_section = st.secrets.get("context_api", {})
-    base_url = cfg_section.get("base_url") or DEFAULT_BASE_URL
-    api_key = cfg_section.get("api_key")
-    timeout = cfg_section.get("timeout", DEFAULT_TIMEOUT)
-    if not api_key:
-        LOGGER.error("context_api.api_key missing from secrets; cannot fetch project contexts")
-        return None
-    config = ContextApiConfig(base_url=base_url, api_key=api_key, timeout=timeout)
-    client = build_context_api_client(config)
-    st.session_state[_CLIENT_KEY] = client
-    return client
+    global _CONTEXT_CLIENT
+    if isinstance(_CONTEXT_CLIENT, ContextAPIClient):
+        return _CONTEXT_CLIENT
+    if _CONTEXT_CONFIG is not None:
+        _CONTEXT_CLIENT = build_context_api_client(_CONTEXT_CONFIG)
+        return _CONTEXT_CLIENT
+    if _has_streamlit_context():
+        try:
+            import streamlit as st
+
+            cfg_section = st.secrets.get("context_api", {})
+            base_url = cfg_section.get("base_url") or DEFAULT_BASE_URL
+            api_key = cfg_section.get("api_key")
+            timeout = cfg_section.get("timeout", DEFAULT_TIMEOUT)
+            if not api_key:
+                LOGGER.error("context_api.api_key missing from secrets; cannot fetch project contexts")
+                return None
+            config = ContextApiConfig(base_url=base_url, api_key=api_key, timeout=timeout)
+            _CONTEXT_CLIENT = build_context_api_client(config)
+            return _CONTEXT_CLIENT
+        except Exception as exc:
+            LOGGER.error("Failed to build context API client from Streamlit secrets: %s", exc)
+            return None
+    LOGGER.error("Context API not configured; call configure_context_api_from_secrets() in main thread.")
+    return None
+
+
+def _get_project_config(project_key: str) -> Dict[str, Any]:
+    if not project_key:
+        return {}
+    with _CACHE_LOCK:
+        cached = _PROJECT_CONFIGS.get(project_key)
+    if isinstance(cached, dict) and cached:
+        return dict(cached)
+    if _has_streamlit_context():
+        try:
+            from utils.project_selection import get_project_config
+
+            return get_project_config(project_key)
+        except Exception:
+            return {}
+    LOGGER.error("Project config not registered for key=%s; register_project_configs() is required.", project_key)
+    return {}
 
 
 def _select_project(projects: List[Dict[str, Any]], host: str, database_name: str) -> Optional[Dict[str, Any]]:
@@ -183,6 +276,7 @@ def ensure_project_context(
     strict: bool = False,
     fetch_instrument: bool = True,
     fetch_project_specific: bool = True,
+    project_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not project_key:
         return _empty_payload()
@@ -197,7 +291,7 @@ def ensure_project_context(
     need_instrument = fetch_instrument
     need_project_ctx = fetch_project_specific
 
-    cfg = get_project_config(project_key) or {}
+    cfg = project_config or _get_project_config(project_key) or {}
     host = cfg.get("db_host")
     db_name = cfg.get("db_name")
     display_name = cfg.get("display_name", project_key)
@@ -339,7 +433,7 @@ def ensure_project_context(
 
 
 def get_instrument_context(project_key: Optional[str] = None) -> Dict[str, Any]:
-    project_key = project_key or st.session_state.get("selected_project_key")
+    project_key = project_key or _DEFAULT_PROJECT_KEY
     if not project_key:
         return {}
     cache = _get_cache()
@@ -350,7 +444,7 @@ def get_instrument_context(project_key: Optional[str] = None) -> Dict[str, Any]:
 
 
 def get_project_specific_context(project_key: Optional[str] = None) -> Optional[str]:
-    project_key = project_key or st.session_state.get("selected_project_key")
+    project_key = project_key or _DEFAULT_PROJECT_KEY
     if not project_key:
         return None
     cache = _get_cache()

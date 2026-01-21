@@ -80,6 +80,9 @@ def build_graph(
 ) -> StateGraph:
     st.toast("Building graph...", icon=":material/account_tree:")
 
+    timezone_context_default = st.session_state.get("timezone_context")
+    show_sandbox_stream_logs = bool(st.session_state.get("show_sandbox_stream_logs", False))
+
     tools_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.1)
     sufficiency_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=256)
 
@@ -517,8 +520,8 @@ def build_graph(
         timezone_context = None
         if base_context and base_context.timezone_context:
             timezone_context = base_context.timezone_context
-        elif st.session_state.get("timezone_context"):
-            timezone_context = st.session_state.get("timezone_context")
+        elif timezone_context_default:
+            timezone_context = timezone_context_default
 
         update_payload = {"retrospective_query": retrospective_query}
         if timezone_context:
@@ -921,7 +924,7 @@ def build_graph(
                             origin = out["metadata"].get("origin")
                             content = out.get("content", "")
                             if typ in ("progress", "error"):
-                                if origin in {"stdout", "stderr"} and not st.session_state.get("show_sandbox_stream_logs", False):
+                                if origin in {"stdout", "stderr"} and not show_sandbox_stream_logs:
                                     pass
                                 else:
                                     messages.append(_progress_msg(str(content), process=typ, origin=origin))

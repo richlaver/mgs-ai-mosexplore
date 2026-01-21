@@ -15,7 +15,12 @@ from utils.project_selection import (
     list_projects,
     get_selected_project_key,
 )
-from utils.context_data import ensure_project_context
+from utils.context_data import (
+    ensure_project_context,
+    configure_context_api_from_secrets,
+    register_project_configs,
+    set_default_project_key,
+)
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
 from modal_management import deploy_app, stop_app, is_app_deployed, warm_up_container
 from utils.chat_history import filter_messages_only_final
@@ -243,6 +248,9 @@ def handle_clear_chat() -> None:
 
 def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
+    configure_context_api_from_secrets(st.secrets)
+    register_project_configs(st.secrets.get("project_data", {}))
+    set_default_project_key(st.session_state.get("selected_project_key"))
     if "app_deployed" not in st.session_state:
         st.session_state.app_deployed = is_app_deployed()
         logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
@@ -474,6 +482,7 @@ def render_initial_ui() -> None:
                 selected_key = key_by_display.get(selected_display)
                 if selected_key and selected_key != st.session_state.get("selected_project_key"):
                     st.session_state.selected_project_key = selected_key
+                    set_default_project_key(selected_key)
                     try:
                         setup.set_db_env()
                         st.session_state.db = setup.get_db()
@@ -895,6 +904,7 @@ def render_chat_content() -> None:
         token = activate_controller(controller)
         _set_active_run_controller(controller, token)
 
+        stream = None
         try:
             with chat_col:
                 with st.spinner("Generating..."):
@@ -1032,7 +1042,18 @@ def render_chat_content() -> None:
 
                     if len(st.session_state.intermediate_steps_history) > MAX_HISTORY // 2:
                         st.session_state.intermediate_steps_history = st.session_state.intermediate_steps_history[-MAX_HISTORY // 2:]
+        except GeneratorExit:
+            logger.info("Stream generator closed by Streamlit runtime; treating as cancelled.")
+            st.info("Response stopped.", icon=":material/stop_circle:")
         except RunCancelledError:
             st.info("Response cancelled.", icon=":material/stop_circle:")
+        except Exception as exc:
+            logger.exception("Unexpected error during stream: %s", exc)
+            st.error("Unexpected error while generating the response. Please retry.")
         finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
             _clear_active_run_controller()
