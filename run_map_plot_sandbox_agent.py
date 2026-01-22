@@ -62,40 +62,91 @@ import plotly.io as pio  # For generating HTML from Plotly JSON
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# map_prompt = f"Plot readings as a map:\n" \
+#     f"- Time range: 2025-03-03T00:00:00Z to 2025-03-31T23:59:59Z\n" \
+#     f"- Buffer for missing readings: 7 days\n" \
+#     f"- Plot centred on instrument ID 0003-L-2\n" \
+#     f"- Plot extent: 200 metres radius\n" \
+#     f"- Series 1:\n" \
+#     f"  * Instrument type: LP\n" \
+#     f"  * Instrument subtype: MOVEMENT\n" \
+#     f"  * Database field name: calculation1\n" \
+#     f"  * Label: Settlement\n" \
+#     f"  * Unit: mm" #Hanoi Live
 map_prompt = f"Plot readings as a map:\n" \
-    f"- Time range: 2025-03-03T00:00:00Z to 2025-03-31T23:59:59Z\n" \
+    f"- Time range: 2025-09-11T00:00:00Z to 2025-10-11T23:59:59Z\n" \
     f"- Buffer for missing readings: 7 days\n" \
-    f"- Plot centred on instrument ID 0003-L-2\n" \
+    f"- Plot centred on instrument ID 1202/D/TSM1/12A(N)\n" \
     f"- Plot extent: 200 metres radius\n" \
     f"- Series 1:\n" \
-    f"  * Instrument type: LP\n" \
-    f"  * Instrument subtype: MOVEMENT\n" \
+    f"  * Instrument type: TSM\n" \
+    f"  * Instrument subtype: DEFAULT\n" \
     f"  * Database field name: calculation1\n" \
     f"  * Label: Settlement\n" \
-    f"  * Unit: mm"
+    f"  * Unit: mm" #LPP
 # Registry of reusable prompt scenarios for quick testing
+# SCENARIOS: dict[str, dict[str, str]] = {
+#     "basic_map": {
+#         "description": "Basic map plot for readings around instrument 0003-L-2.",
+#         "prompt": map_prompt,
+#     },
+#     "change_over_period": {
+#         "description": "Plot change of readings over period.",
+#         "prompt": (
+#             "Plot readings change over period for settlements (instrument_type: LP, subtype: MOVEMENT, field: calculation1, name: Settlement, unit: mm) "
+#             "from 1 January 2025 12:00:00 PM to 18 November 2025 11:59:59 PM around 0003-L-2. "
+#             "Radius: 1000 meters. Buffer: 14 days."
+#         ),
+#     },
+#     "review_levels_at_time": {
+#         "description": "Plot review levels at time.",
+#         # "prompt": (
+#         #     "Plot review_levels value at time for settlements (instrument_type: LP, subtype: MOVEMENT, field: data1, name: Settlement, unit: mm) "
+#         #     "around center instrument 0003-L-2 at 14 November 2025 12:00:00 PM. Radius: 300 meters."
+#         # ),
+#         "prompt": (
+#             "data_type='review_levels' plot_type='value_at_time' start_time=None end_time=datetime.datetime(2025, 12, 5, 11, 48, 10) buffer_period_hours=72 series=[SeriesDict(instrument_type='LP', instrument_subtype='LP', database_field_name='data1', measured_quantity_name='Settlement Marker Status', abbreviated_unit='status')] center_instrument_id='1523-1-L-01' center_easting=None center_northing=None radius_meters=500.0 exclude_instrument_ids=[]"
+#         ),
+#     },
+#     "review_levels_change": {
+#         "description": "Plot review levels change over time.",
+#         "prompt": (
+#             "Plot review_levels value change over time for settlements (instrument_type: LP, subtype: MOVEMENT, field: data1, name: Settlement, unit: mm) "
+#             "around center instrument 0003-L-2 from 14 May 2025 12:00:00 PM to 14 November 2025 12:00:00 PM. Radius: 300 meters."
+#         ),
+#     },
+# } #Hanoi Live
 SCENARIOS: dict[str, dict[str, str]] = {
     "basic_map": {
-        "description": "Basic map plot for readings around instrument 0003-L-2.",
+        "description": "Basic map plot for readings around instrument 1202/D/TSM1/12A(N).",
         "prompt": map_prompt,
     },
     "change_over_period": {
-        "description": "Plot change over period for multiple series.",
+        "description": "Plot change of readings over period.",
         "prompt": (
-            "Plot readings change over period for settlements (instrument_type: settlement, subtype: L, field: calculation1, name: Settlement, unit: mm) "
-            "and groundwater (instrument_type: groundwater, subtype: PZ, field: calculation1, name: Groundwater Level, unit: mPD) "
-            "from 1 January 2025 12:00:00 PM to 31 December 2025 11:59:59 PM around easting 123456.78 northing 876543.21. "
-            "Radius: 1000 meters. Exclude: ['INST999']. Buffer: 48 hours."
+            "Plot readings change over period for settlements (instrument_type: TSM, subtype: DEFAULT, field: calculation1, name: Settlement, unit: mm) "
+            "from 11 September 2025 12:00:00 PM to 12 January 2026 11:59:59 PM around 1202/D/TSM1/12A(N). "
+            "Radius: 1000 meters. Buffer: 30 days."
         ),
     },
-    "review_levels": {
+    "review_levels_at_time": {
         "description": "Plot review levels at time.",
+        # "prompt": (
+        #     "Plot review_levels value at time for settlements (instrument_type: LP, subtype: MOVEMENT, field: data1, name: Settlement, unit: mm) "
+        #     "around center instrument 0003-L-2 at 14 November 2025 12:00:00 PM. Radius: 300 meters."
+        # ),
         "prompt": (
-            "Plot review_levels value at time for settlements (instrument_type: settlement, subtype: L, field: calculation1, name: Settlement, unit: mm) "
-            "around center instrument RA-PZ-02 at 1 March 2025 12:00:00 PM. Radius: 300 meters."
+            "data_type='review_levels' plot_type='value_at_time' start_time=None end_time=datetime.datetime(2026, 1, 12, 11, 48, 10) buffer_period_hours=150 series=[SeriesDict(instrument_type='TSM', instrument_subtype='DEFAULT', database_field_name='calculation1', measured_quantity_name='Settlement Marker Status', abbreviated_unit='status')] center_instrument_id='1202/D/TSM1/12A(N)' center_easting=None center_northing=None radius_meters=500.0 exclude_instrument_ids=[]"
         ),
     },
-}
+    "review_levels_change": {
+        "description": "Plot review levels change over time.",
+        "prompt": (
+            "Plot review_levels value change over time for settlements (instrument_type: TSM, subtype: DEFAULT, field: calculation1, name: Settlement, unit: mm) "
+            "around center instrument 1202/D/TSM1/12A(N) from 11 September 2025 12:00:00 PM to 12 January 2026 12:00:00 PM. Radius: 300 meters."
+        ),
+    },
+} #LPP
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -180,7 +231,7 @@ def main() -> None:
 
     # 2) Heavy imports (deferred so --list can run without full env)
     try:
-        from setup import get_llm, get_db, build_relationship_graph, get_blob_db, get_metadata_db  # type: ignore
+        from setup import get_llms, get_db, build_relationship_graph, get_blob_db, get_metadata_db  # type: ignore
         # Prefer table_info from table_info.py as requested; fallback to parameters.py if needed
         try:
             from table_info import table_info  # type: ignore
@@ -194,13 +245,22 @@ def main() -> None:
         sys.exit(3)
 
     # 3) Initialize LLM and DB (configured as per setup.py)
-    llm = get_llm()
+    llms = get_llms()
+    if not llms:
+        raise RuntimeError("setup.get_llms() returned no models; cannot proceed")
+    llm = (
+        llms.get("BALANCED")
+        or llms.get("FAST")
+        or llms.get("THINKING")
+        or next(iter(llms.values()))
+    )
     metadata_db = get_metadata_db()
 
     # 4) Build the relationship graph from table_info via setup
     relationship_graph = build_relationship_graph(table_info)
 
     # 5) Construct the GeneralSQLQueryTool
+    st.session_state.selected_project_key = "project_data.18_167_246_137__db_lpp"
     user_id = 1
     global_hierarchy_access = True
     sql_tool = GeneralSQLQueryTool(
