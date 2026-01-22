@@ -419,7 +419,7 @@ Schema Query 2
 - Line indenting errors: check all indents are correct.
 - Incorrectly formatted multiline strings in tool prompts.
 - Failure to close triple quotes for multiline strings. **Always** close triple quotes.
-- Failure to close double quotes immediately before line continuation characters (`\`) in multiline strings. **Always** close double quotes before line continuation characters.
+- Failure to close double quotes immediately before line continuation characters (`\\`) in multiline strings. **Always** close double quotes before line continuation characters.
 - Correct application of double and single quotes in strings.
 - 'coroutine' object has no attribute 'get_name': ensure `get_name` is called on `asyncio` Task objects, not coroutines.
 - No need to add `asyncio.run(execute_strategy())` at the end of the code. The execution environment will handle running the async function.

@@ -597,23 +597,25 @@ def render_initial_ui() -> None:
             help="Toggle streaming of sandbox stdout/stderr in intermediate steps.",
         )
         plan_keys = list(parallel_plans.keys())
-        st.selectbox(
-            label="Subscription Plan",
-            options=plan_keys,
-            format_func=lambda key: parallel_plans[key]["label"],
-            key="parallel_plan",
-            help="Economy: 3 agents • Reliable: 5 agents • Performance: 7 agents",
-            on_change=_rebuild_graph,
-        )
+        # Uncomment to re-enable subscription plan selection
+        # st.selectbox(
+        #     label="Subscription Plan",
+        #     options=plan_keys,
+        #     format_func=lambda key: parallel_plans[key]["label"],
+        #     key="parallel_plan",
+        #     help="Economy: 3 agents • Reliable: 5 agents • Performance: 7 agents",
+        #     on_change=_rebuild_graph,
+        # )
         strategy_keys = list(completion_strategies.keys())
-        st.selectbox(
-            label="Response Mode",
-            options=strategy_keys,
-            format_func=lambda key: completion_strategies[key]["label"],
-            key="completion_strategy",
-            help="Intelligent: consistency-based • Quick: first completion • Balanced: majority completion • Max: all agents complete",
-            on_change=_rebuild_graph,
-        )
+        # Uncomment to re-enable response mode selection
+        # st.selectbox(
+        #     label="Response Mode",
+        #     options=strategy_keys,
+        #     format_func=lambda key: completion_strategies[key]["label"],
+        #     key="completion_strategy",
+        #     help="Intelligent: consistency-based • Quick: first completion • Balanced: majority completion • Max: all agents complete",
+        #     on_change=_rebuild_graph,
+        # )
         if st.session_state.get("completion_strategy", "Intelligent") == "Intelligent":
             selected_plan_key = st.session_state.get("parallel_plan", "Performance")
             selected_plan = parallel_plans.get(selected_plan_key, parallel_plans["Performance"])
