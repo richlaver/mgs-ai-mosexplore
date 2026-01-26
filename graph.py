@@ -707,12 +707,26 @@ def build_graph(
             return str(content)
 
         def _judge_sufficiency(
-            final_msg: BaseMessage | None, user_query: str, branch_context: List[str] | None = None
+            final_msg: BaseMessage | None,
+            user_query: str,
+            branch_context: List[str] | None = None,
+            artefacts: List[AIMessage] | None = None,
         ) -> bool:
             if not final_msg:
                 return False
             final_response_text = _flatten_message_content(final_msg)
             context_notes = "\n".join([c for c in (branch_context or []) if isinstance(c, str) and c.strip()])
+            artefact_notes = []
+            for item in artefacts or []:
+                if not isinstance(item, AIMessage):
+                    continue
+                artefact_type = item.additional_kwargs.get("process")
+                artefact_desc = _flatten_message_content(item).strip()
+                if artefact_desc or artefact_type:
+                    artefact_notes.append(
+                        f"- type={artefact_type or 'unknown'} desc={artefact_desc or '(no description)'}"
+                    )
+            artefact_summary = "\n".join(artefact_notes) if artefact_notes else "(none)"
             prompt = ("""
                 You are a fast, strict judge.
                 Decide if the assistant's final reply fully answers the user's latest request.
@@ -721,6 +735,8 @@ def build_graph(
                     (2) no unresolved TODOs, errors, or apologies;
                     (3) actionable, specific, and contextually relevant;
                     (4) flags missing data if needed.
+                You are also given the list of artefacts actually produced by the response.
+                If the response references an artefact, verify it appears in the produced list.
                 Return ONLY compact JSON: {"sufficient": true|false, "notes": "<=30 words why"}.
             """)
             llm_input = [
@@ -731,16 +747,19 @@ def build_graph(
                         "User query:\n"
                         f"{user_query}\n\n"
                         f"Assistant plan/notes:\n{context_notes}\n\n"
+                        f"Produced artefacts:\n{artefact_summary}\n\n"
                         f"Assistant final reply:\n{final_response_text}\n\nIs it sufficient?"
                     ),
                 ),
             ]
+            logger.info("[Sufficiency] Evaluating branch %d response sufficiency with prompt %s", branch_id, llm_input)
             try:
                 llm_result = sufficiency_llm.invoke(llm_input)
                 raw_text = _flatten_message_content(llm_result)
                 parsed: dict[str, Any] | None = None
                 try:
                     parsed = json.loads(raw_text)
+                    logger.info("[Sufficiency] Parsed JSON sufficiency result: %s", parsed)
                 except Exception:
                     lowered = raw_text.strip().lower()
                     if "true" in lowered and "false" not in lowered:
@@ -1099,7 +1118,7 @@ def build_graph(
                             plan_lines = []
                         if plan_lines:
                             branch_context.append("Plan:\n" + "\n".join(plan_lines))
-                    is_sufficient = _judge_sufficiency(final_msg, user_query, branch_context)
+                    is_sufficient = _judge_sufficiency(final_msg, user_query, branch_context, artefacts)
                 else:
                     is_sufficient = False
 
