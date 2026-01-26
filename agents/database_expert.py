@@ -34,46 +34,6 @@ def _log_instrument_cache_summary(instrument_data: dict[str, Any]) -> None:
         ", ".join(f"{k}:{v}" for k, v in sorted(types.items())),
     )
 
-# 20260115 This function can be circumvented once all instrument contexts are stored in normalized format.
-def _normalize_instrument_context(raw_data: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize instrument context to a TYPE_SUBTYPE keyed dict."""
-    if not raw_data:
-        return {}
-
-    data = raw_data
-    if isinstance(raw_data, dict) and isinstance(raw_data.get("instrument_types"), dict):
-        data = raw_data["instrument_types"]
-
-    normalized: dict[str, Any] = {}
-    if not isinstance(data, dict):
-        return normalized
-
-    for key, entry in data.items():
-        if not isinstance(entry, dict):
-            continue
-
-        instr_type = entry.get("type")
-        instr_subtype = entry.get("subtype")
-
-        if (not instr_type or not instr_subtype) and isinstance(key, str):
-            if "/" in key:
-                parts = key.split("/", 1)
-            elif "_" in key:
-                parts = key.split("_", 1)
-            else:
-                parts = []
-
-            if len(parts) == 2:
-                instr_type = instr_type or parts[0]
-                instr_subtype = instr_subtype or parts[1]
-
-        if isinstance(instr_type, str) and isinstance(instr_subtype, str):
-            entry = {**entry, "type": instr_type, "subtype": instr_subtype}
-            normalized[f"{instr_type}_{instr_subtype}"] = entry
-        else:
-            normalized[str(key)] = entry
-
-    return normalized
 
 
 class InstrumentSelectionItem(BaseModel):
@@ -113,37 +73,6 @@ class InstrumentSelectionList(BaseModel):
     def to_dict_list(self) -> List[dict[str, Any]]:
         return [item.model_dump() for item in self.items]
 
-def create_instrument_search_context(instrument_data: dict[str, any]) -> str:
-    if not instrument_data:
-        logger.warning("No instrument data available when building search context")
-        return ""
-    context_parts = []
-    if isinstance(instrument_data, dict):
-        context_parts.append("AVAILABLE INSTRUMENTS:")
-        type_groups = {}
-        for instrument_key, instrument_info in instrument_data.items():
-            if isinstance(instrument_info, dict):
-                instrument_type = instrument_info.get('type', 'UNKNOWN')
-                if instrument_type not in type_groups:
-                    type_groups[instrument_type] = []
-                type_groups[instrument_type].append((instrument_key, instrument_info))
-        for instrument_type, instruments in sorted(type_groups.items()):
-            context_parts.append(f"\n{instrument_type} INSTRUMENTS:")
-            for instrument_key, instrument_info in instruments:
-                name = instrument_info.get('name', 'Unknown')
-                subtype = instrument_info.get('subtype', 'DEFAULT')
-                purpose_snippet = instrument_info.get('purpose', '')[:250] + "..." if len(instrument_info.get('purpose', '')) > 250 else instrument_info.get('purpose', '')
-                fields = instrument_info.get('fields', [])
-                fields_to_show = fields if len(fields) < 10 else fields[:10]
-                fields_snippet = ", ".join(
-                    f"{f.get('database_field_name', '')} ({f.get('unit', f.get('units', ''))}): "
-                    f"{', '.join(f.get('common_names', []))} - "
-                    f"{f.get('description', '') + ('...' if len(f.get('description', '')) > 200 else '')}"
-                    for f in fields_to_show
-                )
-                context_parts.append(f"  - {instrument_key} ({name} - {subtype}): {purpose_snippet}\n    Fields: {fields_snippet}")
-    logger.debug("Instrument search context assembled with %d instruments", len(instrument_data))
-    return "\n".join(context_parts)
 
 def identify_and_filter_instruments(llm: BaseLanguageModel, query: str, instrument_data: dict[str, any], verified_type_subtype: list[str]) -> list[dict[str, any]]:
     logger.info(
@@ -152,7 +81,7 @@ def identify_and_filter_instruments(llm: BaseLanguageModel, query: str, instrume
         len(verified_type_subtype),
         len(instrument_data),
     )
-    context = create_instrument_search_context(instrument_data)
+    context = setup.build_instrument_search_context(instrument_data)
     verified_str = ", ".join(verified_type_subtype) if verified_type_subtype else "None"
 
     system_template = """You are an expert in geotechnical monitoring instruments.
@@ -603,7 +532,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, select
 
     logger.debug("Database expert using project key: %s", selected_project_key or "<session_default>")
     raw_instrument_data = get_instrument_context(selected_project_key)
-    instrument_data = _normalize_instrument_context(raw_instrument_data)
+    instrument_data = setup.normalize_instrument_context(raw_instrument_data)
     _log_instrument_cache_summary(instrument_data)
     if isinstance(state.context, dict):
         query = state.context.get("retrospective_query", "")

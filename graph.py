@@ -161,6 +161,21 @@ def build_graph(
     )
 
     try:
+        st.session_state.codeact_tools_snapshot = [
+            extraction_tool,
+            timeseries_plot_tool,
+            map_plot_tool,
+            review_by_value_tool,
+            review_by_time_tool,
+            review_schema_tool,
+            breach_instr_tool,
+            review_changes_across_period_tool,
+            csv_saver_tool,
+        ]
+    except Exception:
+        pass
+
+    try:
         cached_context = build_codeact_coder_cached_context(
             tools=[
                 extraction_tool,

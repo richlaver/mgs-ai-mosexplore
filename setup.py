@@ -34,6 +34,7 @@ from utils.project_selection import (
     get_selected_project_key,
     get_project_config,
 )
+from utils.context_data import get_instrument_context
 
 logger = logging.getLogger(__name__)
 _map_spatial_defaults_cache: Optional[Dict[str, float]] = None
@@ -124,6 +125,82 @@ def _load_instrument_selection_template() -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
+def normalize_instrument_context(raw_data: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Normalize instrument context to a TYPE_SUBTYPE keyed dict."""
+    if not raw_data:
+        return {}
+
+    data = raw_data
+    if isinstance(raw_data, dict) and isinstance(raw_data.get("instrument_types"), dict):
+        data = raw_data["instrument_types"]
+
+    normalized: Dict[str, Any] = {}
+    if not isinstance(data, dict):
+        return normalized
+
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+
+        instr_type = entry.get("type")
+        instr_subtype = entry.get("subtype")
+
+        if (not instr_type or not instr_subtype) and isinstance(key, str):
+            if "/" in key:
+                parts = key.split("/", 1)
+            elif "_" in key:
+                parts = key.split("_", 1)
+            else:
+                parts = []
+
+            if len(parts) == 2:
+                instr_type = instr_type or parts[0]
+                instr_subtype = instr_subtype or parts[1]
+
+        if isinstance(instr_type, str) and isinstance(instr_subtype, str):
+            entry = {**entry, "type": instr_type, "subtype": instr_subtype}
+            normalized[f"{instr_type}_{instr_subtype}"] = entry
+        else:
+            normalized[str(key)] = entry
+
+    return normalized
+
+
+def build_instrument_search_context(instrument_data: Dict[str, Any]) -> str:
+    """Build searchable instrument context string."""
+    if not instrument_data:
+        return ""
+    context_parts: List[str] = []
+    if isinstance(instrument_data, dict):
+        context_parts.append("AVAILABLE INSTRUMENTS:")
+        type_groups: Dict[str, List[tuple]] = {}
+        for instrument_key, instrument_info in instrument_data.items():
+            if isinstance(instrument_info, dict):
+                instrument_type = instrument_info.get("type", "UNKNOWN")
+                type_groups.setdefault(instrument_type, []).append((instrument_key, instrument_info))
+        for instrument_type, instruments in sorted(type_groups.items()):
+            context_parts.append(f"\n{instrument_type} INSTRUMENTS:")
+            for instrument_key, instrument_info in instruments:
+                name = instrument_info.get("name", "Unknown")
+                subtype = instrument_info.get("subtype", "DEFAULT")
+                purpose_raw = instrument_info.get("purpose", "")
+                purpose_snippet = (
+                    purpose_raw[:250] + "..." if isinstance(purpose_raw, str) and len(purpose_raw) > 250 else purpose_raw
+                )
+                fields = instrument_info.get("fields", [])
+                fields_to_show = fields if len(fields) < 10 else fields[:10]
+                fields_snippet = ", ".join(
+                    f"{f.get('database_field_name', '')} ({f.get('unit', f.get('units', ''))}): "
+                    f"{', '.join(f.get('common_names', []))} - "
+                    f"{f.get('description', '') + ('...' if len(f.get('description', '')) > 200 else '')}"
+                    for f in fields_to_show
+                )
+                context_parts.append(
+                    f"  - {instrument_key} ({name} - {subtype}): {purpose_snippet}\n    Fields: {fields_snippet}"
+                )
+    return "\n".join(context_parts)
+
+
 def build_codeact_coder_cached_context(tools: List[Any]) -> str:
     tools_str = _build_tools_str(tools)
     template = _load_cached_prompt_template()
@@ -133,6 +210,21 @@ def build_codeact_coder_cached_context(tools: List[Any]) -> str:
 def build_instrument_selection_cached_context(context_text: str) -> str:
     template = _load_instrument_selection_template()
     return template.replace("<<INSTRUMENT_CONTEXT>>", context_text)
+
+
+def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm: Any) -> Optional[str]:
+    """Refresh instrument selection cached content for the selected project."""
+    instrument_payload = get_instrument_context(selected_project_key)
+    instrument_data = normalize_instrument_context(instrument_payload)
+    context_text = build_instrument_search_context(instrument_data)
+    cached_context = build_instrument_selection_cached_context(context_text)
+    return ensure_cached_content(
+        cache_key="instrument_selection",
+        content_text=cached_context,
+        llm=llm,
+        display_prefix="instrument-selection-cache",
+        legacy_hash_keys=["instrument_selection_cached_context_hash"],
+    )
 
 
 def _build_tools_str(tools: List[Any]) -> str:

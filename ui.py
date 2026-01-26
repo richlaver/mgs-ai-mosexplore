@@ -506,6 +506,13 @@ def render_initial_ui() -> None:
                         ensure_project_context(selected_key, force_refresh=True, strict=True)
                     except Exception as e:
                         logger.error("Failed to refresh project contexts for %s: %s", selected_key, e)
+                    try:
+                        setup.refresh_instrument_selection_cache(
+                            selected_key,
+                            st.session_state.llms["FAST"],
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to refresh instrument selection cache for %s: %s", selected_key, e)
                     if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "num_parallel_executions"]):
                         try:
                             logger.info("[Project Switch] Rebuilding agent graph for project=%s", selected_key)
