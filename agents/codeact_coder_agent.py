@@ -53,10 +53,6 @@ Generate code to answer the following user query, using plots wherever possible 
         {project_specific_context}
         - Summary of previous failed coding attempts:
         {previous_attempts_summary}
-  - Adheres to constraints
-  - Calls tools correctly with necessary inputs
-  - Yielded outputs formed correctly
-7. Output only the code. Do not include any other text to save tokens.
 
 # Output Schema
 - Return EXACTLY one JSON object with the following fields and no additional prose, Markdown, or prefixes:
@@ -65,7 +61,7 @@ Generate code to answer the following user query, using plots wherever possible 
   * `code`: string containing the generated code that already follows the commenting constraints above. Do not wrap the code in Markdown fences or HTML tags.
 - Ensure the JSON uses double-quoted keys/values per RFC 8259 and is syntactically valid even if embedded verbatim into a Python string literal.
 - Do not escape newlines inside the `code` string beyond what is required by JSON; rely on `\n` for line breaks.
-- The `code` string must not contain leading explanations, and only include the required block comments preceding each step.
+- The `code` string must not contain leading explanations, and only include the required block comment preceding each step.
 - If you cannot follow the schema, return a JSON object with an `error` key describing the issue instead.
 """
 )

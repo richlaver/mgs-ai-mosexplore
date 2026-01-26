@@ -116,12 +116,12 @@ def _get_vertex_config_for_cache(llm: Any) -> VertexConfig:
 
 
 def _load_cached_prompt_template() -> str:
-    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "codeact_coder_prompt_static.txt"
+    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "codeact_coder_prompt_static.md"
     return prompt_path.read_text(encoding="utf-8")
 
 
 def _load_instrument_selection_template() -> str:
-    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "instrument_selection_prompt_static.txt"
+    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "instrument_selection_prompt_static.md"
     return prompt_path.read_text(encoding="utf-8")
 
 

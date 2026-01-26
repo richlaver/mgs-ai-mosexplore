@@ -93,11 +93,8 @@ then yield only the first 20 rows of the DataFrame in the "final" output to save
 
 ## Commenting
 - Divide into code blocks, each corresponding to a step in the execution plan.
-- Precede each code block with comments explaining block:
-  * Step number and summary
-  * Rationale: why step is needed
-  * Implementation: how step is implemented
-- No other comments apart from block explanations to save tokens.
+- Precede each code block with a comment indicating the corresponding step number e.g. "Step 1"
+- No other comments apart from step numbers for each block to save tokens.
 
 # Tools
 ## `csv_saver_tool`
@@ -359,3 +356,21 @@ Schema Query 2
 1. Analyse the user query to understand what is being asked.
 2. Deduce the user's underlying need.
 3. Produce a step-by-step execution plan to answer the query. The execution plan defines steps to execute in the code and DOES NOT include these instruction steps.
+4. Consider what plots you can produce using the provided tools to best visualise the data to answer the query. If you identified one or more plots you can produce, include steps in the execution plan to create these plots using the appropriate plotting tools.
+5. Write the code to implement the execution plan. Run tools and code in parallel whereever possible. If using async, process results as they complete (e.g., `asyncio.as_completed`). Apply timezone conversions so that any timestamps sent to or received from the database are in the project timezone.
+6. Check code for:
+  - Common coding errors above
+  - Logic to answer query
+  - Adheres to constraints
+  - Calls tools correctly with necessary inputs
+  - Yielded outputs formed correctly
+
+# Output Schema
+- Return EXACTLY one JSON object with the following fields and no additional prose, Markdown, or prefixes:
+  * `objective`: string describing the underlying analytics objective in user-neutral language (<= 50 words).
+  * `plan`: array of concise strings, each string describing one numbered step necessary to fulfil the objective. Keep steps minimal but specific.
+  * `code`: string containing the generated code that already follows the commenting constraints above. Do not wrap the code in Markdown fences or HTML tags.
+- Ensure the JSON uses double-quoted keys/values per RFC 8259 and is syntactically valid even if embedded verbatim into a Python string literal.
+- Do not escape newlines inside the `code` string beyond what is required by JSON; rely on `\n` for line breaks.
+- The `code` string must not contain leading explanations, and only include the required block comment preceding each step.
+- If you cannot follow the schema, return a JSON object with an `error` key describing the issue instead.
