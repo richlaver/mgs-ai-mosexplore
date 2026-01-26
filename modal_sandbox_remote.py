@@ -306,9 +306,10 @@ def _format_error_payload(
     chosen_text = message if message not in (None, "") else line
     safe_message = (chosen_text or "").strip()
     safe_origin = (origin or "sandbox").strip() or "sandbox"
+    typ = "error" if safe_origin == "stderr" else "progress"
     prefix = f"[{safe_origin.upper()}][Step {safe_step}]"
     content = f"{prefix} {safe_message}" if safe_message else prefix
-    return _make_step_payload(content=content, typ="error", step=safe_step, extra_metadata={"origin": safe_origin})
+    return _make_step_payload(content=content, typ=typ, step=safe_step, extra_metadata={"origin": safe_origin})
 
 
 def _drain_stream_lines(queue: "asyncio.Queue[Optional[str]]") -> List[str]:

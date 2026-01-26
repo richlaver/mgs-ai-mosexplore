@@ -3,7 +3,9 @@ import logging
 import re
 from typing import Any, Dict, List
 
+import setup
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
@@ -92,6 +94,22 @@ class InstrumentSelectionList(BaseModel):
         description="Collection of instrument selections relevant to the query",
     )
 
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        schema = super().model_json_schema(*args, **kwargs)
+
+        def _strip_additional_properties(obj: Any) -> None:
+            if isinstance(obj, dict):
+                obj.pop("additionalProperties", None)
+                for value in obj.values():
+                    _strip_additional_properties(value)
+            elif isinstance(obj, list):
+                for value in obj:
+                    _strip_additional_properties(value)
+
+        _strip_additional_properties(schema)
+        return schema
+
     def to_dict_list(self) -> List[dict[str, Any]]:
         return [item.model_dump() for item in self.items]
 
@@ -138,7 +156,7 @@ def identify_and_filter_instruments(llm: BaseLanguageModel, query: str, instrume
     verified_str = ", ".join(verified_type_subtype) if verified_type_subtype else "None"
 
     system_template = """You are an expert in geotechnical monitoring instruments.
-Based on the query and available instruments (with their detailed field information), identify relevant instrument keys and select ONLY the specific fields that match the query context.
+Based on the available instruments (with their detailed field information), identify relevant instrument keys and select ONLY the specific fields that match the query context.
 
 Field Selection Guidelines:
 - Analyze the query intent and match it with field metadata (common names, descriptions, units)
@@ -153,14 +171,14 @@ Field Selection Guidelines:
 
 IMPORTANT: Match query semantics with field semantics using the rich metadata provided in the instrument context.
 
-Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names that are relevant to the specific query context based on field metadata analysis.
-Additionally, identify other relevant keys from query semantics, and select their relevant fields.
-
 Output MUST be valid JSON list format: [[{{"key": "LP_MOVEMENT", "database_field_names": ["calculation1"]}}, ...]
 If no relevant fields for a key, use empty list (will skip). If no additional semantics, only explicit.
 If no matches at all, return empty list []."""
 
     human_template = """Query: {query}
+
+Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names that are relevant to the specific query context based on field metadata analysis.
+Additionally, identify other relevant keys from query semantics, and select their relevant fields.
 
 Available instruments:
 {context}
@@ -180,9 +198,35 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
 
     result: list[dict[str, Any]] | None = None
     try:
-        structured_llm = llm.with_structured_output(InstrumentSelectionList)
-        structured_chain = prompt | structured_llm
-        structured_response = structured_chain.invoke(call_inputs)
+        cached_context = setup.build_instrument_selection_cached_context(context)
+        cached_content_id = setup.ensure_cached_content(
+            cache_key="instrument_selection",
+            content_text=cached_context,
+            llm=llm,
+            display_prefix="instrument-selection-cache",
+            legacy_hash_keys=["instrument_selection_cached_context_hash"],
+        )
+        structured_llm = llm.with_structured_output(
+            InstrumentSelectionList,
+            method="json_mode",
+        )
+
+        prompt_text = (
+            "Query: {query}\n\n"
+            "Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names "
+            "that are relevant to the specific query context based on field metadata analysis. "
+            "Additionally, identify other relevant keys from query semantics, and select their relevant fields.\n\n"
+            "Return JSON with instrument keys and their relevant fields only."
+        ).format(query=query, verified_str=verified_str)
+
+        message = HumanMessage(content=prompt_text)
+        if cached_content_id:
+            structured_response = structured_llm.invoke([message], cached_content=cached_content_id)
+        else:
+            structured_response = structured_llm.invoke([message])
+
+        if structured_response is None:
+            raise ValueError("Structured output returned no result.")
         result = structured_response.to_dict_list()
         logger.info("Structured instrument selection succeeded with %d items", len(result))
     except Exception as structured_error:

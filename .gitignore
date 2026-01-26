@@ -27,3 +27,4 @@ run_timeseries_plot_sandbox_test.py
 tools/create_output_toolkit_ananthu.py
 tools/review_values_toolkit_ananthu.py
 commit_list.csv
+*_0.*

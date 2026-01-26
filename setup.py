@@ -5,13 +5,20 @@ ensuring all components are ready for the RAG pipeline.
 """
 
 import ast
+import hashlib
 import json
 import math
 import os
 import statistics
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 import b2sdk.v1 as b2
 import psycopg2
+import requests
 import streamlit as st
+from google.auth import default as google_auth_default
+from google.auth.transport.requests import AuthorizedSession, Request
 from langchain_google_vertexai import ChatVertexAI
 from langchain_community.utilities import SQLDatabase as BaseSQLDatabase
 from utils.cancelable_llm import InterruptibleChatVertexAI, clone_llm as clone_interruptible_llm
@@ -20,7 +27,7 @@ from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
-from typing import List, Tuple, Dict, Union, Optional
+from typing import Any, List, Tuple, Dict, Union, Optional
 import modal
 import logging
 from utils.project_selection import (
@@ -46,6 +53,190 @@ VERTEX_ENDPOINT = _normalize_api_endpoint(
         else f"{VERTEX_LOCATION}-aiplatform.googleapis.com",
     )
 )
+
+_CACHED_CONTENT_IDS: Dict[str, str] = {}
+_CACHED_CONTENT_HASHES: Dict[str, str] = {}
+
+
+@dataclass
+class VertexConfig:
+    project_id: str
+    location: str
+    model_id: str
+    api_endpoint: str
+
+    @property
+    def model_resource(self) -> str:
+        return (
+            f"projects/{self.project_id}/locations/{self.location}"
+            f"/publishers/google/models/{self.model_id}"
+        )
+
+    @property
+    def base_url(self) -> str:
+        return f"https://{self.api_endpoint}/v1"
+
+
+def _get_authed_session() -> AuthorizedSession:
+    credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    if not credentials.valid:
+        logger.info("Refreshing Google credentials for Vertex cache")
+        credentials.refresh(Request())
+    return AuthorizedSession(credentials)
+
+
+def _safe_json(resp: requests.Response) -> Dict[str, Any]:
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw": resp.text}
+
+
+def _get_llm_model_id(llm: Any, fallback: str) -> str:
+    for attr in ("model_name", "model", "model_id"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return fallback
+
+
+def _get_vertex_config_for_cache(llm: Any) -> VertexConfig:
+    set_google_credentials()
+    project_id = get_project_id()
+    location = os.environ.get("VERTEX_LOCATION", VERTEX_LOCATION)
+    api_endpoint = _normalize_api_endpoint(os.environ.get("VERTEX_ENDPOINT", VERTEX_ENDPOINT))
+    model_id = _get_llm_model_id(llm, "gemini-2.0-flash-lite")
+    return VertexConfig(
+        project_id=project_id,
+        location=location,
+        model_id=model_id,
+        api_endpoint=api_endpoint,
+    )
+
+
+def _load_cached_prompt_template() -> str:
+    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "codeact_coder_prompt_static.txt"
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def _load_instrument_selection_template() -> str:
+    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "instrument_selection_prompt_static.txt"
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def build_codeact_coder_cached_context(tools: List[Any]) -> str:
+    tools_str = _build_tools_str(tools)
+    template = _load_cached_prompt_template()
+    return template.replace("<<TOOLS_STR>>", tools_str)
+
+
+def build_instrument_selection_cached_context(context_text: str) -> str:
+    template = _load_instrument_selection_template()
+    return template.replace("<<INSTRUMENT_CONTEXT>>", context_text)
+
+
+def _build_tools_str(tools: List[Any]) -> str:
+    return json.dumps(
+        [{"name": t.name, "description": t.description} for t in tools],
+        indent=2,
+    ) or "[]"
+
+
+def _create_cached_content(
+    session: AuthorizedSession,
+    config: VertexConfig,
+    context: str,
+    display_prefix: str = "codeact-coder-cache",
+) -> str:
+    display_name = f"{display_prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    payload = {
+        "displayName": display_name,
+        "model": config.model_resource,
+        "contents": [{"role": "user", "parts": [{"text": context}]}],
+        "ttl": "3600s",
+    }
+    url = f"{config.base_url}/projects/{config.project_id}/locations/{config.location}/cachedContents"
+    logger.info("Creating cached content: %s", display_name)
+    logger.info("cachedContents.create POST %s", url)
+    resp = session.post(url, json=payload, timeout=20)
+    data = _safe_json(resp)
+    logger.info("cachedContents.create status=%s", resp.status_code)
+    if resp.status_code >= 400:
+        logger.error("cachedContents.create error: %s", json.dumps(data, ensure_ascii=False))
+        resp.raise_for_status()
+    cached_name = data.get("name")
+    usage = data.get("usageMetadata", {})
+    logger.info("Cached content name=%s usage=%s", cached_name, usage)
+    if not cached_name:
+        raise RuntimeError("Cached content creation returned no name")
+    return cached_name
+
+
+def ensure_cached_content(
+    cache_key: str,
+    content_text: str,
+    llm: Any,
+    display_prefix: str,
+    legacy_hash_keys: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Create or reuse cached content for a given cache key and content."""
+    global _CACHED_CONTENT_IDS, _CACHED_CONTENT_HASHES
+
+    content_hash = hashlib.sha256((content_text or "").encode("utf-8")).hexdigest()
+    id_key = f"{cache_key}_cached_content_id"
+    hash_key = f"{cache_key}_cached_content_hash"
+    legacy_keys = list(legacy_hash_keys or [])
+
+    cached_id = None
+    cached_hash = None
+    try:
+        cached_id = st.session_state.get(id_key)
+        cached_hash = st.session_state.get(hash_key)
+        if cached_hash is None:
+            for legacy_key in legacy_keys:
+                cached_hash = st.session_state.get(legacy_key)
+                if cached_hash is not None:
+                    break
+    except Exception:
+        pass
+
+    if cached_id and cached_hash == content_hash:
+        _CACHED_CONTENT_IDS[cache_key] = cached_id
+        _CACHED_CONTENT_HASHES[cache_key] = cached_hash
+        return cached_id
+
+    if _CACHED_CONTENT_IDS.get(cache_key) and _CACHED_CONTENT_HASHES.get(cache_key) == content_hash:
+        return _CACHED_CONTENT_IDS[cache_key]
+
+    config = _get_vertex_config_for_cache(llm)
+    session = _get_authed_session()
+    cached_name = _create_cached_content(session, config, content_text, display_prefix=display_prefix)
+    cached_id = cached_name.split("/")[-1]
+
+    _CACHED_CONTENT_IDS[cache_key] = cached_id
+    _CACHED_CONTENT_HASHES[cache_key] = content_hash
+    try:
+        st.session_state[id_key] = cached_id
+        st.session_state[hash_key] = content_hash
+    except Exception:
+        pass
+    return cached_id
+
+
+def get_cached_content_id(cache_key: str) -> Optional[str]:
+    global _CACHED_CONTENT_IDS
+    cached_id = _CACHED_CONTENT_IDS.get(cache_key)
+    if cached_id:
+        return cached_id
+    id_key = f"{cache_key}_cached_content_id"
+    try:
+        cached_id = st.session_state.get(id_key)
+        if cached_id:
+            _CACHED_CONTENT_IDS[cache_key] = cached_id
+            return cached_id
+    except Exception:
+        pass
+    return None
 
 def set_modal_credentials():
     """Set Modal credentials from Streamlit secrets."""
@@ -209,7 +400,11 @@ def set_google_credentials() -> None:
 
     Writes credentials from secrets to a temporary file and sets the environment variable.
     """
-    st.toast("Setting Google credentials...", icon=":material/build:")
+    try:
+        st.toast("Setting Google credentials...", icon=":material/build:")
+    except Exception:
+        # Allows usage in non-Streamlit contexts (scripts, tests, CI).
+        pass
     credentials_json = st.secrets["GOOGLE_CREDENTIALS_JSON"]
     temp_file_path = "google_credentials.json"
     with open(temp_file_path, "w") as f:

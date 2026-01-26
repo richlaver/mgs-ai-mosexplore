@@ -36,7 +36,11 @@ from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from classes import AgentState, Context, Execution
 from modal_sandbox_remote import run_sandboxed_code
 from parameters import progress_messages
-from setup import clone_llm_with_overrides
+from setup import (
+    clone_llm_with_overrides,
+    build_codeact_coder_cached_context,
+    ensure_cached_content,
+)
 from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
@@ -155,6 +159,30 @@ def build_graph(
         thread_id=thread_id,
         user_id=user_id,
     )
+
+    try:
+        cached_context = build_codeact_coder_cached_context(
+            tools=[
+                extraction_tool,
+                timeseries_plot_tool,
+                map_plot_tool,
+                review_by_value_tool,
+                review_by_time_tool,
+                review_schema_tool,
+                breach_instr_tool,
+                review_changes_across_period_tool,
+                csv_saver_tool,
+            ]
+        )
+        ensure_cached_content(
+            cache_key="codeact_coder",
+            content_text=cached_context,
+            llm=llms["THINKING"],
+            display_prefix="codeact-coder-cache",
+            legacy_hash_keys=["codeact_coder_cached_tools_hash"],
+        )
+    except Exception as exc:
+        logger.warning("Failed to create CodeAct cached content: %s", exc)
 
     termination_lock = threading.Lock()
     termination_triggered = False
@@ -643,6 +671,13 @@ def build_graph(
                 kwargs["origin"] = origin
             return AIMessage(name=f"Executor_{branch_id}", content=str(content), additional_kwargs=kwargs)
 
+        def _code_display_message(code_text: str) -> AIMessage:
+            return AIMessage(
+                name="CodeActCoder",
+                content=f"```python\n{code_text}\n```",
+                additional_kwargs={"stage": "node", "process": "codeact_coder_branch"},
+            )
+
         def _flatten_message_content(message: BaseMessage | None) -> str:
             if message is None:
                 return ""
@@ -860,7 +895,6 @@ def build_graph(
             _ensure_run_not_cancelled(f"run_branch_{branch_id}:codeact")
             coder_result = codeact_coder_agent(
                 generating_llm=llms["THINKING"],
-                checking_llm=llms["BALANCED"],
                 tools=[
                     extraction_tool,
                     timeseries_plot_tool,
@@ -889,146 +923,223 @@ def build_graph(
                 payload["executions"] = [updated]
                 return payload
 
-            messages: List[AIMessage] = list(coder_result.get("messages", []) or [])
-            artefacts: List[AIMessage] = []
-            final_msg: AIMessage | None = None
-            error_logs_all: List[str] = []
-            error_logs_actionable: List[str] = []
-            terminated_early = False
-            if code:
-                try:
-                    gen = run_sandboxed_code.remote(
-                        code=code,
-                        table_info=table_info,
-                        table_relationship_graph=table_relationship_graph,
-                        thread_id=thread_id,
-                        user_id=user_id,
-                        global_hierarchy_access=global_hierarchy_access,
-                        selected_project_key=selected_project_key,
-                        container_slot=branch_id,
-                    )
-                    if termination_triggered:
-                        terminated_early = True
-                    else:
-                        for out in gen:
-                            _ensure_run_not_cancelled(f"run_branch_{branch_id}:sandbox_stream")
-                            if termination_triggered:
-                                terminated_early = True
-                                break
-                            if not isinstance(out, dict) or "metadata" not in out:
-                                err = f"Invalid output: {out}"
-                                error_logs_all.append(err)
-                                error_logs_actionable.append(err)
-                                continue
-                            typ = out["metadata"].get("type")
-                            origin = out["metadata"].get("origin")
-                            content = out.get("content", "")
-                            if typ in ("progress", "error"):
-                                if origin in {"stdout", "stderr"} and not show_sandbox_stream_logs:
-                                    pass
-                                else:
-                                    messages.append(_progress_msg(str(content), process=typ, origin=origin))
-                                if typ == "error":
-                                    error_logs_all.append(str(content))
-                                    if origin not in {"stdout", "stderr"}:
-                                        error_logs_actionable.append(str(content))
-                            elif typ == "final":
-                                final_msg = _progress_msg(str(content), process="final", origin=origin)
-                                messages.append(final_msg)
-                            elif typ in ("plot", "csv"):
-                                try:
-                                    import json as _json
+            all_messages: List[AIMessage] = list(coder_result.get("messages", []) or [])
 
-                                    jd = _json.loads(content) if isinstance(content, str) else content
-                                except Exception:
-                                    jd = None
-                                if jd:
-                                    msg = AIMessage(
-                                        name=f"Executor_{branch_id}",
-                                        content=jd.get("description", "(no description)"),
-                                        additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
-                                    )
-                                    messages.append(msg)
-                                    artefacts.append(msg)
-                                else:
-                                    err = f"Failed to parse {typ}: {str(content)[:200]}"
+            def _strip_code_fences(text: str) -> str:
+                if "```" not in text:
+                    return text.strip()
+                parts = text.split("```")
+                if len(parts) >= 3:
+                    candidate = parts[1]
+                    if candidate.lstrip().startswith("python"):
+                        candidate = candidate.split("\n", 1)[1] if "\n" in candidate else ""
+                    return candidate.strip()
+                return text.strip()
+
+            def _fix_syntax_error(code_to_fix: str, error_summary: str) -> str:
+                prompt = (
+                    "You are a fast Python syntax fixer. Only correct the syntax error described. "
+                    "Make no other changes. Do not refactor, rename, or adjust logic. "
+                    "Return ONLY the corrected code with no markdown."
+                )
+                llm_input = [
+                    ("system", prompt),
+                    (
+                        "human",
+                        f"Syntax error summary:\n{error_summary}\n\nCode to fix:\n{code_to_fix}",
+                    ),
+                ]
+                llm_result = llms["FAST"].invoke(llm_input)
+                raw_text = _flatten_message_content(llm_result)
+                cleaned = _strip_code_fences(raw_text)
+                return cleaned if cleaned else code_to_fix
+
+            def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[AIMessage], List[str], List[str]]:
+                messages: List[AIMessage] = []
+                artefacts: List[AIMessage] = []
+                final_msg: AIMessage | None = None
+                error_logs_all: List[str] = []
+                error_logs_actionable: List[str] = []
+                terminated_early = False
+                if code_to_run:
+                    try:
+                        gen = run_sandboxed_code.remote(
+                            code=code_to_run,
+                            table_info=table_info,
+                            table_relationship_graph=table_relationship_graph,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                            global_hierarchy_access=global_hierarchy_access,
+                            selected_project_key=selected_project_key,
+                            container_slot=branch_id,
+                        )
+                        if termination_triggered:
+                            terminated_early = True
+                        else:
+                            for out in gen:
+                                _ensure_run_not_cancelled(f"run_branch_{branch_id}:sandbox_stream")
+                                if termination_triggered:
+                                    terminated_early = True
+                                    break
+                                if not isinstance(out, dict) or "metadata" not in out:
+                                    err = f"Invalid output: {out}"
                                     error_logs_all.append(err)
                                     error_logs_actionable.append(err)
-                                    messages.append(_progress_msg(err, process="error"))
-                            else:
-                                messages.append(_progress_msg(str(content), process="progress", origin=origin))
-                except Exception as e:
-                    err = f"Sandbox error: {e}"
-                    error_logs_all.append(err)
-                    error_logs_actionable.append(err)
-                    messages.append(_progress_msg(err, process="error"))
-                finally:
-                    if terminated_early:
-                        try:
-                            gen.close()
-                        except Exception:
-                            pass
+                                    continue
+                                typ = out["metadata"].get("type")
+                                origin = out["metadata"].get("origin")
+                                content = out.get("content", "")
+                                if typ in ("progress", "error"):
+                                    if origin in {"stdout", "stderr"} and not show_sandbox_stream_logs:
+                                        pass
+                                    else:
+                                        messages.append(_progress_msg(str(content), process=typ, origin=origin))
+                                    if typ == "error":
+                                        error_logs_all.append(str(content))
+                                        if origin not in {"stdout", "stderr"}:
+                                            error_logs_actionable.append(str(content))
+                                elif typ == "final":
+                                    final_msg = _progress_msg(str(content), process="final", origin=origin)
+                                    messages.append(final_msg)
+                                elif typ in ("plot", "csv"):
+                                    try:
+                                        import json as _json
 
-            updated = updated.model_copy(
-                update={
-                    "final_response": final_msg,
-                    "artefacts": artefacts,
-                    "error_summary": "\n".join(error_logs_all) if error_logs_all else "",
-                    "is_sufficient": False,
-                }
-            )
+                                        jd = _json.loads(content) if isinstance(content, str) else content
+                                    except Exception:
+                                        jd = None
+                                    if jd:
+                                        msg = AIMessage(
+                                            name=f"Executor_{branch_id}",
+                                            content=jd.get("description", "(no description)"),
+                                            additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
+                                        )
+                                        messages.append(msg)
+                                        artefacts.append(msg)
+                                    else:
+                                        err = f"Failed to parse {typ}: {str(content)[:200]}"
+                                        error_logs_all.append(err)
+                                        error_logs_actionable.append(err)
+                                        messages.append(_progress_msg(err, process="error"))
+                                else:
+                                    messages.append(_progress_msg(str(content), process="progress", origin=origin))
+                    except Exception as e:
+                        err = f"Sandbox error: {e}"
+                        error_logs_all.append(err)
+                        error_logs_actionable.append(err)
+                        messages.append(_progress_msg(err, process="error"))
+                    finally:
+                        if terminated_early:
+                            try:
+                                gen.close()
+                            except Exception:
+                                pass
+                return messages, final_msg, artefacts, error_logs_all, error_logs_actionable
 
-            deterministic_error = bool(error_logs_actionable)
-            message_errors = any(
-                isinstance(m, AIMessage)
-                and m.name == f"Executor_{branch_id}"
-                and m.additional_kwargs.get("stage") == "execution_output"
-                and m.additional_kwargs.get("process") == "error"
-                and m.additional_kwargs.get("origin") not in {"stdout", "stderr"}
-                for m in messages
-            )
-            if deterministic_error or message_errors:
-                is_sufficient = False
-            else:
-                user_query = state.context.retrospective_query if state.context else ""
-                branch_context: List[str] = []
-                if getattr(updated, "objective", ""):
-                    branch_context.append(f"Objective:\n{updated.objective}")
-                if getattr(updated, "plan", None):
-                    try:
-                        plan_lines = [f"{idx + 1}. {step}" for idx, step in enumerate(updated.plan) if isinstance(step, str) and step.strip()]
-                    except Exception:
-                        plan_lines = []
-                    if plan_lines:
-                        branch_context.append("Plan:\n" + "\n".join(plan_lines))
-
-                is_sufficient = _judge_sufficiency(final_msg, user_query, branch_context)
-
+            execution_updates: List[Execution] = []
             fact_numbers: List[int] = []
-            if is_sufficient:
-                fact_numbers = _decompose_and_update_facts(final_msg, state)
-                try:
-                    logger.info("[Facts] Current response fact indices: %s", fact_numbers)
-                    logger.info("[Facts] Stored response_facts (count=%d): %s", len(response_facts), response_facts)
-                except Exception as exc:
-                    logger.error("[Facts] Logging failed: %s", exc)
+            current_execution = updated
+            current_code = code
+            final_msg: AIMessage | None = None
+            max_retry_number = 2
 
-            updated = updated.model_copy(update={"is_sufficient": is_sufficient})
-            payload["executions"] = [updated]
-            if messages:
-                payload["messages"] = messages
+            while True:
+                attempt_messages, final_msg, artefacts, error_logs_all, error_logs_actionable = _execute_code(current_code)
+                all_messages.extend(attempt_messages)
+
+                updated_attempt = current_execution.model_copy(
+                    update={
+                        "final_response": final_msg,
+                        "artefacts": artefacts,
+                        "error_summary": "\n".join(error_logs_all) if error_logs_all else "",
+                        "is_sufficient": False,
+                    }
+                )
+
+                error_text = updated_attempt.error_summary or ""
+                has_syntax_error = "SyntaxError" in error_text or "AttributeError" in error_text
+                deterministic_error = bool(error_logs_actionable)
+                message_errors = any(
+                    isinstance(m, AIMessage)
+                    and m.name == f"Executor_{branch_id}"
+                    and m.additional_kwargs.get("stage") == "execution_output"
+                    and m.additional_kwargs.get("process") == "error"
+                    and m.additional_kwargs.get("origin") not in {"stdout", "stderr"}
+                    for m in attempt_messages
+                )
+
+                if not has_syntax_error and not (deterministic_error or message_errors):
+                    user_query = state.context.retrospective_query if state.context else ""
+                    branch_context: List[str] = []
+                    if getattr(updated_attempt, "objective", ""):
+                        branch_context.append(f"Objective:\n{updated_attempt.objective}")
+                    if getattr(updated_attempt, "plan", None):
+                        try:
+                            plan_lines = [
+                                f"{idx + 1}. {step}"
+                                for idx, step in enumerate(updated_attempt.plan)
+                                if isinstance(step, str) and step.strip()
+                            ]
+                        except Exception:
+                            plan_lines = []
+                        if plan_lines:
+                            branch_context.append("Plan:\n" + "\n".join(plan_lines))
+                    is_sufficient = _judge_sufficiency(final_msg, user_query, branch_context)
+                else:
+                    is_sufficient = False
+
+                if is_sufficient:
+                    fact_numbers = _decompose_and_update_facts(final_msg, state)
+                    try:
+                        logger.info("[Facts] Current response fact indices: %s", fact_numbers)
+                        logger.info("[Facts] Stored response_facts (count=%d): %s", len(response_facts), response_facts)
+                    except Exception as exc:
+                        logger.error("[Facts] Logging failed: %s", exc)
+
+                updated_attempt = updated_attempt.model_copy(update={"is_sufficient": is_sufficient})
+                execution_updates.append(updated_attempt)
+
+                if has_syntax_error and current_execution.retry_number < max_retry_number:
+                    all_messages.append(
+                        _progress_msg(
+                            f"SyntaxError detected. Attempting correction (retry {current_execution.retry_number + 1}/{max_retry_number}).",
+                            process="progress",
+                        )
+                    )
+                    corrected_code = _fix_syntax_error(current_code, updated_attempt.error_summary)
+                    all_messages.append(_code_display_message(corrected_code))
+                    current_execution = Execution(
+                        parallel_agent_id=updated_attempt.parallel_agent_id,
+                        retry_number=updated_attempt.retry_number + 1,
+                        objective=updated_attempt.objective,
+                        plan=list(updated_attempt.plan),
+                        codeact_code=corrected_code,
+                        final_response=None,
+                        artefacts=[],
+                        error_summary="",
+                    )
+                    current_code = corrected_code
+                    continue
+
+                break
+
+            payload["executions"] = execution_updates
+            if all_messages:
+                payload["messages"] = all_messages
+
+            latest_execution = execution_updates[-1] if execution_updates else updated
 
             nonlocal successful_executions, success_order_counter
             with termination_lock:
                 prev_retry = counted_branches.get(branch_id, -1)
-                if is_sufficient and final_msg and updated.retry_number >= prev_retry:
-                    counted_branches[branch_id] = updated.retry_number
+                if latest_execution.is_sufficient and final_msg and latest_execution.retry_number >= prev_retry:
+                    counted_branches[branch_id] = latest_execution.retry_number
                     successful_executions = [entry for entry in successful_executions if entry.get("branch_id") != branch_id]
                     success_order_counter += 1
                     successful_executions.append(
                         {
                             "branch_id": branch_id,
-                            "retry_number": updated.retry_number,
+                            "retry_number": latest_execution.retry_number,
                             "final_message": final_msg,
                             "response_fact_indices": fact_numbers,
                             "order": success_order_counter,

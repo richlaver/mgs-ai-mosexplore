@@ -683,6 +683,8 @@ def render_initial_ui() -> None:
         )
 
 def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
+    if isinstance(message, AIMessageChunk) and getattr(message, "usage_metadata", None):
+        return False
     if message.content.strip() == "":
         return False
     additional_kwargs = message.additional_kwargs or {}
