@@ -57,6 +57,7 @@ VERTEX_ENDPOINT = _normalize_api_endpoint(
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
+_GOOGLE_CREDENTIALS_SET = False
 
 
 @dataclass
@@ -530,6 +531,14 @@ def set_google_credentials() -> None:
 
     Writes credentials from secrets to a temporary file and sets the environment variable.
     """
+    global _GOOGLE_CREDENTIALS_SET
+    if _GOOGLE_CREDENTIALS_SET:
+        return
+
+    existing_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if existing_path and Path(existing_path).is_file():
+        _GOOGLE_CREDENTIALS_SET = True
+        return
     try:
         st.toast("Setting Google credentials...", icon=":material/build:")
     except Exception:
@@ -540,6 +549,7 @@ def set_google_credentials() -> None:
     with open(temp_file_path, "w") as f:
         f.write(credentials_json)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
+    _GOOGLE_CREDENTIALS_SET = True
 
 
 def get_llms() -> Dict[str, ChatVertexAI]:
