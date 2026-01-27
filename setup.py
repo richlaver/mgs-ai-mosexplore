@@ -270,6 +270,7 @@ def ensure_cached_content(
     llm: Any,
     display_prefix: str,
     legacy_hash_keys: Optional[List[str]] = None,
+    force_refresh: bool = False,
 ) -> Optional[str]:
     """Create or reuse cached content for a given cache key and content."""
     global _CACHED_CONTENT_IDS, _CACHED_CONTENT_HASHES
@@ -292,12 +293,16 @@ def ensure_cached_content(
     except Exception:
         pass
 
-    if cached_id and cached_hash == content_hash:
+    if not force_refresh and cached_id and cached_hash == content_hash:
         _CACHED_CONTENT_IDS[cache_key] = cached_id
         _CACHED_CONTENT_HASHES[cache_key] = cached_hash
         return cached_id
 
-    if _CACHED_CONTENT_IDS.get(cache_key) and _CACHED_CONTENT_HASHES.get(cache_key) == content_hash:
+    if (
+        not force_refresh
+        and _CACHED_CONTENT_IDS.get(cache_key)
+        and _CACHED_CONTENT_HASHES.get(cache_key) == content_hash
+    ):
         return _CACHED_CONTENT_IDS[cache_key]
 
     config = _get_vertex_config_for_cache(llm)
@@ -329,6 +334,39 @@ def get_cached_content_id(cache_key: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def is_cached_content_active(cached_id: str, llm: Any) -> bool:
+    if not cached_id:
+        return False
+    config = _get_vertex_config_for_cache(llm)
+    session = _get_authed_session()
+    url = f"{config.base_url}/projects/{config.project_id}/locations/{config.location}/cachedContents/{cached_id}"
+    resp = session.get(url, timeout=10)
+    if resp.status_code == 200:
+        return True
+    logger.info("Cached content %s check failed (status=%s)", cached_id, resp.status_code)
+    return False
+
+
+def get_or_refresh_cached_content(
+    cache_key: str,
+    content_text: str,
+    llm: Any,
+    display_prefix: str,
+    legacy_hash_keys: Optional[List[str]] = None,
+) -> Optional[str]:
+    cached_id = get_cached_content_id(cache_key)
+    if cached_id and is_cached_content_active(cached_id, llm):
+        return cached_id
+    return ensure_cached_content(
+        cache_key=cache_key,
+        content_text=content_text,
+        llm=llm,
+        display_prefix=display_prefix,
+        legacy_hash_keys=legacy_hash_keys,
+        force_refresh=True,
+    )
 
 def set_modal_credentials():
     """Set Modal credentials from Streamlit secrets."""

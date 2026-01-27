@@ -198,7 +198,14 @@ def codeact_coder_agent(
     CodeactCoderResponse,
     method="json_mode",
   )
-  cached_content_id = setup.get_cached_content_id("codeact_coder")
+  cached_context = setup.build_codeact_coder_cached_context(tools)
+  cached_content_id = setup.get_or_refresh_cached_content(
+    cache_key="codeact_coder",
+    content_text=cached_context,
+    llm=generating_llm,
+    display_prefix="codeact-coder-cache",
+    legacy_hash_keys=["codeact_coder_cached_tools_hash"],
+  )
 
   max_format_retries = 4
 

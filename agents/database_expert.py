@@ -128,7 +128,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
     result: list[dict[str, Any]] | None = None
     try:
         cached_context = setup.build_instrument_selection_cached_context(context)
-        cached_content_id = setup.ensure_cached_content(
+        cached_content_id = setup.get_or_refresh_cached_content(
             cache_key="instrument_selection",
             content_text=cached_context,
             llm=llm,
