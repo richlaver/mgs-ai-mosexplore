@@ -42,6 +42,8 @@ def setup_session() -> None:
         st.session_state.table_relationship_graph = None
     if "developer_view" not in st.session_state:
         st.session_state.developer_view = True
+    if "sandbox_logging" not in st.session_state:
+        st.session_state.sandbox_logging = True
     if "parallel_plan" not in st.session_state:
         st.session_state.parallel_plan = "Performance"
     if "num_parallel_executions" not in st.session_state:

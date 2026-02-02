@@ -460,6 +460,7 @@ async def _run_impl(self,
     user_id: int,
     global_hierarchy_access: bool,
     selected_project_key: Optional[str] = None,
+    stream_sandbox_logs: bool = True,
 ) -> AsyncGenerator[dict, None]:
     _ensure_basic_logging()
     start_ts = perf_counter()
@@ -673,19 +674,30 @@ async def _run_impl(self,
         tool_semaphore = asyncio.Semaphore(tool_limit)
         run_logger.info("Tool call concurrency limited to %s", tool_limit)
 
-        stdout_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
-        stderr_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
-        stdout_stream = _SandboxStream(sys.stdout, stdout_queue, filter_fn=_stdout_error_filter)
-        stderr_stream = _SandboxStream(sys.stderr, stderr_queue)
-        stdout_ctx = contextlib.redirect_stdout(stdout_stream)
-        stderr_ctx = contextlib.redirect_stderr(stderr_stream)
+        stream_sandbox_logs = bool(stream_sandbox_logs)
+        if stream_sandbox_logs:
+            stdout_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+            stderr_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+            stdout_stream = _SandboxStream(sys.stdout, stdout_queue, filter_fn=_stdout_error_filter)
+            stderr_stream = _SandboxStream(sys.stderr, stderr_queue)
+            stdout_ctx = contextlib.redirect_stdout(stdout_stream)
+            stderr_ctx = contextlib.redirect_stderr(stderr_stream)
 
-        queue_logging_handler = _QueueLoggingHandler(stdout_queue, stderr_queue)
-        queue_logging_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        root_logger = logging.getLogger()
-        root_logger.addHandler(queue_logging_handler)
+            queue_logging_handler = _QueueLoggingHandler(stdout_queue, stderr_queue)
+            queue_logging_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+            root_logger = logging.getLogger()
+            root_logger.addHandler(queue_logging_handler)
+        else:
+            stdout_queue = None
+            stderr_queue = None
+            stdout_ctx = contextlib.nullcontext()
+            stderr_ctx = contextlib.nullcontext()
+            queue_logging_handler = None
+            root_logger = logging.getLogger()
 
         def _collect_stream_payloads(flush: bool = False) -> List[Dict[str, Dict | str]]:
+            if not stream_sandbox_logs or stdout_queue is None or stderr_queue is None:
+                return []
             if flush:
                 stdout_stream.flush_buffer()
                 stderr_stream.flush_buffer()
@@ -883,8 +895,9 @@ async def _run_impl(self,
                 run_logger.info("[%s] execute_strategy completed", type(self).__name__)
                 log_stage("after_execute_strategy")
         finally:
-            root_logger.removeHandler(queue_logging_handler)
-            queue_logging_handler.close()
+            if queue_logging_handler is not None:
+                root_logger.removeHandler(queue_logging_handler)
+                queue_logging_handler.close()
 
     except Exception as e:
         import traceback
@@ -919,6 +932,7 @@ class SandboxExecutorA:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:
         async for out in _run_impl(
             self,
@@ -929,6 +943,7 @@ class SandboxExecutorA:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -959,6 +974,7 @@ class SandboxExecutorB:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -969,6 +985,7 @@ class SandboxExecutorB:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1000,6 +1017,7 @@ class SandboxExecutorC:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -1010,6 +1028,7 @@ class SandboxExecutorC:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1040,6 +1059,7 @@ class SandboxExecutorD:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -1050,6 +1070,7 @@ class SandboxExecutorD:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1080,6 +1101,7 @@ class SandboxExecutorE:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -1090,6 +1112,7 @@ class SandboxExecutorE:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1120,6 +1143,7 @@ class SandboxExecutorF:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -1130,6 +1154,7 @@ class SandboxExecutorF:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1160,6 +1185,7 @@ class SandboxExecutorG:
         user_id: int,
         global_hierarchy_access: bool,
         selected_project_key: Optional[str] = None,
+        stream_sandbox_logs: bool = True,
     ) -> AsyncGenerator[dict, None]:  # type: ignore[override]
         async for out in _run_impl(
             self,
@@ -1170,6 +1196,7 @@ class SandboxExecutorG:
             user_id,
             global_hierarchy_access,
             selected_project_key,
+            stream_sandbox_logs,
         ):
             yield out
 
@@ -1183,6 +1210,7 @@ def execute_remote_sandbox(
     selected_project_key: Optional[str] = None,
     container_slot: Optional[int] = None,
     first_payload_timeout: Optional[int] = None,
+    stream_sandbox_logs: bool = True,
 ) -> Generator[dict, None, None]:
 
     if first_payload_timeout is None:
@@ -1279,6 +1307,7 @@ def execute_remote_sandbox(
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access,
             selected_project_key=selected_project_key,
+            stream_sandbox_logs=stream_sandbox_logs,
         )
         modal_function_call = _extract_modal_call(outputs, slot, class_name)
         controller = get_active_run_controller()

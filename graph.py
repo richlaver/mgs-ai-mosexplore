@@ -130,6 +130,7 @@ def build_graph(
     min_successful_responses: int = 3,
     min_explained_variance: float = 0.7,
     selected_project_key: str | None = None,
+    stream_sandbox_logs: bool = True,
 ) -> StateGraph:
     st.toast("Building graph...", icon=":material/account_tree:")
 
@@ -1258,6 +1259,7 @@ def build_graph(
                             global_hierarchy_access=global_hierarchy_access,
                             selected_project_key=selected_project_key,
                             container_slot=branch_id,
+                            stream_sandbox_logs=stream_sandbox_logs,
                         )
                         if termination_triggered:
                             terminated_early = True

@@ -390,8 +390,7 @@ def render_initial_ui() -> None:
     parallel_plans = {
         "Economy": {"agents": 3, "label": "Economy — 3 agents"},
         "Reliable": {"agents": 5, "label": "Reliable — 5 agents"},
-        # "Performance": {"agents": 7, "label": "Performance — 7 agents"},
-        "Performance": {"agents": 2, "label": "Performance — 7 agents"},
+        "Performance": {"agents": 7, "label": "Performance — 7 agents"},
     }
 
     completion_strategies = {
@@ -444,6 +443,7 @@ def render_initial_ui() -> None:
             min_successful_responses=st.session_state.min_successful_responses,
             min_explained_variance=st.session_state.min_explained_variance,
             selected_project_key=st.session_state.get("selected_project_key"),
+            stream_sandbox_logs=st.session_state.get("sandbox_logging", True),
         )
         try:
             if st.session_state.get("app_deployed"):
@@ -515,6 +515,7 @@ def render_initial_ui() -> None:
                                 min_successful_responses=st.session_state.get("min_successful_responses", 3),
                                 min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
                                 selected_project_key=selected_key,
+                                stream_sandbox_logs=st.session_state.get("sandbox_logging", True),
                             )
                             logger.info("[Project Switch] Graph rebuilt for project=%s", selected_key)
                         except Exception as e:
@@ -547,6 +548,7 @@ def render_initial_ui() -> None:
                                 min_successful_responses=st.session_state.get("min_successful_responses", 3),
                                 min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
                                 selected_project_key=st.session_state.get("selected_project_key"),
+                                stream_sandbox_logs=st.session_state.get("sandbox_logging", True),
                             )
                         except Exception as e:
                             st.error(f"Failed to rebuild agent graph after user switch: {e}")
@@ -642,6 +644,12 @@ def render_initial_ui() -> None:
                 use_container_width=False
             ):
                 st.toggle(label="Developer View", key="developer_view", help="Toggle to show or hide internal LLM responses")
+                st.toggle(
+                    label="Sandbox Logging",
+                    key="sandbox_logging",
+                    help="Toggle sandbox log streaming",
+                    on_change=_rebuild_graph,
+                )
                 st.button(
                     label="Sandbox App",
                     icon=":material/developer_board:",
