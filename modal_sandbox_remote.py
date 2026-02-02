@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Generator, List, Dict, AsyncGenerator, Optional, Any
 from parameters import include_tables
-from setup import build_modal_secrets
+from setup_modal import build_modal_secrets
 from contextlib import suppress
 from modal._functions import _FunctionCall
 
@@ -131,6 +131,7 @@ image = (
     .add_local_file("tools/sql_security_toolkit.py", remote_path="/root/tools/sql_security_toolkit.py")
     .add_local_file("artefact_management.py", remote_path="/root/artefact_management.py")
     .add_local_file("setup.py", remote_path="/root/setup.py")
+    .add_local_file("setup_modal.py", remote_path="/root/setup_modal.py")
     .add_local_file("utils/project_selection.py", remote_path="/root/utils/project_selection.py")
     .add_local_file("utils/run_cancellation.py", remote_path="/root/utils/run_cancellation.py")
     .add_local_file("utils/cancelable_llm.py", remote_path="/root/utils/cancelable_llm.py")
@@ -273,17 +274,32 @@ class _QueueLoggingHandler(logging.Handler):
 
 
 def _make_step_payload(content: str, typ: str, step: int = 0, extra_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Dict | str]:
-    safe_step = step if isinstance(step, int) and step >= 0 else 0
+    safe_origin = None
+    if isinstance(extra_metadata, dict):
+        safe_origin = extra_metadata.get("origin")
+    origin_value = (safe_origin or "").strip().lower()
+    if origin_value == "stderr":
+        level = "error"
+    elif origin_value == "stdout":
+        level = "debug"
+    else:
+        level = "error" if str(typ).lower() == "error" else "debug"
+
     payload = {
         "content": (content or ""),
-        "metadata": {
-            "type": typ,
-            "step": safe_step,
+        "additional_kwargs": {
+            "level": level,
+            "is_final": False,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "origin": {
+                "process": "sandbox_log",
+                "thinking_stage": None,
+                "branch_id": None,
+            },
+            "is_child": True,
+            "artefacts": [],
         },
     }
-    if extra_metadata:
-        payload["metadata"].update(extra_metadata)
     return payload
 
 
@@ -357,7 +373,7 @@ def _enter_impl(self):
         database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
         port=rds_port,
         connect_timeout=10,
-        options="-c statement_timeout=50000",
+        options="-c statement_timeout=30000",
         keepalives=1,
         keepalives_idle=30,
         keepalives_interval=10,
@@ -515,7 +531,7 @@ async def _run_impl(self,
                 database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
                 port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
                 connect_timeout=10,
-                options="-c statement_timeout=50000",
+                options="-c statement_timeout=30000",
                 keepalives=1,
                 keepalives_idle=30,
                 keepalives_interval=10,
@@ -792,6 +808,58 @@ async def _run_impl(self,
                         run_logger.exception("Error while yielding outputs: %s", e)
                         raise
 
+                def _decorate_code_yield_output(output: Any) -> Any:
+                    if not isinstance(output, dict):
+                        return output
+                    if "__control__" in output:
+                        return output
+
+                    content = output.get("content", "")
+                    metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+                    meta_type = str(metadata.get("type") or "").lower()
+
+                    if meta_type in {"plot", "csv", "final"}:
+                        level = "debug"
+                    elif meta_type == "error":
+                        level = "error"
+                    elif meta_type == "progress":
+                        level = "info"
+                    else:
+                        level = "debug"
+
+                    artefact_entry: Dict[str, Any] | None = None
+                    if meta_type in {"plot", "csv"}:
+                        content_dict = content if isinstance(content, dict) else {}
+                        artefact_entry = {
+                            "type": meta_type,
+                            "id": content_dict.get("artefact_id"),
+                            "description": content_dict.get("description"),
+                            "tool_name": content_dict.get("tool_name"),
+                        }
+
+                    additional_kwargs = output.get("additional_kwargs")
+                    if not isinstance(additional_kwargs, dict):
+                        additional_kwargs = {}
+
+                    additional_kwargs.update(
+                        {
+                            "level": level,
+                            "is_final": False,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "is_child": True,
+                            "artefacts": [artefact_entry] if artefact_entry else [],
+                        }
+                    )
+
+                    origin = additional_kwargs.get("origin")
+                    if not isinstance(origin, dict):
+                        origin = {}
+                    origin["process"] = "code_yield"
+                    additional_kwargs["origin"] = origin
+
+                    output["additional_kwargs"] = additional_kwargs
+                    return output
+
                 try:
                     result = execute_strategy()
                 except TypeError as te:
@@ -809,7 +877,7 @@ async def _run_impl(self,
                 async for output in _yield_outputs(result):
                     for payload in _collect_stream_payloads():
                         yield payload
-                    yield output
+                    yield _decorate_code_yield_output(output)
                 for payload in _collect_stream_payloads(flush=True):
                     yield payload
                 run_logger.info("[%s] execute_strategy completed", type(self).__name__)
@@ -829,7 +897,7 @@ async def _run_impl(self,
     image=image,
     secrets=build_modal_secrets(),
     min_containers=1,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorA:
@@ -869,7 +937,7 @@ class SandboxExecutorA:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorB:
@@ -910,7 +978,7 @@ class SandboxExecutorB:
     secrets=build_modal_secrets(),
     # Keep C container optionally warm via warm-up (do not force always-on)
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorC:
@@ -950,7 +1018,7 @@ class SandboxExecutorC:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorD:
@@ -990,7 +1058,7 @@ class SandboxExecutorD:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorE:
@@ -1030,7 +1098,7 @@ class SandboxExecutorE:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorF:
@@ -1070,7 +1138,7 @@ class SandboxExecutorF:
     image=image,
     secrets=build_modal_secrets(),
     min_containers=0,
-    timeout=500
+    timeout=300
 )
 @modal.concurrent(max_inputs=1)
 class SandboxExecutorG:
@@ -1114,9 +1182,11 @@ def execute_remote_sandbox(
     global_hierarchy_access: bool,
     selected_project_key: Optional[str] = None,
     container_slot: Optional[int] = None,
+    first_payload_timeout: Optional[int] = None,
 ) -> Generator[dict, None, None]:
 
-    first_payload_timeout = _get_int_env("SANDBOX_FIRST_PAYLOAD_TIMEOUT_SECONDS", 20) or 20
+    if first_payload_timeout is None:
+        first_payload_timeout = _get_int_env("SANDBOX_FIRST_PAYLOAD_TIMEOUT_SECONDS", 20) or 20
 
     def _extract_modal_call(gen, slot_label: int, class_label: str) -> Optional[_FunctionCall]:
         to_visit: list[Any] = [gen]

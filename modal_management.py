@@ -4,6 +4,7 @@ import subprocess
 import time
 import logging
 import json
+import os
 from typing import Optional
 
 import modal_sandbox_remote
@@ -210,6 +211,14 @@ def warm_up_container():
         return
     app_id = st.session_state.get("app_id")
     target = int(st.session_state.get("num_parallel_executions", 1) or 0)
+    max_slots = len(modal_sandbox_remote.SANDBOX_EXECUTOR_CLASS_NAMES)
+    if target > max_slots:
+        logger.warning(
+            "[Modal] Requested warm containers exceeds executor classes; capping | requested=%s max=%s",
+            target,
+            max_slots,
+        )
+        target = max_slots
 
     _update_autoscaler_for_all(target)
 
@@ -218,8 +227,10 @@ def warm_up_container():
     st.session_state.container_warm_count = current_warm
     st.session_state.container_warm = current_warm > 0
 
-    if target == current_warm:
-        logger.info("Skipping warm_up_container: target=%s matches current=%s", target, current_warm)
+    if target == 0:
+        logger.info("Skipping warm_up_container: target=0")
+        st.session_state.container_warm = False
+        st.session_state.container_warm_count = 0
         return
 
     if target < current_warm:
@@ -229,28 +240,39 @@ def warm_up_container():
             st.session_state.container_warm_count = len(refreshed)
             st.session_state.container_warm = st.session_state.container_warm_count > 0
             logger.info("[Modal] Stopped all containers to enforce ordered allocation | before=%s after=%s target=%s", current_warm, st.session_state.container_warm_count, target)
-        # Reset warm count for deterministic re-warm below.
         current_warm = 0
 
     with st.spinner("Warming up containers..."):
         try:
-            for slot in range(current_warm, target):
-                for output in modal_sandbox_remote.execute_remote_sandbox(
-                    code=MOCK_CODE,
-                    table_info=MOCK_TABLE_INFO,
-                    table_relationship_graph=MOCK_TABLE_REL_GRAPH,
-                    thread_id=MOCK_THREAD_ID,
-                    user_id=MOCK_USER_ID,
-                    global_hierarchy_access=MOCK_GLOBAL_ACCESS,
-                    selected_project_key=st.session_state.get("selected_project_key"),
-                    container_slot=slot,
-                ):
-                    logger.info(f"Container[{slot}] output from warm_up_container: {output}")
-                    if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
-                        st.error("Cannot warm container: App not deployed.")
-                        st.session_state.container_warm = False
-                        st.session_state.container_warm_count = current_warm
-                        return
+            warmup_timeout = int(os.environ.get("SANDBOX_WARMUP_TIMEOUT_SECONDS", "120"))
+            warmup_timeout = max(5, warmup_timeout)
+            for slot in range(target):
+                try:
+                    for output in modal_sandbox_remote.execute_remote_sandbox(
+                        code=MOCK_CODE,
+                        table_info=MOCK_TABLE_INFO,
+                        table_relationship_graph=MOCK_TABLE_REL_GRAPH,
+                        thread_id=MOCK_THREAD_ID,
+                        user_id=MOCK_USER_ID,
+                        global_hierarchy_access=MOCK_GLOBAL_ACCESS,
+                        selected_project_key=st.session_state.get("selected_project_key"),
+                        container_slot=slot,
+                        first_payload_timeout=warmup_timeout,
+                    ):
+                        logger.info(f"Container[{slot}] output from warm_up_container: {output}")
+                        if output.get("type") == "error" and "not deployed" in (output.get("content", "") or "").lower():
+                            st.error("Cannot warm container: App not deployed.")
+                            st.session_state.container_warm = False
+                            st.session_state.container_warm_count = current_warm
+                            return
+                except TimeoutError as exc:
+                    logger.warning(
+                        "[Modal] Warm-up timeout waiting for first payload | slot=%s timeout=%ss error=%s",
+                        slot,
+                        warmup_timeout,
+                        exc,
+                    )
+                    continue
             refreshed = _list_app_containers(app_id)
             new_count = len(refreshed)
             st.session_state.container_warm = new_count > 0
@@ -258,7 +280,10 @@ def warm_up_container():
             if new_count >= target:
                 st.toast(f"{target} container(s) warmed successfully.", icon=":material/mode_heat:")
             else:
-                st.toast(f"Warmed {new_count}/{target} container(s). Check Modal console.", icon=":material/warning:")
+                st.toast(
+                    f"Warmed {new_count}/{target} container(s). Some may still be starting. Check Modal console.",
+                    icon=":material/warning:",
+                )
         except Exception as e:
             st.session_state.container_warm = False
             st.session_state.container_warm_count = current_warm

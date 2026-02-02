@@ -135,11 +135,22 @@ def strip_trailing_asyncio_run_notice(code: str) -> str:
 
 
 def _make_codeact_message(content: str) -> AIMessage:
-    return AIMessage(
-        name="CodeActCoder",
-        content=content,
-        additional_kwargs={"stage": "node", "process": "codeact_coder_branch"},
-    )
+  return AIMessage(
+    name="CodeActCoder",
+    content=content,
+    additional_kwargs={
+      "level": "debug",
+      "is_final": False,
+      "timestamp": datetime.now().astimezone().isoformat(),
+      "origin": {
+        "process": "codeact_coder",
+        "thinking_stage": None,
+        "branch_id": None,
+      },
+      "is_child": True,
+      "artefacts": [],
+    },
+  )
 
 def codeact_coder_agent(
     generating_llm: BaseLanguageModel,

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from classes import AgentState, Context, Execution
@@ -23,7 +24,7 @@ def reporter_agent(
         executions: List of execution runs from AgentState.
 
     Returns:
-        Updated list of messages, including a final AIMessage and unique artefact messages with stage="final".
+        Updated list of messages, including a final response and unique artefact notices.
     """
     logger.info("Starting reporter_agent")
 
@@ -41,15 +42,27 @@ def reporter_agent(
     csv_dict = {}
     for ex in ([best_ex] if best_ex else []):
         for art in ex.artefacts:
-            process = art.additional_kwargs.get("process")
-            desc = art.content
-            artefact_id = art.additional_kwargs.get("artefact_id")
+            if not isinstance(art, dict):
+                continue
+            process = art.get("type")
+            desc = art.get("description")
+            artefact_id = art.get("id")
+            tool_name = art.get("tool_name")
+
             if process == "plot":
                 if desc not in plot_dict:
-                    plot_dict[desc] = {"description": desc, "artefact_id": artefact_id}
+                    plot_dict[desc] = {
+                        "description": desc,
+                        "artefact_id": artefact_id,
+                        "tool_name": tool_name,
+                    }
             elif process == "csv":
                 if desc not in csv_dict:
-                    csv_dict[desc] = {"description": desc, "artefact_id": artefact_id}
+                    csv_dict[desc] = {
+                        "description": desc,
+                        "artefact_id": artefact_id,
+                        "tool_name": tool_name,
+                    }
 
     plot_artefacts = list(plot_dict.values())
     csv_artefacts = list(csv_dict.values())
@@ -109,36 +122,74 @@ Successfully generated CSV files:
     if not final_response or not str(final_response).strip():
         final_response = best_response or "I'm unable to provide a response at this time."
 
-    updated_messages.append(AIMessage(
-        name="Reporter",
-        content=final_response,
-        additional_kwargs={
-            "stage": "final",
-            "process": "response"
-        }
-    ))
+    updated_messages.append(
+        AIMessage(
+            name="Reporter",
+            content=final_response,
+            additional_kwargs={
+                "level": "info",
+                "is_final": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "origin": {
+                    "process": "reporter",
+                    "thinking_stage": None,
+                    "branch_id": None,
+                },
+                "is_child": False,
+                "artefacts": [],
+            },
+        )
+    )
 
     for plot in plot_artefacts:
-        updated_messages.append(AIMessage(
-            name="Reporter",
-            content=f"Plot artefact available (id={plot['artefact_id']})",
-            additional_kwargs={
-                "stage": "final",
-                "process": "plot",
-                "artefact_id": plot['artefact_id']
-            }
-        ))
+        updated_messages.append(
+            AIMessage(
+                name="Reporter",
+                content=f"Plot artefact available (id={plot['artefact_id']})",
+                additional_kwargs={
+                    "level": "info",
+                    "is_final": True,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "origin": {
+                        "process": "reporter",
+                        "thinking_stage": None,
+                        "branch_id": None,
+                    },
+                    "is_child": False,
+                    "artefacts": {
+                        "type": "plot",
+                        "id": plot.get("artefact_id"),
+                        "description": plot.get("description"),
+                        "tool_name": plot.get("tool_name"),
+                    },
+                },
+            )
+        )
 
     for csv_file in csv_artefacts:
-        updated_messages.append(AIMessage(
-            name="Reporter",
-            content=f"CSV artefact available (id={csv_file['artefact_id']})",
-            additional_kwargs={
-                "stage": "final",
-                "process": "csv",
-                "artefact_id": csv_file['artefact_id']
-            }
-        ))
+        updated_messages.append(
+            AIMessage(
+                name="Reporter",
+                content=f"CSV artefact available (id={csv_file['artefact_id']})",
+                additional_kwargs={
+                    "level": "info",
+                    "is_final": True,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "origin": {
+                        "process": "reporter",
+                        "thinking_stage": None,
+                        "branch_id": None,
+                    },
+                    "is_child": False,
+                    "artefacts": {
+                        "type": "csv",
+                        "id": csv_file.get("artefact_id"),
+                        "description": csv_file.get("description"),
+                        "tool_name": csv_file.get("tool_name"),
+                    },
+                },
+            )
+        )
 
     logger.info("Completed reporter_agent with %d messages", len(updated_messages))
     logger.info("updated_messages from reporter_agent: %s", [msg.content for msg in updated_messages])

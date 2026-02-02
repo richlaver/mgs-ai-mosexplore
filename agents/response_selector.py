@@ -23,9 +23,23 @@ def _build_candidate_text(ex: Execution) -> str:
     if ex.final_response and isinstance(ex.final_response, AIMessage):
         parts.append(_strip_material_icons(ex.final_response.content))
     for art in ex.artefacts:
-        proc = art.additional_kwargs.get("process")
-        if proc in ("plot", "csv"):
-            parts.append(f"Artefact ({proc}): {_strip_material_icons(art.content)}")
+        artefact_type = str(art.get("type") or "")
+        if artefact_type in ("plot", "csv"):
+            description = str(art.get("description") or "")
+            tool_name = str(art.get("tool_name") or "")
+            artefact_id = str(art.get("id") or "")
+            details = ", ".join(
+                [
+                    item
+                    for item in [
+                        f"id={artefact_id}" if artefact_id else "",
+                        f"tool={tool_name}" if tool_name else "",
+                        description,
+                    ]
+                    if item
+                ]
+            )
+            parts.append(f"Artefact ({artefact_type}): {_strip_material_icons(details)}")
     return "\n".join(parts).strip() or "(No content)"
 
 def response_selector(

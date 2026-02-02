@@ -6,11 +6,16 @@ import json
 import uuid
 import logging
 import re
+import time
+import threading
+import queue
+from typing import Any
 
 from classes import AgentState, Context
 from parameters import users, table_info
-from graph import build_graph
+from graph import build_graph, drain_stream_messages, clear_stream_message_queue
 import setup
+import setup_modal
 from utils.project_selection import (
     list_projects,
     get_selected_project_key,
@@ -32,6 +37,44 @@ from utils.run_cancellation import (
 )
 
 logger = logging.getLogger(__name__)
+
+STREAM_MESSAGE_EMIT_INTERVAL_SECONDS = 0.1
+CODE_YIELD_STEP_PREFIX_RE = re.compile(r"^\s*Step\s+\d+[^:]*:\s*")
+
+
+def _strip_code_yield_step_prefix(content: str, metadata: dict) -> str:
+    if not isinstance(content, str) or st.session_state.get("developer_view", False):
+        return content
+    origin = metadata.get("origin")
+    if not isinstance(origin, dict) or origin.get("process") != "code_yield":
+        return content
+    return CODE_YIELD_STEP_PREFIX_RE.sub("", content, count=1)
+
+
+def _fence_sandbox_sql(content: str, metadata: dict) -> str:
+    if not isinstance(content, str):
+        return content
+    origin = metadata.get("origin")
+    if not isinstance(origin, dict) or origin.get("process") != "sandbox_log":
+        return content
+    if "```sql" in content:
+        return content
+    sql_start_match = re.search(
+        r"\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|REPLACE)\b",
+        content,
+    )
+    if not sql_start_match:
+        return content
+    start = sql_start_match.start()
+    end = content.find(";", start)
+    if end == -1:
+        end = len(content)
+    else:
+        end += 1
+    before = content[:start]
+    sql = content[start:end]
+    after = content[end:]
+    return f"{before}\n```sql\n{sql}\n```\n{after}"
 
 
 def _normalize_project_key(project_key: str) -> str:
@@ -67,68 +110,6 @@ def _sync_selected_user_for_project(project_key: str, force_reset: bool = False)
     if st.session_state.get("user_selector_id") not in user_ids:
         st.session_state.user_selector_id = st.session_state.selected_user_id
     return project_users
-
-def is_code_like(text: str) -> bool:
-    """Heuristically determine if a text chunk looks like code.
-
-    Rules:
-    - Explicit fenced start (``` or ```python) counts as code.
-    - Prefer syntax signals over generic English keywords to avoid false positives.
-    - Use multiple signals to classify ambiguous cases.
-    """
-
-    if not text:
-        return False
-    t = text.lstrip()
-    if t.startswith("```"):
-        return True
-
-    lines = [ln.rstrip() for ln in t.splitlines() if ln.strip()]
-    if not lines:
-        return False
-
-    strong_signals = [
-        re.compile(r"^\s*(def|class)\s+\w+\s*\(?.*\):"),     # def foo(...): or class Bar:
-        re.compile(r"^\s*import\s+[A-Za-z0-9_., ]+"),           # import x, y
-        re.compile(r"^\s*from\s+[A-Za-z0-9_\.]+\s+import\s+"),# from x.y import z
-        re.compile(r"^\s*(try|except|with|for|while|if|elif|else)\b.*:\s*$"), # block starters ending with ':'
-        re.compile(r"^\s*@[A-Za-z_][A-Za-z0-9_]*\b"),           # decorators
-        re.compile(r"^\s*#[^\n]*$"),                            # comment line
-    ]
-
-    weak_signals = [
-        re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$"),   # assignment
-        re.compile(r"\breturn\b|\byield\b|\blambda\b"),      # less common in prose
-        re.compile(r"\basync\b|\bawait\b"),                    # async/await
-        re.compile(r"\bprint\s*\("),                           # print(
-        re.compile(r"[(){}\[\]]"),                              # brackets presence
-    ]
-
-    strong_hits = 0
-    weak_hits = 0
-    structural_hits = 0
-
-    for ln in lines[:6]:
-        for rx in strong_signals:
-            if rx.search(ln):
-                strong_hits += 1
-                break
-        for rx in weak_signals:
-            if rx.search(ln):
-                weak_hits += 1
-        # structural cues: indentation, line ending with ':', or punctuation density typical in code
-        if ln.startswith(" ") or ln.startswith("\t"):
-            structural_hits += 1
-        if ln.endswith(":"):
-            structural_hits += 1
-        if sum(ln.count(ch) for ch in ",.;:(){}[]") >= 3:
-            structural_hits += 1
-
-    if strong_hits >= 1:
-        return True
-    if weak_hits >= 2 and structural_hits >= 1:
-        return True
-    return False
 
 
 def _set_active_run_controller(controller: RunCancellationController, token) -> None:
@@ -235,8 +216,11 @@ def delete_artefacts_modal():
 
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
-    import uuid
     st.session_state.clear_chat = True
+    try:
+        clear_stream_message_queue()
+    except Exception:
+        pass
 
 def handle_clear_chat() -> None:
     """Handle clearing the chat if the clear_chat flag is set."""
@@ -244,7 +228,10 @@ def handle_clear_chat() -> None:
         st.session_state.clear_chat = False
         st.session_state.thread_id = str(uuid.uuid4())
         st.session_state.messages = []
-        st.session_state.intermediate_steps_history = []
+        try:
+            clear_stream_message_queue()
+        except Exception:
+            pass
 
 def render_initial_ui() -> None:
     """Renders the initial UI components (sidebar, app title, popover, disabled chat input) before setup."""
@@ -274,15 +261,15 @@ def render_initial_ui() -> None:
         }
         .stChatMessage:last-of-type,
         [data-testid="stChatMessage"]:last-of-type {
-            margin-bottom: 6rem;
+            margin-bottom: 1rem;
         }
         .chat-messages {
             max-height: 70vh;
             overflow-y: auto;
             padding: 10px;
             padding-bottom: 10px;
-            margin-bottom: 60px;
-            margin-top: 60px;
+            margin-bottom: 10px;
+            margin-top: 10px;
         }
         .stChatInput {
             position: fixed;
@@ -357,19 +344,6 @@ def render_initial_ui() -> None:
             display: flex;
             justify-content: flex-end;
         }
-        .intermediate-step {
-            background-color: #f5f5f5;
-            border-left: 4px solid #ccc;
-            padding: 10px;
-            margin: 5px 0;
-            font-size: 0.9em;
-            color: #666;
-        }
-        .intermediate-step code {
-            background-color: #e8e8e8;
-            padding: 2px 4px;
-            border-radius: 3px;
-        }
         [data-testid="stExpander"] > details,
         [data-testid="stExpander"] > details > summary,
         [data-testid="stExpander"] > details > div {
@@ -378,6 +352,14 @@ def render_initial_ui() -> None:
             box-shadow: none !important;
             border-radius: 5px;
             padding: 10px;
+        }
+        [data-testid="stStatus"] {
+            background-color: #FFE4CC;
+            border: none !important;
+            box-shadow: none !important;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 10px 0;
         }
         </style>
         <script>
@@ -408,7 +390,8 @@ def render_initial_ui() -> None:
     parallel_plans = {
         "Economy": {"agents": 3, "label": "Economy — 3 agents"},
         "Reliable": {"agents": 5, "label": "Reliable — 5 agents"},
-        "Performance": {"agents": 7, "label": "Performance — 7 agents"},
+        # "Performance": {"agents": 7, "label": "Performance — 7 agents"},
+        "Performance": {"agents": 2, "label": "Performance — 7 agents"},
     }
 
     completion_strategies = {
@@ -491,7 +474,7 @@ def render_initial_ui() -> None:
                         return
                     _sync_selected_user_for_project(selected_key, force_reset=True)
                     try:
-                        st.session_state.modal_secrets = setup.build_modal_secrets()
+                        st.session_state.modal_secrets = setup_modal.build_modal_secrets()
                     except Exception:
                         pass
                     try:
@@ -598,11 +581,6 @@ def render_initial_ui() -> None:
                     help="Select which MissionOS user to query as.",
                     on_change=_on_user_change,
                 )
-        st.toggle(
-            label="Show Sandbox Logs",
-            key="show_sandbox_stream_logs",
-            help="Toggle streaming of sandbox stdout/stderr in intermediate steps.",
-        )
         plan_keys = list(parallel_plans.keys())
         # Uncomment to re-enable subscription plan selection
         # st.selectbox(
@@ -689,110 +667,82 @@ def render_initial_ui() -> None:
             key="initial_chat_input"
         )
 
-def is_message_visible(message: AIMessage | AIMessageChunk, is_final: bool) -> bool:
-    if isinstance(message, AIMessageChunk) and getattr(message, "usage_metadata", None):
-        return False
-    if message.content.strip() == "":
-        return False
-    additional_kwargs = message.additional_kwargs or {}
-    if is_final:
-        return additional_kwargs.get('is_final') is True
-    else:
-        if st.session_state.get('developer_view', False):
-            return True
-        if additional_kwargs.get('is_messenger') is True:
-            return True
-    return False
+def _render_final_message(message: AIMessage) -> None:
+    metadata = message.additional_kwargs or {}
+    artefacts = metadata.get("artefacts")
+    if not artefacts:
+        if message.content:
+            with st.container():
+                st.markdown(message.content)
+        return
 
-def postprocess_state_update(state_update) -> AIMessage | AIMessageChunk | None:
-    node_icon_map = {
-        'history_summariser': 'summarize',
-        'context_orchestrator': 'search',
-        'execution_initializer': 'build',
-        'codeact_coder_branch': 'lightbulb',
-        'codeact_executor_branch': 'sprint',
-        'reporter': 'edit_square'
-    }
-    if isinstance(state_update, tuple) and len(state_update) == 2:
-        message, metadata = state_update
-        if isinstance(message, (AIMessage, AIMessageChunk)) and isinstance(metadata, dict):
-            # Augment metadata
-            langgraph_node = metadata.get('langgraph_node', "")
-            if not hasattr(message, "additional_kwargs"):
-                message.additional_kwargs = {}
-
-            stage = message.additional_kwargs.get('stage')
-            message.additional_kwargs["is_final"] = stage == 'final'
-
-            message.additional_kwargs["is_messenger"] = "messenger" in langgraph_node
-            if "branch" in langgraph_node:
-                message.additional_kwargs["thinking_container"] = "parallel"
-            elif "reporter" in langgraph_node:
-                message.additional_kwargs["thinking_container"] = "postparallel"
-            else:
-                message.additional_kwargs["thinking_container"] = "preparallel"
-            suffix_match = re.search(r'_branch_(\d+)(?=_|$)', langgraph_node)
-            message.additional_kwargs["branch_id"] = int(suffix_match.group(1)) if suffix_match else None
-
-            # Prepend icon
-            if message.additional_kwargs["is_messenger"] or stage == "execution_output":
-                for node_key, icon_name in node_icon_map.items():
-                    if node_key in langgraph_node:
-                        if not message.content.startswith(':material/'):
-                            message.content = f":material/{icon_name}: " + message.content.lstrip()
-                        break
-
-            return message
-    return None
-
-def render_message_content(message: AIMessage):
-    """Render message content based on its type, handling artifacts for final and observation messages."""
-    content = message.content
-    additional_kwargs = message.additional_kwargs or {}
-    process = additional_kwargs.get('process')
-    if is_message_visible(message=message, is_final=True):
-        if process == 'response':
-            st.markdown(content)
-        elif process == 'plot':
-            artefact_id = additional_kwargs.get('artefact_id')
-            logger.info("artefact_id from `render_message_content`: %s", artefact_id)
-            if artefact_id:
-                read_tool = ReadArtefactsTool(blob_db=st.session_state.blob_db, metadata_db=st.session_state.metadata_db)
-                result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
-                logger.info("Result from ReadArtefactsTool in `render_message_content`: %s", result)
-                if result['success'] and result['artefacts']:
-                    artefact = result['artefacts'][0]
-                    blob = artefact['blob']
-                    try:
-                        fig_json = json.loads(blob.decode('utf-8'))
-                        fig = pio.from_json(json.dumps(fig_json))
-                        with st.container():
-                            st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to render Plotly figure: {str(e)}")
-                        st.error("Error rendering plot")
-        elif process == 'csv':
-            artefact_id = additional_kwargs.get('artefact_id')
-            if artefact_id:
-                read_tool = ReadArtefactsTool(blob_db=st.session_state.blob_db, metadata_db=st.session_state.metadata_db)
-                result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
-                if result['success'] and result['artefacts']:
-                    artefact = result['artefacts'][0]
-                    blob = artefact['blob'].decode('utf-8')
-                    desc = artefact['metadata']['description_text']
-                    prompt = f"Generate a short, descriptive filename for this CSV based on the description: {desc}. Do not include the .csv extension."
-                    filename_response = st.session_state.llms['FAST'].invoke(prompt)
-                    filename = filename_response.content.strip() + '.csv'
+    artefact_list = artefacts if isinstance(artefacts, list) else [artefacts]
+    for artefact in artefact_list:
+        if not isinstance(artefact, dict):
+            continue
+        artefact_type = artefact.get("type")
+        artefact_id = artefact.get("id")
+        if not artefact_id:
+            continue
+        if artefact_type == "plot":
+            read_tool = ReadArtefactsTool(
+                blob_db=st.session_state.blob_db,
+                metadata_db=st.session_state.metadata_db,
+            )
+            result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+            if result['success'] and result['artefacts']:
+                artefact_entry = result['artefacts'][0]
+                blob = artefact_entry['blob']
+                try:
+                    fig_json = json.loads(blob.decode('utf-8'))
+                    fig = pio.from_json(json.dumps(fig_json))
                     with st.container():
-                        st.download_button(
-                            label=f"Download {filename}",
-                            data=blob,
-                            file_name=filename,
-                            mime='text/csv',
-                            key=f"csv_download_{artefact_id}"
-                        )
-    elif is_message_visible(message=message, is_final=False):
-        return content
+                        st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
+                except Exception as e:
+                    logger.error(f"Failed to render Plotly figure: {str(e)}")
+                    st.error("Error rendering plot")
+        elif artefact_type == "csv":
+            read_tool = ReadArtefactsTool(
+                blob_db=st.session_state.blob_db,
+                metadata_db=st.session_state.metadata_db,
+            )
+            result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+            if result['success'] and result['artefacts']:
+                artefact_entry = result['artefacts'][0]
+                blob = artefact_entry['blob'].decode('utf-8')
+                desc = artefact_entry['metadata']['description_text']
+                prompt = (
+                    "Generate a short, descriptive filename for this CSV based on the "
+                    f"description: {desc}. Do not include the .csv extension."
+                )
+                filename_response = st.session_state.llms['FAST'].invoke(prompt)
+                filename = filename_response.content.strip() + '.csv'
+                with st.container():
+                    st.download_button(
+                        label=f"Download {filename}",
+                        data=blob,
+                        file_name=filename,
+                        mime='text/csv',
+                        key=f"csv_download_{artefact_id}",
+                    )
+
+def _run_graph_stream_worker(stream_queue: queue.Queue, graph, initial_state, config, controller) -> None:
+    stream = None
+    try:
+        stream = graph.stream(initial_state, stream_mode="messages", config=config)
+        for state_update in stream:
+            if controller.is_cancelled():
+                break
+            stream_queue.put(("update", state_update))
+    except Exception as exc:
+        stream_queue.put(("error", exc))
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        stream_queue.put(("done", None))
 
 def render_chat_content() -> None:
     """Renders chat messages, history, and enabled chat input after setup is complete."""
@@ -807,44 +757,27 @@ def render_chat_content() -> None:
     with chat_col:
         st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
 
+        messages = st.session_state.get("messages", [])
+
+        def _consume_assistant_messages(start_index: int) -> int:
+            idx = start_index
+            while idx < len(messages) and isinstance(messages[idx], (AIMessage, AIMessageChunk)):
+                if isinstance(messages[idx], AIMessage):
+                    _render_final_message(messages[idx])
+                idx += 1
+            return idx
+
         i = 0
         query_index = 0
-        while i < len(st.session_state.get('messages', [])):
-            message = st.session_state.messages[i]
+        while i < len(messages):
+            message = messages[i]
             if isinstance(message, HumanMessage):
                 with chat_col.chat_message("user"):
                     st.markdown(message.content)
-
                 with chat_col.chat_message("assistant"):
-                    if query_index < len(st.session_state.intermediate_steps_history):
-                        query_steps = st.session_state.intermediate_steps_history[query_index]
-                        with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=False):                    
-                            if query_steps['preparallel']:
-                                preparallel_content = ''.join(query_steps['preparallel'])
-                                st.markdown(preparallel_content)
-                            
-                            parallels = query_steps['parallels']
-                            if parallels:
-                                num_branches = len(parallels)
-                                parallel_thinking_cols = st.columns(num_branches)
-                                for branch_id, steps in enumerate(parallels):
-                                    with parallel_thinking_cols[branch_id]:
-                                        if steps:
-                                            parallel_content = ''.join(steps)
-                                            st.markdown(parallel_content)
-                            
-                            if query_steps['postparallel']:
-                                postparallel_content = ''.join(query_steps['postparallel'])
-                                st.markdown(postparallel_content)
-                    
-                    i += 1
-                    while i < len(st.session_state.messages) and isinstance(st.session_state.messages[i], (AIMessage, AIMessageChunk)):
-                        final_message = st.session_state.messages[i]
-                        render_message_content(final_message)
-                        i += 1
-                    i -= 1
-                
+                    i = _consume_assistant_messages(i + 1)
                 query_index += 1
+                continue
             i += 1
         
         st.markdown("</div>", unsafe_allow_html=True)
@@ -915,144 +848,240 @@ def render_chat_content() -> None:
         token = activate_controller(controller)
         _set_active_run_controller(controller, token)
 
-        stream = None
         try:
             with chat_col:
-                with st.spinner("Generating..."):
-                    with st.chat_message("assistant"):
-                        with st.expander(f"Intermediate Steps for Query {query_index + 1}", expanded=True):
-                            # Define thinking containers
-                            preparallel_thinking_container = st.empty()
-                            parallel_thinking_containers = []
-                            parallel_thinking_cols = st.columns(st.session_state.num_parallel_executions)
-                            for col_idx in range(st.session_state.num_parallel_executions):
-                                with parallel_thinking_cols[col_idx]:
-                                    parallel_thinking_container = st.empty()
-                                    parallel_thinking_containers.append(parallel_thinking_container)
-                            postparallel_thinking_container = st.empty()
+                with st.chat_message("assistant"):
+                    status_container_placeholder = st.empty()
+                    status_container = status_container_placeholder.container()
+                    status_by_stage: dict[int, Any] = {}
+                    status_child_slots: dict[int, Any] = {}
+                    parallel_status_child_slots: dict[int, list[Any]] = {}
+                    parallel_status_child_buffers: dict[int, list[list[str]]] = {}
+                    current_parent_stage: int | None = None
 
-                            current_query_steps = {
-                                'preparallel': [],
-                                'parallels': [[] for _ in range(st.session_state.num_parallel_executions)],
-                                'postparallel': []
-                            }
-                            st.session_state.intermediate_steps_history.append(current_query_steps)
+                    def _complete_status(stage: int | None) -> None:
+                        if stage is None:
+                            return
+                        status = status_by_stage.get(stage)
+                        if status:
+                            try:
+                                status.update(state="complete", expanded=False)
+                            except Exception:
+                                try:
+                                    status.update(state="complete")
+                                except Exception:
+                                    pass
 
-                            preparallel_current_query_steps = current_query_steps['preparallel']
-                            postparallel_current_query_steps = current_query_steps['postparallel']
-                            parallel_current_query_steps = current_query_steps['parallels']
+                    def _complete_all_statuses() -> None:
+                        for stage in list(status_by_stage.keys()):
+                            _complete_status(stage)
 
-                            preparallel_previous_message_type = None
-                            preparallel_previous_chunk_id = None
-                            parallel_previous_message_types = [None for _ in range(st.session_state.num_parallel_executions)]
-                            parallel_previous_chunk_ids = [None for _ in range(st.session_state.num_parallel_executions)]
-                            parallel_code_block_open = [False for _ in range(st.session_state.num_parallel_executions)]
-                            postparallel_previous_message_type = None
-                            postparallel_previous_chunk_id = None
+                    def _clear_status_container(force: bool = False) -> None:
+                        try:
+                            status_container_placeholder.empty()
+                        except Exception:
+                            pass
+                        try:
+                            st.markdown(
+                                """
+                                <style>
+                                [data-testid="stStatus"],
+                                [data-testid="stExpander"]:has([data-testid^="stExpanderIcon"]) {
+                                    display: none !important;
+                                    visibility: hidden !important;
+                                }
+                                </style>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                        except Exception:
+                            pass
+                        status_by_stage.clear()
+                        status_child_slots.clear()
+                        parallel_status_child_slots.clear()
+                        parallel_status_child_buffers.clear()
 
-                        stream = st.session_state.graph.stream(initial_state, stream_mode="messages", config=config)
-                        for state_update in stream:
-                            if controller.is_cancelled():
-                                raise RunCancelledError("Run cancelled by user")
-                            logger.debug(f'Raw state update in ui.py: {state_update[:100]}')
-                            message = postprocess_state_update(state_update)
+                    def _get_stage(metadata: dict) -> int | None:
+                        origin = metadata.get("origin")
+                        if not isinstance(origin, dict):
+                            return None
+                        stage = origin.get("thinking_stage")
+                        return stage if isinstance(stage, int) else None
 
-                            if is_message_visible(message=message, is_final=True):
-                                # Render final response
-                                st.session_state.messages.append(message)
-                                render_message_content(message)
-                            elif is_message_visible(message=message, is_final=False):
-                                # Render intermediate steps
-                                match message.additional_kwargs.get("thinking_container"):
-                                    case "preparallel":
-                                        mc = (message.content or "")
-                                        is_chunk = isinstance(message, AIMessageChunk)
-                                        separator = ""
-                                        if is_chunk:
-                                            if preparallel_previous_chunk_id is not None and message.id != preparallel_previous_chunk_id:
-                                                separator = "\n"
-                                        elif preparallel_previous_message_type is AIMessageChunk:
-                                            separator = "\n\n"
-                                        else:
-                                            separator = "\n\n"
+                    def _render_parent_message(content: str, metadata: dict) -> None:
+                        nonlocal current_parent_stage
+                        stage = _get_stage(metadata)
+                        if stage is None:
+                            stage = 0
+                        if current_parent_stage is not None and current_parent_stage != stage:
+                            _complete_status(current_parent_stage)
+                        current_parent_stage = stage
+                        if stage in status_by_stage:
+                            status_by_stage[stage].update(label=content)
+                        else:
+                            with status_container:
+                                status = st.status(content, expanded=True, state="running")
+                            status_by_stage[stage] = status
+                            status_child_slots[stage] = status.empty()
 
-                                        preparallel_current_query_steps.append(separator + mc)
-                                        rendered_content = ""
-                                        for step in preparallel_current_query_steps:
-                                            rendered_content += step
-                                        preparallel_thinking_container.markdown(rendered_content)
-                                        preparallel_previous_message_type = type(message)
-                                        preparallel_previous_chunk_id = message.id if isinstance(message, AIMessageChunk) else None
-                                    case "parallel":
-                                        branch_id = message.additional_kwargs.get("branch_id", 0)
-                                        mc = (message.content or "")
-                                        is_chunk = isinstance(message, AIMessageChunk)
-                                        prev_chunk_id = parallel_previous_chunk_ids[branch_id]
-                                        parts = []
+                    def _render_child_message(content: str, metadata: dict) -> None:
+                        stage = _get_stage(metadata)
+                        if stage is None:
+                            stage = 0
+                        content = _strip_code_yield_step_prefix(content, metadata)
+                        content = _fence_sandbox_sql(content, metadata)
+                        if stage not in status_by_stage:
+                            _render_parent_message(f"Stage {stage}", {"origin": {"thinking_stage": stage}})
+                        status = status_by_stage.get(stage)
 
-                                        if is_chunk:
-                                            is_import_line = bool(
-                                                re.match(r"^\s*import\b", mc) or re.match(r"^\s*from\b.+\bimport\b", mc)
-                                            )
-                                            if is_import_line and not parallel_code_block_open[branch_id]:
-                                                parts.append("\n\n```python\n")
-                                                parallel_code_block_open[branch_id] = True
-                                            if mc.startswith("```") and not parallel_code_block_open[branch_id]:
-                                                parallel_code_block_open[branch_id] = True
-                                            if parallel_code_block_open[branch_id] and prev_chunk_id is not None and message.id != prev_chunk_id:
-                                                last_step = parallel_current_query_steps[branch_id][-1] if parallel_current_query_steps[branch_id] else ""
-                                                logger.info(f"Last step before closing code block for branch {branch_id} for AIMessageChunk: {last_step}")
-                                                if not last_step.rstrip().endswith("```"):
-                                                    parts.append("\n```\n\n")
-                                                else:
-                                                    parts.append("\n\n")
-                                                if is_import_line and not mc.startswith("```"):
-                                                    parts.append("\n\n```python\n")
-                                        else:
-                                            if parallel_code_block_open[branch_id]:
-                                                last_step = parallel_current_query_steps[branch_id][-1] if parallel_current_query_steps[branch_id] else ""
-                                                logger.info(f"Last step before closing code block for branch {branch_id} for AIMessage: {last_step}")
-                                                if not last_step.rstrip().endswith("```"):
-                                                    parts.append("\n```\n\n")
-                                                else:
-                                                    parts.append("\n\n")
-                                                parallel_code_block_open[branch_id] = False
-                                            else:
-                                                parts.append("\n\n")
+                        branch_id = metadata.get("origin", {}).get("branch_id")
+                        developer_view = st.session_state.get("developer_view", False)
+                        can_render_parallel = (
+                            developer_view
+                            and branch_id is not None
+                            and isinstance(branch_id, int)
+                            and stage in (2, 3)
+                        )
 
-                                        if mc != "":
-                                            parts.append(mc)
-                                        if parts:
-                                            logger.info(f"parts for parallel branch {branch_id}: {parts}")
-                                            parallel_current_query_steps[branch_id].append("".join(parts))
-                                        rendered_content = ""
-                                        for step in parallel_current_query_steps[branch_id]:
-                                            rendered_content += step
-                                        parallel_thinking_containers[branch_id].markdown(rendered_content)
-                                        parallel_previous_message_types[branch_id] = type(message)
-                                        parallel_previous_chunk_ids[branch_id] = message.id if isinstance(message, AIMessageChunk) else None
-                                    case "postparallel":
-                                        mc = (message.content or "")
-                                        is_chunk = isinstance(message, AIMessageChunk)
-                                        separator = ""
-                                        if is_chunk:
-                                            if postparallel_previous_chunk_id is not None and message.id != postparallel_previous_chunk_id:
-                                                separator = "\n"
-                                        elif postparallel_previous_message_type is AIMessageChunk:
-                                            separator = "\n\n"
-                                        else:
-                                            separator = "\n\n"
+                        if can_render_parallel:
+                            parallel_slots = parallel_status_child_slots.get(stage)
+                            parallel_buffers = parallel_status_child_buffers.get(stage)
+                            if parallel_slots is None:
+                                cols = status.columns(st.session_state.num_parallel_executions)
+                                parallel_slots = []
+                                for col in cols:
+                                    parallel_slots.append(col.empty())
+                                parallel_status_child_slots[stage] = parallel_slots
+                                parallel_buffers = [[] for _ in range(st.session_state.num_parallel_executions)]
+                                parallel_status_child_buffers[stage] = parallel_buffers
 
-                                        postparallel_current_query_steps.append(separator + mc)
-                                        rendered_content = ""
-                                        for step in postparallel_current_query_steps:
-                                            rendered_content += step
-                                        postparallel_thinking_container.markdown(rendered_content)
-                                        postparallel_previous_message_type = type(message)
-                                        postparallel_previous_chunk_id = message.id if isinstance(message, AIMessageChunk) else None
+                            if parallel_buffers is None:
+                                parallel_buffers = [[] for _ in range(len(parallel_slots))]
+                                parallel_status_child_buffers[stage] = parallel_buffers
 
-                    if len(st.session_state.intermediate_steps_history) > MAX_HISTORY // 2:
-                        st.session_state.intermediate_steps_history = st.session_state.intermediate_steps_history[-MAX_HISTORY // 2:]
+                            if 0 <= branch_id < len(parallel_slots):
+                                parallel_buffers[branch_id].append(content)
+                                with parallel_slots[branch_id].container():
+                                    for message in parallel_buffers[branch_id]:
+                                        with st.container():
+                                            st.markdown(message)
+                                return
+
+                        child_slot = status_child_slots.get(stage)
+                        if child_slot is None:
+                            child_slot = status.empty()
+                            status_child_slots[stage] = child_slot
+                        child_slot.markdown(content)
+
+                    clear_stream_message_queue()
+
+                    stream_queue: queue.Queue = queue.Queue()
+                    worker = threading.Thread(
+                        target=_run_graph_stream_worker,
+                        args=(stream_queue, st.session_state.graph, initial_state, config, controller),
+                        daemon=True,
+                    )
+                    worker.start()
+
+                    pending_payload = None
+                    pending_emit_at = None
+                    stream_done = False
+
+                    while True:
+                        if controller.is_cancelled():
+                            raise RunCancelledError("Run cancelled by user")
+
+                        try:
+                            kind, payload = stream_queue.get(timeout=0.2)
+                            if kind == "update":
+                                # logger.debug(f"Raw state update in ui.py: {str(payload)[:100]}")
+                                logger.debug(f"Raw state update in ui.py: {str(payload)}")
+                                if isinstance(payload, tuple) and len(payload) == 2:
+                                    message, metadata = payload
+                                else:
+                                    message, metadata = None, None
+                                skip_message = False
+                                if isinstance(metadata, dict):
+                                    context_payload = metadata.get("context")
+                                    if isinstance(context_payload, dict) and context_payload.get("ls_provider"):
+                                        skip_message = True
+                                    if metadata.get("ls_provider"):
+                                        skip_message = True
+
+                                if not skip_message and not isinstance(message, (AIMessage, AIMessageChunk)):
+                                    skip_message = True
+                                if not skip_message and isinstance(message, AIMessageChunk) and getattr(message, "usage_metadata", None):
+                                    skip_message = True
+
+                                if not skip_message:
+                                    msg_metadata = message.additional_kwargs or {}
+                                    if not st.session_state.get("developer_view", False):
+                                        if msg_metadata.get("level") != "info":
+                                            skip_message = True
+
+                                if not skip_message:
+                                    if msg_metadata.get("is_final") is True:
+                                        _complete_all_statuses()
+                                        if not st.session_state.get("developer_view", False):
+                                            _clear_status_container()
+                                        st.session_state.messages.append(message)
+                                        _render_final_message(message)
+                                    elif msg_metadata.get("is_child") is True:
+                                        _render_child_message(message.content, msg_metadata)
+                                    else:
+                                        _render_parent_message(message.content, msg_metadata)
+                                        pending_payload = None
+                                        pending_emit_at = None
+                            elif kind == "error":
+                                raise payload
+                            elif kind == "done":
+                                stream_done = True
+                        except queue.Empty:
+                            pass
+
+                        queued_messages = drain_stream_messages()
+                        for queued in queued_messages:
+                            logger.debug(f"Raw queued message in ui.py: {str(queued)}")
+                            queued_metadata = queued.get("additional_kwargs") or {}
+                            skip_queued = False
+                            if not st.session_state.get("developer_view", False):
+                                if queued_metadata.get("level") != "info":
+                                    skip_queued = True
+
+                            if not skip_queued:
+                                if queued_metadata.get("is_final") is True:
+                                    _complete_all_statuses()
+                                    if not st.session_state.get("developer_view", False):
+                                        _clear_status_container()
+                                    final_message = AIMessage(content=queued.get("content") or "", additional_kwargs=queued_metadata)
+                                    _render_final_message(final_message)
+                                    pending_payload = None
+                                    pending_emit_at = None
+                                elif queued_metadata.get("origin", {}).get("branch_id") is not None:
+                                    _render_child_message(queued.get("content") or "", queued_metadata)
+                                    pending_payload = None
+                                    pending_emit_at = None
+                                elif queued_metadata.get("is_child") is True:
+                                    pending_payload = queued
+                                    pending_emit_at = (queued.get("timestamp") or time.monotonic()) + STREAM_MESSAGE_EMIT_INTERVAL_SECONDS
+                                else:
+                                    _render_parent_message(queued.get("content") or "", queued_metadata)
+                                    pending_payload = None
+                                    pending_emit_at = None
+
+                        if pending_payload and pending_emit_at is not None and time.monotonic() >= pending_emit_at:
+                            pending_metadata = pending_payload.get("additional_kwargs") or {}
+                            _render_child_message(pending_payload.get("content") or "", pending_metadata)
+                            pending_payload = None
+                            pending_emit_at = None
+
+                        if stream_done and stream_queue.empty() and pending_payload is None:
+                            break
+
+                    if pending_payload:
+                        pending_metadata = pending_payload.get("additional_kwargs") or {}
+                        _render_child_message(pending_payload.get("content") or "", pending_metadata)
+                    
         except GeneratorExit:
             logger.info("Stream generator closed by Streamlit runtime; treating as cancelled.")
             st.info("Response stopped.", icon=":material/stop_circle:")
@@ -1062,9 +1091,4 @@ def render_chat_content() -> None:
             logger.exception("Unexpected error during stream: %s", exc)
             st.error("Unexpected error while generating the response. Please retry.")
         finally:
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
             _clear_active_run_controller()

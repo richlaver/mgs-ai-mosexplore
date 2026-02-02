@@ -19,6 +19,7 @@ from utils.context_data import (
 )
 from utils.timezone_utils import init_timezones
 import logging
+import setup_modal
 
 def setup_logging():
     if not logging.getLogger().handlers:
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 def perform_setup():
     setup_logging()
     import setup
-    setup.set_modal_credentials()
+    setup_modal.set_modal_credentials()
     setup.set_google_credentials()
     setup.enable_tracing()
     setup.set_blob_db_env()

@@ -125,12 +125,12 @@ class ContextAPIClient:
             raise ContextAPIError(f"Unable to parse instrument context: {exc}") from exc
 
     def fetch_project_nl_context(self, db_host: str, db_name: str) -> Optional[str]:
-        """Retrieve the natural-language project context string for the database."""
+        """Retrieve the response-gen-info text that describes the project context."""
         safe_host = self._encode_query_value(db_host, encode_dots=True)
         safe_name = self._encode_query_value(db_name)
         headers = self._headers(include_auth=False)
         LOGGER.debug(
-            "Fetching project NL context for host=%s (encoded=%s) db=%s (encoded=%s)",
+            "Fetching project response-gen-info for host=%s (encoded=%s) db=%s (encoded=%s)",
             db_host,
             safe_host,
             db_name,
@@ -138,24 +138,27 @@ class ContextAPIClient:
         )
         try:
             response = self._session.get(
-                self._context_query_url("nl-context", db_host, db_name),
+                self._context_query_url("response-gen-info", db_host, db_name),
                 headers=headers,
                 timeout=self._timeout,
             )
             response.raise_for_status()
             data = response.json() if response.content else {}
             if isinstance(data, dict):
-                nl_context = data.get("nl_context")
-                if nl_context is None:
-                    LOGGER.warning("Project NL context response missing 'nl_context' key for db=%s", db_name)
-                return nl_context
+                response_gen_info = data.get("response_gen_info")
+                if response_gen_info is None:
+                    LOGGER.warning(
+                        "Response-gen-info payload missing 'response_gen_info' key for db=%s",
+                        db_name,
+                    )
+                return response_gen_info
             elif isinstance(data, str):
                 return data
-            raise ContextAPIError("NL context response was not JSON")
+            raise ContextAPIError("Response-gen-info response was not JSON")
         except requests.HTTPError as exc:
-            raise ContextAPIError(f"Project NL context fetch failed: {exc}") from exc
+            raise ContextAPIError(f"Project response-gen-info fetch failed: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
-            raise ContextAPIError(f"Unable to parse NL context: {exc}") from exc
+            raise ContextAPIError(f"Unable to parse response-gen-info payload: {exc}") from exc
 
 
 def build_context_api_client(config: Optional[ContextApiConfig]) -> ContextAPIClient:

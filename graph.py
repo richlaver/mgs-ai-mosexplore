@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import threading
+import time
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any, Dict, List
 
@@ -35,12 +38,12 @@ from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from classes import AgentState, Context, Execution
 from modal_sandbox_remote import run_sandboxed_code
-from parameters import progress_messages
 from setup import (
     clone_llm_with_overrides,
     build_codeact_coder_cached_context,
     ensure_cached_content,
 )
+from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
@@ -48,6 +51,52 @@ from utils.chat_history import filter_messages_only_final
 from utils.run_cancellation import get_active_run_controller
 
 logger = logging.getLogger(__name__)
+
+_stream_message_queue: List[Dict[str, Any]] = []
+_stream_message_lock = threading.Lock()
+_stream_message_condition = threading.Condition(_stream_message_lock)
+
+
+def enqueue_stream_message(message: AIMessage) -> None:
+    payload = {
+        "timestamp": time.monotonic(),
+        "content": message.content,
+        "additional_kwargs": message.additional_kwargs or {},
+    }
+    with _stream_message_condition:
+        _stream_message_queue.append(payload)
+        _stream_message_condition.notify_all()
+
+
+def wait_for_stream_message(last_seen_ts: float | None, timeout: float) -> Dict[str, Any] | None:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    with _stream_message_condition:
+        while True:
+            fresh = [m for m in _stream_message_queue if last_seen_ts is None or m.get("timestamp", 0) > last_seen_ts]
+            if fresh:
+                return fresh[-1]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            _stream_message_condition.wait(timeout=remaining)
+
+
+def drain_stream_messages(max_items: int | None = None) -> List[Dict[str, Any]]:
+    with _stream_message_condition:
+        if not _stream_message_queue:
+            return []
+        if max_items is None or max_items <= 0:
+            items = list(_stream_message_queue)
+            _stream_message_queue.clear()
+            return items
+        items = _stream_message_queue[:max_items]
+        del _stream_message_queue[:max_items]
+        return items
+
+
+def clear_stream_message_queue() -> None:
+    with _stream_message_lock:
+        _stream_message_queue.clear()
 
 
 class FactItem(BaseModel):
@@ -75,7 +124,7 @@ def build_graph(
     thread_id: str,
     user_id: int,
     global_hierarchy_access: bool,
-    num_parallel_executions: int = 2,
+    num_parallel_executions: int = 7,
     num_completions_before_response: int = 2,
     response_mode: str = "Intelligent",
     min_successful_responses: int = 3,
@@ -85,7 +134,6 @@ def build_graph(
     st.toast("Building graph...", icon=":material/account_tree:")
 
     timezone_context_default = st.session_state.get("timezone_context")
-    show_sandbox_stream_logs = bool(st.session_state.get("show_sandbox_stream_logs", False))
 
     tools_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.1)
     sufficiency_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=256)
@@ -200,22 +248,158 @@ def build_graph(
         logger.warning("Failed to create CodeAct cached content: %s", exc)
 
     termination_lock = threading.Lock()
+    thinking_stage_lock = threading.Lock()
     termination_triggered = False
+    thinking_stage = 0
+    parent_messages_pool: List[Dict[str, Any]] = []
+    child_messages_pool: List[Dict[str, Any]] = []
+    child_emitter_lock = threading.Lock()
+    child_emitter_token: object | None = None
+    child_message_interval_seconds = 3.0
     successful_executions: List[Dict[str, Any]] = []
     response_facts: List[Dict[str, Any]] = []
     counted_branches: dict[int, int] = {}
     success_order_counter = 0
     response_mode_normalized = (response_mode or "").strip().lower()
 
+    def _stop_child_message_emitter() -> None:
+        nonlocal child_emitter_token
+        with child_emitter_lock:
+            child_emitter_token = None
+
     def _reset_run_state() -> None:
         """Clear termination and fact-tracking state for a fresh run."""
-        nonlocal termination_triggered, successful_executions, response_facts, counted_branches, success_order_counter
+        nonlocal termination_triggered, thinking_stage, successful_executions, response_facts, counted_branches, success_order_counter
         with termination_lock:
             termination_triggered = False
             successful_executions = []
             response_facts = []
             counted_branches = {}
             success_order_counter = 0
+        with thinking_stage_lock:
+            thinking_stage = 0
+        _stop_child_message_emitter()
+
+    def _init_child_messages() -> None:
+        nonlocal child_messages_pool
+        child_messages_pool = []
+        for entry in child_messages:
+            messages = list(entry["messages"])
+            random.shuffle(messages)
+            child_messages_pool.append({"thinking_stage": entry["thinking_stage"], "messages": messages})
+
+    def _sample_parent_message(stage: int) -> str:
+        source_entry = next(
+            (entry for entry in parent_messages if entry.get("thinking_stage") == stage),
+            None,
+        )
+        if not source_entry:
+            return ""
+        pool_messages = list(source_entry.get("messages") or [])
+        return random.choice(pool_messages) if pool_messages else ""
+
+    def _sample_child_message(stage: int) -> str:
+        pool_entry = next(
+            (entry for entry in child_messages_pool if entry.get("thinking_stage") == stage),
+            None,
+        )
+        if not pool_entry:
+            return ""
+
+        pool_messages = pool_entry.get("messages")
+        if not pool_messages:
+            source_entry = next(
+                (entry for entry in child_messages if entry.get("thinking_stage") == stage),
+                None,
+            )
+            if not source_entry:
+                return ""
+            pool_messages = list(source_entry["messages"])
+            random.shuffle(pool_messages)
+            pool_entry["messages"] = pool_messages
+
+        return pool_messages.pop() if pool_messages else ""
+
+    _init_child_messages()
+
+    def _start_child_message_emitter(stage: int, process_name: str) -> None:
+        nonlocal child_emitter_token
+        token = object()
+        with child_emitter_lock:
+            child_emitter_token = token
+
+        def _emit_loop() -> None:
+            time.sleep(child_message_interval_seconds)
+            while True:
+                with child_emitter_lock:
+                    if child_emitter_token is not token:
+                        break
+                with thinking_stage_lock:
+                    current_stage = thinking_stage
+                if current_stage != stage:
+                    break
+                try:
+                    _ensure_run_not_cancelled("child_message_emitter")
+                except Exception:
+                    break
+
+                child_text = _sample_child_message(stage)
+                if child_text:
+                    msg = AIMessage(
+                        content=child_text,
+                        additional_kwargs={
+                            "level": "info",
+                            "is_final": False,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "origin": {
+                                "process": process_name,
+                                "thinking_stage": stage,
+                                "branch_id": None,
+                            },
+                            "is_child": True,
+                            "artefacts": [],
+                        },
+                    )
+                    enqueue_stream_message(msg)
+                time.sleep(child_message_interval_seconds)
+
+        threading.Thread(
+            target=_emit_loop,
+            name=f"child-message-emitter-{stage}",
+            daemon=True,
+        ).start()
+
+    def _set_thinking_stage(next_stage: int, process_name: str) -> None:
+        nonlocal thinking_stage
+        message_text = ""
+        stage_advanced = False
+        with thinking_stage_lock:
+            if thinking_stage < next_stage:
+                thinking_stage = next_stage
+                message_text = _sample_parent_message(next_stage)
+                stage_advanced = True
+        if message_text:
+            msg = AIMessage(
+                content=message_text,
+                additional_kwargs={
+                    "level": "info",
+                    "is_final": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "origin": {
+                        "process": process_name,
+                        "thinking_stage": next_stage,
+                        "branch_id": None,
+                    },
+                    "is_child": False,
+                    "artefacts": [],
+                },
+            )
+            enqueue_stream_message(msg)
+        if stage_advanced:
+            if next_stage in (1, 2):
+                _start_child_message_emitter(next_stage, process_name)
+            else:
+                _stop_child_message_emitter()
 
     def _terminate_running_branches_if_threshold_met(successes: int) -> None:
         nonlocal termination_triggered
@@ -225,6 +409,7 @@ def build_graph(
             if termination_triggered:
                 return
             termination_triggered = True
+        _set_thinking_stage(4, "_terminate_running_branches_if_threshold_met")
         controller = get_active_run_controller()
         if controller:
             controller.cancel_active_resources("sufficiency threshold met")
@@ -534,6 +719,8 @@ def build_graph(
                 return
             termination_triggered = True
 
+        _set_thinking_stage(4, "_evaluate_consistency_and_maybe_terminate")
+
         controller = get_active_run_controller()
         if controller:
             controller.cancel_active_resources("consistency threshold met")
@@ -542,18 +729,6 @@ def build_graph(
             explained_variance,
             current_ranking,
         )
-
-    def progress_messenger_node(state: AgentState, node: str) -> dict:
-        _ensure_run_not_cancelled(f"progress:{node}")
-        template = progress_messages.get(node)
-        if template:
-            msg = AIMessage(
-                content=template.content,
-                additional_kwargs=dict(template.additional_kwargs or {}),
-                name=template.name,
-            )
-            return {"messages": [msg]}
-        return {"messages": []}
 
     def history_summariser_node(state: AgentState) -> dict:
         _reset_run_state()
@@ -584,6 +759,7 @@ def build_graph(
             base_context_dict = state.context
         sub_input = {"messages": state.messages, "context": base_context_dict, "clarification_requests": []}
         sub_graph = get_context_graph(llms, db, selected_project_key)
+        _set_thinking_stage(1, "context_orchestrator_node")
         accumulated_context = dict(base_context_dict)
         for sub_chunk in sub_graph.stream(sub_input, stream_mode="updates"):
             _ensure_run_not_cancelled("context_orchestrator_stream")
@@ -646,11 +822,13 @@ def build_graph(
 
     def enter_parallel_execution_node(state: AgentState):
         _ensure_run_not_cancelled("enter_parallel_execution")
+        _set_thinking_stage(2, "enter_parallel_execution_node")
         targets = [Send(f"run_branch_{i}", state) for i in range(num_parallel_executions)]
         return Command(goto=targets)
 
     def exit_parallel_execution_node(state: AgentState):
         _ensure_run_not_cancelled("exit_parallel_execution")
+        _set_thinking_stage(4, "exit_parallel_execution_node")
         return {}
 
     def response_selector_node(state: AgentState) -> dict:
@@ -675,23 +853,84 @@ def build_graph(
             executions=state.executions,
         )
         new_messages = updated_messages_full[base_len:]
+        with thinking_stage_lock:
+            current_stage = thinking_stage
+        for msg in new_messages:
+            if not isinstance(msg, AIMessage):
+                continue
+            additional_kwargs = dict(msg.additional_kwargs or {})
+            origin = additional_kwargs.get("origin")
+            if not isinstance(origin, dict):
+                origin = {}
+            origin["thinking_stage"] = current_stage
+            origin["branch_id"] = None
+            additional_kwargs["origin"] = origin
+            msg.additional_kwargs = additional_kwargs
         return {"messages": new_messages}
 
     graph = StateGraph(AgentState)
 
     def make_run_branch(branch_id: int):
-        def _progress_msg(content: str, process: str = "progress", origin: str | None = None) -> AIMessage:
-            kwargs = {"stage": "execution_output", "process": process}
-            if origin:
-                kwargs["origin"] = origin
-            return AIMessage(name=f"Executor_{branch_id}", content=str(content), additional_kwargs=kwargs)
+        def _progress_msg(
+            content: str,
+            level: str = "debug",
+            metadata: Dict[str, Any] | None = None,
+        ) -> AIMessage:
+            with thinking_stage_lock:
+                current_stage = thinking_stage
+            default_origin = {
+                "process": "execution_branch",
+                "thinking_stage": current_stage,
+                "branch_id": branch_id,
+            }
+            default_kwargs: Dict[str, Any] = {
+                "level": level,
+                "is_final": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "origin": default_origin,
+                "is_child": True,
+                "artefacts": [],
+            }
+
+            if metadata:
+                additional_kwargs = dict(default_kwargs)
+                for key, value in metadata.items():
+                    if key == "origin" and isinstance(value, dict):
+                        merged_origin = dict(default_origin)
+                        for origin_key, origin_value in value.items():
+                            if origin_value is not None:
+                                merged_origin[origin_key] = origin_value
+                        additional_kwargs["origin"] = merged_origin
+                    elif value is not None:
+                        additional_kwargs[key] = value
+            else:
+                additional_kwargs = default_kwargs
+
+            msg = AIMessage(
+                content=str(content),
+                additional_kwargs=additional_kwargs,
+            )
+            enqueue_stream_message(msg)
+            return msg
 
         def _code_display_message(code_text: str) -> AIMessage:
-            return AIMessage(
-                name="CodeActCoder",
+            msg = AIMessage(
                 content=f"```python\n{code_text}\n```",
-                additional_kwargs={"stage": "node", "process": "codeact_coder_branch"},
+                additional_kwargs={
+                    "level": "debug",
+                    "is_final": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "origin": {
+                        "process": "code_correcter",
+                        "thinking_stage": 2,
+                        "branch_id": branch_id,
+                    },
+                    "is_child": True,
+                    "artefacts": [],
+                },
             )
+            enqueue_stream_message(msg)
+            return msg
 
         def _flatten_message_content(message: BaseMessage | None) -> str:
             if message is None:
@@ -710,7 +949,7 @@ def build_graph(
             final_msg: BaseMessage | None,
             user_query: str,
             branch_context: List[str] | None = None,
-            artefacts: List[AIMessage] | None = None,
+            artefacts: List[Dict[str, Any]] | None = None,
         ) -> bool:
             if not final_msg:
                 return False
@@ -718,10 +957,10 @@ def build_graph(
             context_notes = "\n".join([c for c in (branch_context or []) if isinstance(c, str) and c.strip()])
             artefact_notes = []
             for item in artefacts or []:
-                if not isinstance(item, AIMessage):
+                if not isinstance(item, dict):
                     continue
-                artefact_type = item.additional_kwargs.get("process")
-                artefact_desc = _flatten_message_content(item).strip()
+                artefact_type = item.get("type")
+                artefact_desc = item.get("description")
                 if artefact_desc or artefact_type:
                     artefact_notes.append(
                         f"- type={artefact_type or 'unknown'} desc={artefact_desc or '(no description)'}"
@@ -957,7 +1196,19 @@ def build_graph(
                 payload["executions"] = [updated]
                 return payload
 
-            all_messages: List[AIMessage] = list(coder_result.get("messages", []) or [])
+            coder_messages: List[AIMessage] = list(coder_result.get("messages", []) or [])
+            for msg in coder_messages:
+                if not isinstance(msg, AIMessage):
+                    continue
+                additional_kwargs = dict(msg.additional_kwargs or {})
+                origin = additional_kwargs.get("origin")
+                if not isinstance(origin, dict):
+                    origin = {}
+                origin["thinking_stage"] = 2
+                origin["branch_id"] = branch_id
+                additional_kwargs["origin"] = origin
+                msg.additional_kwargs = additional_kwargs
+                enqueue_stream_message(msg)
 
             def _strip_code_fences(text: str) -> str:
                 if "```" not in text:
@@ -988,15 +1239,16 @@ def build_graph(
                 cleaned = _strip_code_fences(raw_text)
                 return cleaned if cleaned else code_to_fix
 
-            def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[AIMessage], List[str], List[str]]:
+            def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[Dict[str, Any]], List[str], List[str]]:
                 messages: List[AIMessage] = []
-                artefacts: List[AIMessage] = []
+                artefacts: List[Dict[str, Any]] = []
                 final_msg: AIMessage | None = None
                 error_logs_all: List[str] = []
                 error_logs_actionable: List[str] = []
                 terminated_early = False
                 if code_to_run:
                     try:
+                        _set_thinking_stage(3, "_execute_code")
                         gen = run_sandboxed_code.remote(
                             code=code_to_run,
                             table_info=table_info,
@@ -1015,53 +1267,77 @@ def build_graph(
                                 if termination_triggered:
                                     terminated_early = True
                                     break
-                                if not isinstance(out, dict) or "metadata" not in out:
+                                if not isinstance(out, dict):
                                     err = f"Invalid output: {out}"
                                     error_logs_all.append(err)
-                                    error_logs_actionable.append(err)
+                                    messages.append(_progress_msg(
+                                        err,
+                                        level="error",
+                                        metadata={
+                                            "origin": {
+                                                "process": "sandbox_log",
+                                                "thinking_stage": 3,
+                                                "branch_id": branch_id
+                                            }
+                                        }
+                                    ))
                                     continue
-                                typ = out["metadata"].get("type")
-                                origin = out["metadata"].get("origin")
-                                content = out.get("content", "")
-                                if typ in ("progress", "error"):
-                                    if origin in {"stdout", "stderr"} and not show_sandbox_stream_logs:
-                                        pass
-                                    else:
-                                        messages.append(_progress_msg(str(content), process=typ, origin=origin))
-                                    if typ == "error":
-                                        error_logs_all.append(str(content))
-                                        if origin not in {"stdout", "stderr"}:
-                                            error_logs_actionable.append(str(content))
-                                elif typ == "final":
-                                    final_msg = _progress_msg(str(content), process="final", origin=origin)
-                                    messages.append(final_msg)
-                                elif typ in ("plot", "csv"):
-                                    try:
-                                        import json as _json
+                                if "__control__" in out:
+                                    continue
 
-                                        jd = _json.loads(content) if isinstance(content, str) else content
-                                    except Exception:
-                                        jd = None
-                                    if jd:
-                                        msg = AIMessage(
-                                            name=f"Executor_{branch_id}",
-                                            content=jd.get("description", "(no description)"),
-                                            additional_kwargs={"stage": "execution_output", "process": typ, "artefact_id": jd.get("artefact_id")},
-                                        )
-                                        messages.append(msg)
-                                        artefacts.append(msg)
-                                    else:
-                                        err = f"Failed to parse {typ}: {str(content)[:200]}"
-                                        error_logs_all.append(err)
-                                        error_logs_actionable.append(err)
-                                        messages.append(_progress_msg(err, process="error"))
-                                else:
-                                    messages.append(_progress_msg(str(content), process="progress", origin=origin))
+                                content = out.get("content", "")
+                                additional_kwargs: Dict[str, Any] = {}
+                                meta_type = ""
+
+                                if isinstance(out.get("additional_kwargs"), dict):
+                                    additional_kwargs = dict(out.get("additional_kwargs") or {})
+
+                                if isinstance(out.get("metadata"), dict):
+                                    metadata = out.get("metadata") or {}
+                                    meta_type = str(metadata.get("type") or "").lower()
+
+                                artefact_payloads = additional_kwargs.get("artefacts")
+                                if isinstance(artefact_payloads, list):
+                                    for entry in artefact_payloads:
+                                        if isinstance(entry, dict):
+                                            artefacts.append(entry)
+
+                                origin = additional_kwargs.get("origin")
+                                if not isinstance(origin, dict):
+                                    origin = {}
+                                origin["thinking_stage"] = 3
+                                origin["branch_id"] = branch_id
+                                additional_kwargs["origin"] = origin
+
+                                msg = AIMessage(
+                                    content=str(content),
+                                    additional_kwargs=additional_kwargs,
+                                )
+                                enqueue_stream_message(msg)
+                                messages.append(msg)
+
+                                if meta_type == "final" and additional_kwargs.get("artefacts") == []:
+                                    final_msg = msg
+
+                                level = additional_kwargs.get("level")
+                                origin_process = origin.get("process")
+                                if level == "error":
+                                    error_logs_all.append(str(content))
+                                    if origin_process == "code_yield":
+                                        error_logs_actionable.append(str(content))
                     except Exception as e:
                         err = f"Sandbox error: {e}"
                         error_logs_all.append(err)
                         error_logs_actionable.append(err)
-                        messages.append(_progress_msg(err, process="error"))
+                        messages.append(_progress_msg(
+                            err,
+                            level="error",
+                            metadata={
+                                "origin": {"process": "sandbox_log"},
+                                "thinking_stage": 3,
+                                "branch_id": branch_id,
+                            }
+                        ))
                     finally:
                         if terminated_early:
                             try:
@@ -1079,7 +1355,6 @@ def build_graph(
 
             while True:
                 attempt_messages, final_msg, artefacts, error_logs_all, error_logs_actionable = _execute_code(current_code)
-                all_messages.extend(attempt_messages)
 
                 updated_attempt = current_execution.model_copy(
                     update={
@@ -1095,10 +1370,10 @@ def build_graph(
                 deterministic_error = bool(error_logs_actionable)
                 message_errors = any(
                     isinstance(m, AIMessage)
-                    and m.name == f"Executor_{branch_id}"
-                    and m.additional_kwargs.get("stage") == "execution_output"
-                    and m.additional_kwargs.get("process") == "error"
-                    and m.additional_kwargs.get("origin") not in {"stdout", "stderr"}
+                    and isinstance(m.additional_kwargs, dict)
+                    and m.additional_kwargs.get("level") == "error"
+                    and isinstance(m.additional_kwargs.get("origin"), dict)
+                    and m.additional_kwargs["origin"].get("process") != "sandbox_log"
                     for m in attempt_messages
                 )
 
@@ -1134,14 +1409,17 @@ def build_graph(
                 execution_updates.append(updated_attempt)
 
                 if has_syntax_error and current_execution.retry_number < max_retry_number:
-                    all_messages.append(
-                        _progress_msg(
-                            f"SyntaxError detected. Attempting correction (retry {current_execution.retry_number + 1}/{max_retry_number}).",
-                            process="progress",
-                        )
+                    _progress_msg(
+                        f"SyntaxError detected. Attempting correction (retry {current_execution.retry_number + 1}/{max_retry_number}).",
+                        level="error",
+                        metadata={"origin": {
+                            "process": "code_correcter",
+                            "thinking_stage": 2,
+                            "branch_id": branch_id
+                        }},
                     )
                     corrected_code = _fix_syntax_error(current_code, updated_attempt.error_summary)
-                    all_messages.append(_code_display_message(corrected_code))
+                    _code_display_message(corrected_code)
                     current_execution = Execution(
                         parallel_agent_id=updated_attempt.parallel_agent_id,
                         retry_number=updated_attempt.retry_number + 1,
@@ -1158,9 +1436,6 @@ def build_graph(
                 break
 
             payload["executions"] = execution_updates
-            if all_messages:
-                payload["messages"] = all_messages
-
             latest_execution = execution_updates[-1] if execution_updates else updated
 
             nonlocal successful_executions, success_order_counter
@@ -1204,38 +1479,30 @@ def build_graph(
 
         return run_branch
 
-    graph.add_node("history_summariser_messenger_node", lambda state: progress_messenger_node(state, "history_summariser_node"))
     graph.add_node("history_summariser_node", history_summariser_node)
-    graph.add_node("context_orchestrator_messenger_node", lambda state: progress_messenger_node(state, "context_orchestrator_node"))
     graph.add_node("context_orchestrator_node", context_orchestrator_node)
     graph.add_node("query_clarifier_node", query_clarifier_node)
-    graph.add_node("execution_initializer_messenger_node", lambda state: progress_messenger_node(state, "execution_initializer_node"))
     graph.add_node("execution_initializer_node", execution_initializer_node)
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
-    graph.add_node("reporter_messenger_node", lambda state: progress_messenger_node(state, "reporter_node"))
     graph.add_node("response_selector_node", response_selector_node)
     graph.add_node("reporter_node", reporter_node)
 
-    graph.set_entry_point("history_summariser_messenger_node")
-    graph.add_edge("history_summariser_messenger_node", "history_summariser_node")
-    graph.add_edge("history_summariser_node", "context_orchestrator_messenger_node")
-    graph.add_edge("context_orchestrator_messenger_node", "context_orchestrator_node")
+    graph.set_entry_point("history_summariser_node")
+    graph.add_edge("history_summariser_node", "context_orchestrator_node")
     graph.add_conditional_edges(
         "context_orchestrator_node",
         router_after_context,
-        {"continue_execution": "execution_initializer_messenger_node", "request_clarification": "query_clarifier_node"},
+        {"continue_execution": "execution_initializer_node", "request_clarification": "query_clarifier_node"},
     )
     graph.add_edge("query_clarifier_node", END)
-    graph.add_edge("execution_initializer_messenger_node", "execution_initializer_node")
     graph.add_edge("execution_initializer_node", "enter_parallel_execution_node")
 
     for i in range(num_parallel_executions):
         graph.add_node(f"run_branch_{i}", make_run_branch(i))
         graph.add_edge(f"run_branch_{i}", "exit_parallel_execution_node")
 
-    graph.add_edge("exit_parallel_execution_node", "reporter_messenger_node")
-    graph.add_edge("reporter_messenger_node", "response_selector_node")
+    graph.add_edge("exit_parallel_execution_node", "response_selector_node")
     graph.add_edge("response_selector_node", "reporter_node")
     graph.add_edge("reporter_node", END)
 

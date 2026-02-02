@@ -7,7 +7,7 @@ def filter_messages_only_final(messages: List[BaseMessage]) -> List[BaseMessage]
 
     Rules:
     - Include all HumanMessage.
-    - Include AIMessage only when additional_kwargs.stage == 'final' and process == 'response'.
+    - Include AIMessage only when additional_kwargs.is_final == True.
     - Silently ignore others.
     """
     filtered: List[BaseMessage] = []
@@ -17,7 +17,7 @@ def filter_messages_only_final(messages: List[BaseMessage]) -> List[BaseMessage]
                 filtered.append(m)
             elif isinstance(m, AIMessage):
                 ak = getattr(m, 'additional_kwargs', {}) or {}
-                if ak.get('stage') == 'final' and ak.get('process') == 'response':
+                if ak.get('is_final') is True and ak.get('artefacts') == []:
                     filtered.append(m)
         except Exception:
             pass

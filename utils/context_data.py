@@ -424,7 +424,7 @@ def ensure_project_context(
             else:
                 _toast(f"Project insights loaded for {display_name}", ":material/menu_book:", quiet)
         except ContextAPIError as exc:
-            LOGGER.error("Project NL context fetch failed for db=%s: %s", db_name, exc)
+            LOGGER.error("Project response-gen-info fetch failed for db=%s: %s", db_name, exc)
             _toast("Project insights unavailable; using fallback", ":material/error:", quiet)
     else:
         payload["_project_context_loaded"] = payload.get("_project_context_loaded", False)

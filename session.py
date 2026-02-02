@@ -32,8 +32,6 @@ def setup_session() -> None:
     if "admin_logged_in" not in st.session_state:
         # st.session_state.admin_logged_in = False
         st.session_state.admin_logged_in = True
-    if "intermediate_steps_history" not in st.session_state:
-        st.session_state.intermediate_steps_history = []
     # if "user_permissions" not in st.session_state:
     #     st.session_state.user_permissions = None
     if "selected_user_id" not in st.session_state:
@@ -44,8 +42,6 @@ def setup_session() -> None:
         st.session_state.table_relationship_graph = None
     if "developer_view" not in st.session_state:
         st.session_state.developer_view = True
-    if "show_sandbox_stream_logs" not in st.session_state:
-        st.session_state.show_sandbox_stream_logs = False
     if "parallel_plan" not in st.session_state:
         st.session_state.parallel_plan = "Performance"
     if "num_parallel_executions" not in st.session_state:
