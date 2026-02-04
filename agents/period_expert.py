@@ -1,4 +1,5 @@
 import datetime
+import json
 from typing import List
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -7,6 +8,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from classes import RelevantDateRange, ContextState
+from utils.json_utils import strip_to_json_payload
 
 
 class PeriodExpertOutput(BaseModel):
@@ -70,6 +72,19 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
     14. The user will never ask for dates before year 2000. Check that no date range covers before 2000.
 
     If no date is mentioned or implied, default to the most recent reading range.
+
+    Output format (strict): Return a SINGLE JSON object with exactly these keys:
+    {{
+        "relevant_date_ranges": [
+            {{
+                "start_datetime": "<ISO-8601 start>",
+                "end_datetime": "<ISO-8601 end>",
+                "explanation": "<how to use this range>"
+            }}
+        ],
+        "timezone_interpretation": "<short explanation of timezone assumption>"
+    }}
+    Do not return a bare list. Do not include any other top-level keys.
     """
 
     prompt = ChatPromptTemplate.from_messages([
@@ -79,12 +94,61 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
 
     current_datetime = datetime.datetime.now().isoformat() + "Z"
 
-    chain = prompt | llm.with_structured_output(PeriodExpertOutput)
+    result: PeriodExpertOutput | None = None
+    try:
+        chain = prompt | llm.with_structured_output(PeriodExpertOutput)
+        result = chain.invoke({
+            "query": query,
+            "current_datetime": current_datetime,
+        })
+    except Exception:
+        result = None
 
-    result: PeriodExpertOutput = chain.invoke({
-        "query": query,
-        "current_datetime": current_datetime,
-    })
+    if result is None:
+        response = llm.invoke(
+            prompt.format_prompt(query=query, current_datetime=current_datetime).to_messages()
+        )
+        raw_text = getattr(response, "content", "") or str(response)
+        raw_text = strip_to_json_payload(
+            raw_text,
+            [
+                '"relevant_date_ranges"',
+                '"timezone_interpretation"',
+            ],
+        )
+        parsed = json.loads(raw_text)
+        if isinstance(parsed, list):
+            parsed = {
+                "relevant_date_ranges": parsed,
+                "timezone_interpretation": "",
+            }
+        elif isinstance(parsed, dict):
+            parsed.setdefault("relevant_date_ranges", [])
+            parsed.setdefault("timezone_interpretation", "")
+
+        if isinstance(parsed, dict) and isinstance(parsed.get("relevant_date_ranges"), list):
+            normalized_ranges = []
+            for item in parsed["relevant_date_ranges"]:
+                if isinstance(item, dict) and "date_range" in item:
+                    raw_range = str(item.get("date_range") or "")
+                    if " to " in raw_range:
+                        start_dt, end_dt = raw_range.split(" to ", 1)
+                    else:
+                        start_dt, end_dt = raw_range, ""
+                    normalized = {
+                        "start_datetime": start_dt.strip(),
+                        "end_datetime": end_dt.strip(),
+                        "explanation": item.get("explanation") or "",
+                    }
+                    normalized_ranges.append(normalized)
+                else:
+                    normalized_ranges.append(item)
+            parsed["relevant_date_ranges"] = normalized_ranges
+
+        result = PeriodExpertOutput.model_validate(parsed)
+
+    if result is None:
+        raise ValueError("Period expert returned no result")
 
     date_ranges: List[RelevantDateRange] = result.relevant_date_ranges
 

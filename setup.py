@@ -20,6 +20,7 @@ import streamlit as st
 from google.auth import default as google_auth_default
 from google.auth.transport.requests import AuthorizedSession, Request
 from langchain_google_vertexai import ChatVertexAI
+from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase as BaseSQLDatabase
 from utils.cancelable_llm import InterruptibleChatVertexAI, clone_llm as clone_interruptible_llm
 from utils.cancelable_sql import CancelableSQLDatabase
@@ -122,11 +123,6 @@ def _get_vertex_config_for_cache(llm: Any) -> VertexConfig:
     )
 
 
-def _load_cached_prompt_template() -> str:
-    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "codeact_coder_prompt_static.md"
-    return prompt_path.read_text(encoding="utf-8")
-
-
 def _load_instrument_selection_template() -> str:
     prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "instrument_selection_prompt_static.md"
     return prompt_path.read_text(encoding="utf-8")
@@ -208,12 +204,6 @@ def build_instrument_search_context(instrument_data: Dict[str, Any]) -> str:
     return "\n".join(context_parts)
 
 
-def build_codeact_coder_cached_context(tools: List[Any]) -> str:
-    tools_str = _build_tools_str(tools)
-    template = _load_cached_prompt_template()
-    return template.replace("<<TOOLS_STR>>", tools_str)
-
-
 def build_instrument_selection_cached_context(context_text: str) -> str:
     template = _load_instrument_selection_template()
     return template.replace("<<INSTRUMENT_CONTEXT>>", context_text)
@@ -225,6 +215,8 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
     instrument_data = normalize_instrument_context(instrument_payload)
     context_text = build_instrument_search_context(instrument_data)
     cached_context = build_instrument_selection_cached_context(context_text)
+    if not isinstance(llm, ChatVertexAI):
+        return None
     return ensure_cached_content(
         cache_key="instrument_selection",
         content_text=cached_context,
@@ -232,13 +224,6 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
         display_prefix="instrument-selection-cache",
         legacy_hash_keys=["instrument_selection_cached_context_hash"],
     )
-
-
-def _build_tools_str(tools: List[Any]) -> str:
-    return json.dumps(
-        [{"name": t.name, "description": t.description} for t in tools],
-        indent=2,
-    ) or "[]"
 
 
 def _create_cached_content(
@@ -439,37 +424,71 @@ def set_google_credentials() -> None:
     _GOOGLE_CREDENTIALS_SET = True
 
 
-def get_llms() -> Dict[str, ChatVertexAI]:
-    """Initialize the Gemini language models.
+def _set_deepinfra_env() -> Optional[str]:
+    token = os.environ.get("DEEPINFRA_API_TOKEN")
+    if token:
+        os.environ.setdefault("OPENAI_API_KEY", str(token))
+        return token
+    try:
+        token = st.secrets.get("DEEPINFRA_API_TOKEN")
+    except Exception:
+        token = None
+    if token:
+        os.environ["DEEPINFRA_API_TOKEN"] = str(token)
+        os.environ.setdefault("OPENAI_API_KEY", str(token))
+    return token
+
+
+def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
+    api_key = _set_deepinfra_env()
+    if not api_key:
+        raise ValueError("DEEPINFRA_API_TOKEN missing for DeepInfra models")
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url="https://api.deepinfra.com/v1/openai",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra_body={
+            "chat_template_kwargs": {
+                "enable_thinking": False
+            }
+        }
+    )
+
+
+def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
+    """Initialize the language models.
 
     Returns:
         A dictionary of language model instances configured with Google APIs.
     """
-    st.toast("Setting up Gemini LLMs...", icon=":material/build:")
+    st.toast("Setting up LLMs...", icon=":material/build:")
     common_kwargs = {
         "location": VERTEX_LOCATION,
         "api_endpoint": VERTEX_ENDPOINT,
     }
+
     return {
         "FAST": InterruptibleChatVertexAI(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash-lite",
             temperature=0.3,
             **common_kwargs,
         ),
         "BALANCED": InterruptibleChatVertexAI(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             temperature=0.5,
             **common_kwargs,
         ),
-        "THINKING": InterruptibleChatVertexAI(
-            model="gemini-2.5-pro",
-            temperature=0.7,
-            **common_kwargs,
+        "CODING": _build_deepinfra_llm(
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+            temperature=0.1,
+            max_tokens=4096,
         ),
     }
 
 
-def get_llm(model: str = "FAST") -> ChatVertexAI:
+def get_llm(model: str = "FAST") -> Any:
     """Backward compatible alias returning a single LLM by key."""
 
     llms = get_llms()
@@ -477,10 +496,32 @@ def get_llm(model: str = "FAST") -> ChatVertexAI:
     return llms.get(key, llms["FAST"])
 
 
-def clone_llm_with_overrides(llm: ChatVertexAI, **overrides) -> ChatVertexAI:
-    """Clone an LLM while preserving cancellation awareness."""
+def clone_llm_with_overrides(llm: Any, **overrides) -> Any:
+    """Clone an LLM while preserving cancellation awareness where possible."""
 
-    return clone_interruptible_llm(llm, **overrides)
+    if isinstance(llm, ChatVertexAI):
+        return clone_interruptible_llm(llm, **overrides)
+    if isinstance(llm, ChatOpenAI):
+        base_params = {
+            "model": getattr(llm, "model", None),
+            "temperature": getattr(llm, "temperature", None),
+            "max_tokens": getattr(llm, "max_tokens", None),
+            "base_url": getattr(llm, "base_url", None),
+            "api_key": getattr(llm, "api_key", None),
+        }
+        model_name = base_params.get("model") or getattr(llm, "model_name", None)
+        is_qwen = isinstance(model_name, str) and model_name.startswith("Qwen/")
+        if not base_params.get("base_url") and is_qwen:
+            base_params["base_url"] = "https://api.deepinfra.com/v1/openai"
+        if is_qwen:
+            token = base_params.get("api_key") or _set_deepinfra_env()
+            if not token:
+                raise ValueError("DEEPINFRA_API_TOKEN missing for DeepInfra models")
+            base_params["api_key"] = token
+        base_params.update({k: v for k, v in overrides.items() if v is not None})
+        filtered = {k: v for k, v in base_params.items() if v is not None}
+        return ChatOpenAI(**filtered)
+    return llm
 
 
 def get_db() -> BaseSQLDatabase:

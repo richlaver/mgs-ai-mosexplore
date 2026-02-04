@@ -12,9 +12,9 @@ from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 from utils.context_data import get_instrument_context
+from utils.json_utils import strip_to_json_payload
 
 logger = logging.getLogger(__name__)
-
 
 def _log_instrument_cache_summary(instrument_data: dict[str, Any]) -> None:
     """Log a concise summary of the instrument context cache contents."""
@@ -114,27 +114,18 @@ Available instruments:
 
 Analyze the query "{query}" and return JSON with instrument keys and their relevant fields only."""
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_template),
-        ("human", human_template)
-    ])
-
     call_inputs = {
         "query": query,
         "context": context,
         "verified_str": verified_str
     }
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_template),
+        ("human", human_template),
+    ])
 
     result: list[dict[str, Any]] | None = None
     try:
-        cached_context = setup.build_instrument_selection_cached_context(context)
-        cached_content_id = setup.get_or_refresh_cached_content(
-            cache_key="instrument_selection",
-            content_text=cached_context,
-            llm=llm,
-            display_prefix="instrument-selection-cache",
-            legacy_hash_keys=["instrument_selection_cached_context_hash"],
-        )
         structured_llm = llm.with_structured_output(
             InstrumentSelectionList,
             method="json_mode",
@@ -147,12 +138,8 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             "Additionally, identify other relevant keys from query semantics, and select their relevant fields.\n\n"
             "Return JSON with instrument keys and their relevant fields only."
         ).format(query=query, verified_str=verified_str)
-
         message = HumanMessage(content=prompt_text)
-        if cached_content_id:
-            structured_response = structured_llm.invoke([message], cached_content=cached_content_id)
-        else:
-            structured_response = structured_llm.invoke([message])
+        structured_response = structured_llm.invoke([message])
 
         if structured_response is None:
             raise ValueError("Structured output returned no result.")
@@ -166,12 +153,18 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         response = chain.invoke(call_inputs)
         try:
             logger.debug(f"Raw LLM response: {response.content}")
-            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response.content, re.DOTALL | re.IGNORECASE)
+            response_text = strip_to_json_payload(
+                response.content,
+                [
+                    '"key"',
+                ],
+            )
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL | re.IGNORECASE)
             if json_match:
                 result = json.loads(json_match.group(1))
                 logger.debug("Successfully extracted JSON from markdown code block")
             else:
-                result = json.loads(response.content)
+                result = json.loads(response_text)
         except json.JSONDecodeError as e:
             logger.error("JSON decode error: %s", e)
             logger.error("Raw response content: %r", response.content)
@@ -326,7 +319,11 @@ If no fields are relevant, return: []"""
         try:
             # First, try to extract JSON from markdown code blocks (most common format)
             import re
-            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response.content, re.DOTALL | re.IGNORECASE)
+            response_text = strip_to_json_payload(
+                response.content,
+                [],
+            )
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL | re.IGNORECASE)
             
             if json_match:
                 # Found JSON in markdown code block, try to parse it
@@ -336,10 +333,10 @@ If no fields are relevant, return: []"""
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse JSON from markdown block: {e}")
                     # Fall back to direct parsing
-                    selected_fields = json.loads(response.content)
+                    selected_fields = json.loads(response_text)
             else:
                 # No markdown code block found, try direct JSON parsing
-                selected_fields = json.loads(response.content)
+                selected_fields = json.loads(response_text)
             
             if isinstance(selected_fields, list):
                 # Validate that selected fields exist in the instrument data

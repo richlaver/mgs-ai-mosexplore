@@ -251,7 +251,7 @@ def main() -> None:
     llm = (
         llms.get("BALANCED")
         or llms.get("FAST")
-        or llms.get("THINKING")
+        or llms.get("CODING")
         or next(iter(llms.values()))
     )
     metadata_db = get_metadata_db()

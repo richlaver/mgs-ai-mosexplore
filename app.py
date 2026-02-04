@@ -98,19 +98,6 @@ def perform_setup():
         min_explained_variance=st.session_state.min_explained_variance,
         selected_project_key=st.session_state.get("selected_project_key"),
     )
-    try:
-        tools_snapshot = st.session_state.get("codeact_tools_snapshot") or []
-        if tools_snapshot:
-            cached_context = setup.build_codeact_coder_cached_context(tools_snapshot)
-            setup.ensure_cached_content(
-                cache_key="codeact_coder",
-                content_text=cached_context,
-                llm=st.session_state.llms["THINKING"],
-                display_prefix="codeact-coder-cache",
-                legacy_hash_keys=["codeact_coder_cached_tools_hash"],
-            )
-    except Exception as exc:
-        logger.warning("Failed to refresh CodeAct cache at startup: %s", exc)
     st.session_state.graph_agent_state_cls_id = id(AgentState)
     st.session_state.graph_context_cls_id = id(Context)
 

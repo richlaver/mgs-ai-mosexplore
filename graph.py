@@ -36,13 +36,10 @@ from agents.review_level_agents import (
 )
 from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
+from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
 from modal_sandbox_remote import run_sandboxed_code
-from setup import (
-    clone_llm_with_overrides,
-    build_codeact_coder_cached_context,
-    ensure_cached_content,
-)
+from setup import clone_llm_with_overrides
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
@@ -224,29 +221,6 @@ def build_graph(
     except Exception:
         pass
 
-    try:
-        cached_context = build_codeact_coder_cached_context(
-            tools=[
-                extraction_tool,
-                timeseries_plot_tool,
-                map_plot_tool,
-                review_by_value_tool,
-                review_by_time_tool,
-                review_schema_tool,
-                breach_instr_tool,
-                review_changes_across_period_tool,
-                csv_saver_tool,
-            ]
-        )
-        ensure_cached_content(
-            cache_key="codeact_coder",
-            content_text=cached_context,
-            llm=llms["THINKING"],
-            display_prefix="codeact-coder-cache",
-            legacy_hash_keys=["codeact_coder_cached_tools_hash"],
-        )
-    except Exception as exc:
-        logger.warning("Failed to create CodeAct cached content: %s", exc)
 
     termination_lock = threading.Lock()
     thinking_stage_lock = threading.Lock()
@@ -835,7 +809,7 @@ def build_graph(
     def response_selector_node(state: AgentState) -> dict:
         _ensure_run_not_cancelled("response_selector")
         updated_executions = response_selector(
-            llm=llms["THINKING"],
+            llm=llms["BALANCED"],
             executions=state.executions,
             context=state.context,
             response_mode=response_mode,
@@ -986,7 +960,7 @@ def build_graph(
                     (
                         "User query:\n"
                         f"{user_query}\n\n"
-                        f"Assistant plan/notes:\n{context_notes}\n\n"
+                        # f"Assistant plan/notes:\n{context_notes}\n\n"
                         f"Produced artefacts:\n{artefact_summary}\n\n"
                         f"Assistant final reply:\n{final_response_text}\n\nIs it sufficient?"
                     ),
@@ -998,6 +972,12 @@ def build_graph(
                 raw_text = _flatten_message_content(llm_result)
                 parsed: dict[str, Any] | None = None
                 try:
+                    raw_text = strip_to_json_payload(
+                        raw_text,
+                        [
+                            '"sufficient"',
+                        ],
+                    )
                     parsed = json.loads(raw_text)
                     logger.info("[Sufficiency] Parsed JSON sufficiency result: %s", parsed)
                 except Exception:
@@ -1168,7 +1148,7 @@ def build_graph(
 
             _ensure_run_not_cancelled(f"run_branch_{branch_id}:codeact")
             coder_result = codeact_coder_agent(
-                generating_llm=llms["THINKING"],
+                generating_llm=llms["CODING"],
                 tools=[
                     extraction_tool,
                     timeseries_plot_tool,
@@ -1226,7 +1206,7 @@ def build_graph(
                 prompt = (
                     "You are a fast Python syntax fixer. Only correct the syntax error described. "
                     "Make no other changes. Do not refactor, rename, or adjust logic. "
-                    "Return ONLY the corrected code with no markdown."
+                    "Return ONLY the entire code with corrections and no markdown."
                 )
                 llm_input = [
                     ("system", prompt),
@@ -1240,13 +1220,22 @@ def build_graph(
                 cleaned = _strip_code_fences(raw_text)
                 return cleaned if cleaned else code_to_fix
 
-            def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[Dict[str, Any]], List[str], List[str]]:
+            def _is_timeout_or_cancel(error_summary: str) -> bool:
+                if not error_summary:
+                    return False
+                lowered = error_summary.lower()
+                timeout_signals = ["timeout", "timed out", "time out", "deadline exceeded"]
+                cancel_signals = ["cancelled", "canceled", "cancel", "aborted", "user abort"]
+                return any(sig in lowered for sig in timeout_signals + cancel_signals)
+
+            def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[Dict[str, Any]], List[str], List[str], float]:
                 messages: List[AIMessage] = []
                 artefacts: List[Dict[str, Any]] = []
                 final_msg: AIMessage | None = None
                 error_logs_all: List[str] = []
                 error_logs_actionable: List[str] = []
                 terminated_early = False
+                start_ts = time.monotonic()
                 if code_to_run:
                     try:
                         _set_thinking_stage(3, "_execute_code")
@@ -1346,7 +1335,8 @@ def build_graph(
                                 gen.close()
                             except Exception:
                                 pass
-                return messages, final_msg, artefacts, error_logs_all, error_logs_actionable
+                exec_duration = time.monotonic() - start_ts
+                return messages, final_msg, artefacts, error_logs_all, error_logs_actionable, exec_duration
 
             execution_updates: List[Execution] = []
             fact_numbers: List[int] = []
@@ -1354,9 +1344,11 @@ def build_graph(
             current_code = code
             final_msg: AIMessage | None = None
             max_retry_number = 2
+            max_codegen_retries = 2
+            codegen_retry_number = 0
 
             while True:
-                attempt_messages, final_msg, artefacts, error_logs_all, error_logs_actionable = _execute_code(current_code)
+                attempt_messages, final_msg, artefacts, error_logs_all, error_logs_actionable, exec_duration = _execute_code(current_code)
 
                 updated_attempt = current_execution.model_copy(
                     update={
@@ -1369,6 +1361,7 @@ def build_graph(
 
                 error_text = updated_attempt.error_summary or ""
                 has_syntax_error = "SyntaxError" in error_text or "AttributeError" in error_text
+                logger.info("Syntax error detected in branch %d: %s", branch_id, has_syntax_error)
                 deterministic_error = bool(error_logs_actionable)
                 message_errors = any(
                     isinstance(m, AIMessage)
@@ -1378,6 +1371,8 @@ def build_graph(
                     and m.additional_kwargs["origin"].get("process") != "sandbox_log"
                     for m in attempt_messages
                 )
+                has_any_error = bool(error_text) or deterministic_error or message_errors
+                is_timeout_or_cancel = _is_timeout_or_cancel(error_text)
 
                 if not has_syntax_error and not (deterministic_error or message_errors):
                     user_query = state.context.retrospective_query if state.context else ""
@@ -1433,6 +1428,75 @@ def build_graph(
                         error_summary="",
                     )
                     current_code = corrected_code
+                    continue
+
+                if (
+                    has_any_error
+                    and not has_syntax_error
+                    and not is_timeout_or_cancel
+                    and exec_duration <= 10.0
+                    and codegen_retry_number < max_codegen_retries
+                ):
+                    codegen_retry_number += 1
+                    _progress_msg(
+                        f"Sandbox error detected. Re-running code generation (retry {codegen_retry_number}/{max_codegen_retries}).",
+                        level="error",
+                        metadata={"origin": {
+                            "process": "codeact_coder",
+                            "thinking_stage": 2,
+                            "branch_id": branch_id,
+                        }},
+                    )
+
+                    previous_attempts_for_codegen = [
+                        p
+                        for p in (list(state.executions) + execution_updates)
+                        if isinstance(p, Execution) and p.parallel_agent_id == branch_id
+                    ]
+                    coder_retry_result = codeact_coder_agent(
+                        generating_llm=llms["CODING"],
+                        tools=[
+                            extraction_tool,
+                            timeseries_plot_tool,
+                            map_plot_tool,
+                            review_by_value_tool,
+                            review_by_time_tool,
+                            review_schema_tool,
+                            breach_instr_tool,
+                            review_changes_across_period_tool,
+                            csv_saver_tool,
+                        ],
+                        context=state.context,
+                        previous_attempts=previous_attempts_for_codegen,
+                    )
+                    retry_execution = coder_retry_result["executions"][0]
+                    retry_code = (retry_execution.codeact_code or "").strip()
+
+                    coder_retry_messages: List[AIMessage] = list(coder_retry_result.get("messages", []) or [])
+                    for msg in coder_retry_messages:
+                        if not isinstance(msg, AIMessage):
+                            continue
+                        additional_kwargs = dict(msg.additional_kwargs or {})
+                        origin = additional_kwargs.get("origin")
+                        if not isinstance(origin, dict):
+                            origin = {}
+                        origin["thinking_stage"] = 2
+                        origin["branch_id"] = branch_id
+                        additional_kwargs["origin"] = origin
+                        msg.additional_kwargs = additional_kwargs
+                        enqueue_stream_message(msg)
+
+                    current_execution = Execution(
+                        parallel_agent_id=updated_attempt.parallel_agent_id,
+                        retry_number=updated_attempt.retry_number + 1,
+                        objective=getattr(retry_execution, "objective", "") or "",
+                        plan=list(getattr(retry_execution, "plan", []) or []),
+                        codeact_code=retry_code,
+                        final_response=None,
+                        artefacts=[],
+                        error_summary="",
+                    )
+                    current_code = retry_code
                     continue
 
                 break

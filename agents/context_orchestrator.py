@@ -140,7 +140,7 @@ Current status:
             HumanMessage(content=user_input),
         ]
 
-        llm_with_tools = llms['BALANCED'].bind_tools(tools)
+        llm_with_tools = llms["BALANCED"].bind_tools(tools)
         try:
             response = llm_with_tools.invoke(messages)
         except Exception:
@@ -188,7 +188,7 @@ Current status:
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("instrument_id_validator", lambda state: instrument_id_validator(state, llms['FAST'], db))
     graph.add_node("instrument_type_validator", lambda state: instrument_type_validator(state, selected_project_key))
-    graph.add_node("database_expert", lambda state: database_expert(state, llms['FAST'], db, selected_project_key))
+    graph.add_node("database_expert", lambda state: database_expert(state, llms["FAST"], db, selected_project_key))
     graph.add_node("period_expert", lambda state: period_expert(state, llms['FAST'], db))
     graph.add_node("project_insider", lambda state: project_insider(state, selected_project_key))
     graph.add_node("platform_expert", platform_expert)

@@ -95,11 +95,13 @@ VERTEX_ENDPOINT = _normalize_api_endpoint(
     )
 )
 
+
 image = (
     modal.Image.debian_slim(python_version="3.13")
     .pip_install(
         "langchain_community",
         "langchain-google-vertexai",
+        "langchain-openai",
         "sqlalchemy",
         "langchain-core",
         "langgraph",
@@ -400,11 +402,9 @@ def _enter_impl(self):
         "api_endpoint": VERTEX_ENDPOINT,
     }
     self.llms = {
-        "FAST": ChatVertexAI(model="gemini-2.5-flash-lite", temperature=0.1, **llm_common),
         "BALANCED": ChatVertexAI(model="gemini-2.5-flash", temperature=0.1, **llm_common),
-        "THINKING": ChatVertexAI(model="gemini-2.5-pro", temperature=0.1, **llm_common),
     }
-    logger.info("Initialized ChatVertexAI models: FAST, BALANCED, THINKING")
+    logger.info("Initialized Gemini 2.5 BALANCED model")
 
     self.project_configs = {}
     pdj = os.environ.get("PROJECT_DATA_JSON")
@@ -594,7 +594,7 @@ async def _run_impl(self,
         log_stage("after_db_lookup")
         # Initialize tools
         extraction_tool = extraction_sandbox_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_info=table_info,
             table_relationship_graph=table_relationship_graph,
@@ -613,49 +613,49 @@ async def _run_impl(self,
         write_artefact_tool = WriteArtefactTool(blob_db=self.blob_db, metadata_db=self.metadata_db)
 
         timeseries_plot_sandbox_tool = timeseries_plot_sandbox_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             sql_tool=general_sql_query_tool,
             write_artefact_tool=write_artefact_tool,
             thread_id=thread_id,
             user_id=user_id
         )
         map_plot_sandbox_tool = map_plot_sandbox_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             sql_tool=general_sql_query_tool,
             write_artefact_tool=write_artefact_tool,
             thread_id=thread_id,
             user_id=user_id
         )
         review_by_value_tool = review_by_value_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_relationship_graph=table_relationship_graph,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
         review_by_time_tool = review_by_time_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_relationship_graph=table_relationship_graph,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
         review_schema_tool = review_schema_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_relationship_graph=table_relationship_graph,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
         breach_instr_tool = breach_instr_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_relationship_graph=table_relationship_graph,
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access
         )
         review_changes_across_period_tool = review_changes_across_period_agent(
-            llm=self.llms['BALANCED'],
+            llm=self.llms["BALANCED"],
             db=db,
             table_relationship_graph=table_relationship_graph,
             user_id=user_id,
@@ -747,7 +747,7 @@ async def _run_impl(self,
                     "review_changes_across_period_agent": review_changes_across_period_tool,
                     "general_sql_query_tool": general_sql_query_tool,
                     "csv_saver_tool": csv_saver_tool,
-                    "llm": self.llms['BALANCED'],
+                    "llm": self.llms["BALANCED"],
                     "db": db,
                     # Avoid importing datetime because code generation agent gets confused between the datetime module and the datetime class
                     # "datetime": __import__("datetime"),

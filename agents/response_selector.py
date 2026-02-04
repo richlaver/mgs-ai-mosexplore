@@ -6,6 +6,7 @@ from classes import Execution, Context
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage
 from langchain_classic import hub
+from utils.json_utils import strip_to_json_payload
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,13 @@ def response_selector(
                 pref_num = None
         if pref_num is None:
             try:
+                output_text = strip_to_json_payload(
+                    output_text,
+                    [
+                        '"Preference"',
+                        '"preference"',
+                    ],
+                )
                 parsed = json.loads(output_text)
                 if isinstance(parsed, dict):
                     pref_raw = parsed.get("Preference") or parsed.get("preference")

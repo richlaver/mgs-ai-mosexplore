@@ -48,7 +48,10 @@ def build_modal_secrets():
             pass
 
         current_project_key = get_selected_project_key() if "selected_project_key" in st.session_state else None
-        if st.session_state.get("modal_secrets") and st.session_state.get("modal_secrets_project_key") == current_project_key:
+        if (
+            st.session_state.get("modal_secrets")
+            and st.session_state.get("modal_secrets_project_key") == current_project_key
+        ):
             return st.session_state.modal_secrets
 
         google_json = st.secrets.get("GOOGLE_CREDENTIALS_JSON")
@@ -124,12 +127,19 @@ def build_modal_secrets():
             str(db_dict.get("port", "3306")),
         )
         logger.info("Created local Modal secrets for artefact_metadata_rds and artefact_blob_b2")
-        st.session_state.modal_secrets = [google_secret, project_data_secret, mysql_secret, rds_secret, b2_secret]
+        st.session_state.modal_secrets = [
+            google_secret,
+            project_data_secret,
+            mysql_secret,
+            rds_secret,
+            b2_secret,
+        ]
         st.session_state.modal_secrets_project_key = selected_project_key
         return st.session_state.modal_secrets
     else:
         logger.info(
-            "Using named Modal secrets: 'google-credentials-json', 'project-data-json', 'mysql-credentials', 'artefact-metadata-rds-credentials', 'artefact-blob-b2-credentials'"
+            "Using named Modal secrets: 'google-credentials-json', 'project-data-json', 'mysql-credentials', "
+            "'artefact-metadata-rds-credentials', 'artefact-blob-b2-credentials'"
         )
         return [
             modal.Secret.from_name("google-credentials-json"),

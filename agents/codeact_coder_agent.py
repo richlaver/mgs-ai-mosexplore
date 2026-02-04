@@ -1,9 +1,9 @@
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Dict, Any, List
 from datetime import datetime
-import setup
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,6 +13,16 @@ from classes import Execution, Context
 from utils.timezone_utils import tzinfo_from_offset
 
 logger = logging.getLogger(__name__)
+
+_CODEACT_STATIC_PROMPT_PATH = Path(__file__).resolve().parents[1] / "cached_llm_content" / "codeact_coder_prompt_static.md"
+
+
+def _load_codeact_static_prompt() -> str:
+  try:
+    return _CODEACT_STATIC_PROMPT_PATH.read_text(encoding="utf-8")
+  except Exception as exc:
+    logger.warning("Failed to load codeact static prompt: %s", exc)
+    return ""
 
 codeact_coder_prompt = PromptTemplate(
     input_variables=[
@@ -209,14 +219,16 @@ def codeact_coder_agent(
     CodeactCoderResponse,
     method="json_mode",
   )
-  cached_context = setup.build_codeact_coder_cached_context(tools)
-  cached_content_id = setup.get_or_refresh_cached_content(
-    cache_key="codeact_coder",
-    content_text=cached_context,
-    llm=generating_llm,
-    display_prefix="codeact-coder-cache",
-    legacy_hash_keys=["codeact_coder_cached_tools_hash"],
+  tools_payload = json.dumps(
+    [
+      {"name": getattr(t, "name", ""), "description": getattr(t, "description", "")}
+      for t in (tools or [])
+    ],
+    indent=2,
   )
+  static_prompt = _load_codeact_static_prompt()
+  if static_prompt:
+    static_prompt = static_prompt.replace("<<TOOLS_STR>>", tools_payload)
 
   max_format_retries = 4
 
@@ -237,14 +249,13 @@ def codeact_coder_agent(
       "previous_attempts_summary": previous_attempts_summary,
     }
     prompt_text = codeact_coder_prompt.format(**prompt_payload)
+    if static_prompt:
+      prompt_text = f"{static_prompt}\n\n{prompt_text}"
 
     for attempt in range(max_format_retries + 1):
       try:
         message = HumanMessage(content=prompt_text)
-        if cached_content_id:
-          candidate = structured_llm.invoke([message], cached_content=cached_content_id)
-        else:
-          candidate = structured_llm.invoke([message])
+        candidate = structured_llm.invoke([message])
 
         if candidate is None:
           raise ValueError("Structured output returned no result.")
