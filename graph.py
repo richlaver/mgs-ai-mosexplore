@@ -1032,10 +1032,11 @@ def build_graph(
                 6) output JSON only
 
                 # Output Format
-                Return ONLY JSON with key:
+                You MUST respond using the structured output tool for FactsResponse.
+                Do NOT print raw JSON, code, or any extra text. The tool arguments must conform to:
                 - facts (list of {{number:int, text:str}}) where text is the concise wording of the fact as it appears in the response.
                 Facts must stay sorted by number; text must be drawn from or faithfully paraphrase the response.
-                Do the reasoning internally but DO NOT include chain-of-thought in the final JSON output.
+                Do the reasoning internally but DO NOT include chain-of-thought in the final tool output.
 
                 # Example
                 ## Input
