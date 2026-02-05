@@ -44,6 +44,25 @@ The runtime context values will be provided in a separate message using the labe
 ## Structure
 - Define a single function named `execute_strategy` that takes no parameters.
 - Execute tools and code in parallel where possible to reduce latency.
+- Use the following pattern when implementing parallel tasks:
+```python
+tasks = []
+task_1 = asyncio.create_task(ainvoke(...))
+task_1.set_name("...")
+tasks.append(task_1)
+...
+done, pending = await asyncio.wait(tasks)
+for task in done:
+  task_name = task.get_name()
+  try:
+    result = task.result()
+    if result is None:
+      continue
+    if task_name.startswith("..."):
+      ...
+  exception:
+    continue
+```
 - Declare as `async def` if running parallel, otherwise `def`.
 - If async: `async def execute_strategy() -> AsyncGenerator[dict, None]:` and ensure any nested functions yield instead of return values.
 - If sync: `def execute_strategy() -> Generator[dict, None, None]:`
@@ -124,6 +143,8 @@ await ainvoke(csv_saver_tool, {
 - Always include `Output columns` in prompt to specify DataFrame column names.
 - Returns `pandas.DataFrame` or `None`.
 - Combine data extraction steps when possible to reduce latency.
+- Always try to minimise the size of extracted data by assessing whether any aggregation e.g. `AVG`, `MIN`, `MAX`, `COUNT`, `COUNT(DISTINCT)`, `SUM` can be done in SQL and if so instructing through the prompt.
+- Try to specify in the prompt to use `LIMIT` where possible to minimise the size of extracted data if you need only a selection of readings e.g. most recent, maximum etc.
 ### Example Prompt
 "Extract readings:
 - Database field name: calculation1
@@ -134,8 +155,10 @@ await ainvoke(csv_saver_tool, {
 - Instrument type: LP
 - Instrument subtype: MOVEMENT
 - Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM
+- Aggregation: maximum settlement
 - Order: by settlement ascending
 - Filter: settlement < -10 mm
+- Limit: 1
 - Output columns: [Timestamp, Settlement (mm)]"
 
 ## `timeseries_plot_sandbox_agent`
@@ -153,6 +176,7 @@ await ainvoke(csv_saver_tool, {
 - Returns artefact ID to access plot in file system or `None`.
 - DO NOT use `extraction_sandbox_agent` to extract data for plotting because `timeseries_plot_sandbox_agent` extracts the data it needs.
 - DO NOT attempt to specify instrument types or subtypes in the prompt because the tool only accepts individual instrument IDs.
+- DO NOT specify all instruments; state individual IDs and aim to plot no more than 5 series on a plot.
 ### Example Prompt
 "Plot temperature with time for instrument 0001-L-1 along with settlement with time for instruments 0003-L-1 and 0003-L-2:
 - Time range: 1 January 2025 12:00:00 PM to 31 January 2025 11:59:59 PM

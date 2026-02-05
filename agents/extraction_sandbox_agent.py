@@ -393,8 +393,7 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
         try:
             result = general_sql_tool._run(sql_query)
-            # logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:500])
-            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result))
+            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:500])
             messages.append(AIMessage(
                 name="ExtractionSandboxAgent",
                 content="SQL query executed successfully.",
