@@ -28,6 +28,7 @@ from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any, List, Tuple, Dict, Union, Optional
 import logging
 from utils.project_selection import (
@@ -363,6 +364,150 @@ def enable_tracing():
     """Enables LangSmith tracing."""
     os.environ['LANGSMITH_TRACING'] = st.secrets['LANGSMITH_TRACING']
     os.environ['LANGSMITH_API_KEY'] = st.secrets['LANGSMITH_API_KEY']
+
+
+def set_e2b_api_key() -> None:
+    if os.environ.get("E2B_API_KEY"):
+        return
+    api_key = st.secrets.get("E2B_API_KEY")
+    if not api_key:
+        raise ValueError("E2B_API_KEY missing in secrets")
+    os.environ["E2B_API_KEY"] = str(api_key)
+    logging.info("Set E2B_API_KEY from secrets")
+
+
+def set_project_data_env() -> None:
+    if os.environ.get("PROJECT_DATA_JSON"):
+        return
+    def _to_plain(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): _to_plain(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_to_plain(v) for v in value]
+        return value
+
+    project_data = st.secrets.get("project_data")
+    if isinstance(project_data, Mapping):
+        project_data = _to_plain(project_data)
+    if not isinstance(project_data, dict) or not project_data:
+        project_data = {}
+        for key, value in st.secrets.items():
+            if key == "project_data" and isinstance(value, Mapping):
+                project_data = _to_plain(value)
+                break
+            if not isinstance(key, str) or not key.startswith("project_data."):
+                continue
+            sub_key = key.split(".", 1)[1]
+            if sub_key:
+                project_data[sub_key] = _to_plain(value)
+    if not isinstance(project_data, dict) or not project_data:
+        raise ValueError("project_data missing in secrets")
+    os.environ["PROJECT_DATA_JSON"] = json.dumps(project_data)
+    logging.info("Set PROJECT_DATA_JSON from secrets")
+
+
+def set_vertex_env() -> None:
+    if not os.environ.get("VERTEX_LOCATION"):
+        os.environ["VERTEX_LOCATION"] = VERTEX_LOCATION
+        logging.info("Set VERTEX_LOCATION from default")
+    if not os.environ.get("VERTEX_ENDPOINT"):
+        os.environ["VERTEX_ENDPOINT"] = _normalize_api_endpoint(VERTEX_ENDPOINT)
+        logging.info("Set VERTEX_ENDPOINT from default")
+
+
+def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
+    """Build the E2B sandbox template used by the app."""
+    if not os.environ.get("E2B_API_KEY"):
+        set_e2b_api_key()
+
+    try:
+        from e2b import Template
+    except Exception as exc:
+        logger.error("E2B SDK unavailable; cannot build template")
+        raise RuntimeError("E2B SDK is required to build the sandbox template") from exc
+
+    repo_root = Path(__file__).resolve().parent
+    template_name = template_name or os.getenv("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
+
+    packages = [
+        "langchain_community",
+        "langchain-google-vertexai",
+        "langchain-openai",
+        "sqlalchemy",
+        "langchain-core",
+        "langgraph",
+        "sqlparse",
+        "pydantic",
+        "typing_extensions",
+        "mysql-connector-python",
+        "geoalchemy2",
+        "numpy",
+        "pandas",
+        "plotly",
+        "pyproj",
+        "b2sdk",
+        "psycopg2-binary",
+        "requests",
+        "sqlglot",
+        "streamlit",
+        "tabulate",
+    ]
+
+    logger.info("Building E2B sandbox template: %s", template_name)
+
+    source_files = [
+        "classes.py",
+        "parameters.py",
+        "table_info.py",
+        "artefact_management.py",
+    ]
+    source_dirs = ["agents", "tools", "utils"]
+
+    for entry in source_files + source_dirs:
+        entry_path = repo_root / entry
+        logger.info("Template source path: %s exists=%s", entry_path, entry_path.exists())
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(repo_root)
+        template = (
+            Template()
+            .from_template("code-interpreter-v1")
+            .set_user("root")
+            .apt_install(["bash"])
+            .run_cmd("chmod 755 /bin/bash")
+            .set_user("user")
+            .set_envs({
+                "PYTHONPATH": "/root",
+                "E2B_SERVICE_INIT": "lazy",
+            })
+            .set_workdir("/root")
+            .pip_install(packages)
+            .copy(source_files, "/root/")
+            .copy("agents/", "/root/agents/")
+            .copy("tools/", "/root/tools/")
+            .copy("utils/", "/root/utils/")
+        )
+
+        logger.info("Template definition created; starting build")
+        build_info = Template.build(
+            template,
+            template_name,
+            cpu_count=2,
+            memory_mb=2048,
+        )
+    finally:
+        os.chdir(original_cwd)
+    logger.info(
+        "E2B template build complete name=%s id=%s",
+        template_name,
+        getattr(build_info, "template_id", None) or getattr(build_info, "id", None),
+    )
+    try:
+        st.toast("E2B sandbox template built", icon=":material/check_circle:")
+    except Exception:
+        pass
+    return build_info
 
 
 def build_relationship_graph(table_info=table_info) -> defaultdict[str, List[Tuple]]:

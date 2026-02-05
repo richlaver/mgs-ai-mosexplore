@@ -35,7 +35,10 @@ def perform_setup():
     setup_logging()
     import setup
     setup_modal.set_modal_credentials()
+    setup.set_e2b_api_key()
     setup.set_google_credentials()
+    setup.set_project_data_env()
+    setup.set_vertex_env()
     setup.enable_tracing()
     setup.set_blob_db_env()
     setup.set_metadata_db_env()

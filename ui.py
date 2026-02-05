@@ -214,6 +214,19 @@ def delete_artefacts_modal():
                 finally:
                     st.rerun()
 
+
+@st.dialog("Template Sandbox")
+def template_sandbox_modal():
+    st.markdown("Building E2B sandbox template...")
+    with st.spinner("Building template (this can take a few minutes)..."):
+        try:
+            setup.build_e2b_sandbox_template()
+        except Exception as exc:
+            logger.error("E2B template build failed: %s", exc)
+            st.error(f"E2B template build failed: {exc}")
+        finally:
+            st.rerun()
+
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
     st.session_state.clear_chat = True
@@ -658,6 +671,14 @@ def render_initial_ui() -> None:
                     on_click=sandbox_modal,
                     use_container_width=True
                 )
+                if st.button(
+                    label="Template Sandbox",
+                    icon=":material/construction:",
+                    key="template_sandbox_button",
+                    help="Build the E2B sandbox template",
+                    use_container_width=True,
+                ):
+                    template_sandbox_modal()
                 st.button(
                     "Delete Artefacts",
                     icon=":material/delete_forever:",
