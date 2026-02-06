@@ -191,7 +191,7 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
         try:
             sql_query = generate_chain.invoke(inputs).strip()
             sql_query = re.sub(r'^```sql\n|```$', '', sql_query).strip()  # Clean any markdown
-            logger.debug("[generate_sql] produced SQL (len=%d): %s", len(sql_query), sql_query[:500])
+            logger.debug("[generate_sql] produced SQL (len=%d): %s", len(sql_query), sql_query[:100])
             messages.append(AIMessage(
                 name="ExtractionSandboxAgent",
                 content=f"Generated SQL query: {sql_query}",
@@ -325,7 +325,7 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
         # Proceed with existing query validation only if alias check passed
         try:
             check_result = checker_tool.invoke({"query": sql_query})
-            logger.debug("[check_sql] raw check result (len=%d): %s", len(str(check_result)), str(check_result)[:500])
+            logger.debug("[check_sql] raw check result (len=%d): %s", len(str(check_result)), str(check_result)[:100])
             corrected_query = re.sub(r'^```sql\n|```$', '', check_result).strip()
             if corrected_query != sql_query:
                 correction_msg = f"Query was corrected to: {corrected_query}"
@@ -393,7 +393,7 @@ def create_extraction_sandbox_subgraph(llm, db, table_info, table_relationship_g
 
         try:
             result = general_sql_tool._run(sql_query)
-            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:500])
+            logger.debug("[execute_sql] result (len=%d): %s", len(str(result)), str(result)[:100])
             messages.append(AIMessage(
                 name="ExtractionSandboxAgent",
                 content="SQL query executed successfully.",
@@ -729,7 +729,7 @@ class ExtractionSandboxAgentTool(BaseTool):
 
     def _run(self, prompt: str) -> Optional[pd.DataFrame]:
         t0 = time.perf_counter()
-        logger.debug("Tool run started | prompt(len=%d): %s", len(prompt), prompt[:500])
+        logger.debug("Tool run started | prompt(len=%d): %s", len(prompt), prompt[:100])
         extraction_graph = create_extraction_sandbox_subgraph(
             llm=self.llm,
             db=self.db,

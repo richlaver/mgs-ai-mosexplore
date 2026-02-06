@@ -261,7 +261,7 @@ def _invoke_llm(chain, prompt: str, previous_errors: List[str], previous_failed_
     raw = _clean_json_blocks(raw)
     data = _safe_json_loads(raw)
     if not isinstance(data, dict):
-        raise ValueError(f"LLM did not return valid JSON object: {raw[:200]}")
+        raise ValueError(f"LLM did not return valid JSON object: {raw[:100]}")
     return data
 
 

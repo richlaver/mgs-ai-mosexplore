@@ -1,3 +1,4 @@
+import os
 import sys
 
 import streamlit as st
@@ -19,7 +20,6 @@ from utils.context_data import (
 )
 from utils.timezone_utils import init_timezones
 import logging
-import setup_modal
 
 def setup_logging():
     if not logging.getLogger().handlers:
@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 def perform_setup():
     setup_logging()
     import setup
-    setup_modal.set_modal_credentials()
     setup.set_e2b_api_key()
     setup.set_google_credentials()
     setup.set_project_data_env()
     setup.set_vertex_env()
+    setup.set_parallel_executions_env()
     setup.enable_tracing()
     setup.set_blob_db_env()
     setup.set_metadata_db_env()
@@ -65,21 +65,15 @@ def perform_setup():
     except Exception as exc:
         logger.warning("Failed to refresh instrument selection cache at startup: %s", exc)
 
-    plan_to_agents = {"Economy": 3, "Reliable": 5, "Performance": 7}
-    selected_plan = st.session_state.get("parallel_plan", "Reliable")
-    st.session_state.num_parallel_executions = plan_to_agents.get(selected_plan, 3)
-
-    completion_strategy = st.session_state.get("completion_strategy", "Intelligent")
-    if completion_strategy == "Quick":
-        st.session_state.num_completions_before_response = 1
-    elif completion_strategy == "Max":
-        st.session_state.num_completions_before_response = st.session_state.num_parallel_executions
-    else:
-        st.session_state.num_completions_before_response = max(1, (st.session_state.num_parallel_executions // 2) + 1)
-
+    raw_parallel = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
+    try:
+        parallel_count = int(raw_parallel) if raw_parallel is not None else 1
+    except Exception:
+        parallel_count = 1
+    parallel_count = max(1, parallel_count)
     st.session_state.min_successful_responses = min(
         st.session_state.get("min_successful_responses", 3),
-        st.session_state.num_parallel_executions,
+        parallel_count,
     )
     st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.7))
 
@@ -94,9 +88,6 @@ def perform_setup():
         thread_id=st.session_state.thread_id,
         user_id=st.session_state.selected_user_id,
         global_hierarchy_access=st.session_state.global_hierarchy_access,
-        num_parallel_executions=st.session_state.num_parallel_executions,
-        num_completions_before_response=st.session_state.num_completions_before_response,
-        response_mode=completion_strategy,
         min_successful_responses=st.session_state.min_successful_responses,
         min_explained_variance=st.session_state.min_explained_variance,
         selected_project_key=st.session_state.get("selected_project_key"),

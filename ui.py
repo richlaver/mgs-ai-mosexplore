@@ -3,6 +3,7 @@ import plotly.io as pio
 from langchain_core.messages import AIMessage, HumanMessage, AIMessageChunk
 
 import json
+import os
 import uuid
 import logging
 import re
@@ -14,8 +15,8 @@ from typing import Any
 from classes import AgentState, Context
 from parameters import users, table_info
 from graph import build_graph, drain_stream_messages, clear_stream_message_queue
+from e2b_sandbox import build_sandbox_envs_for_pool, shutdown_sandbox_pool, start_sandbox_pool
 import setup
-import setup_modal
 from utils.project_selection import (
     list_projects,
     get_selected_project_key,
@@ -27,7 +28,6 @@ from utils.context_data import (
     set_default_project_key,
 )
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
-from modal_management import deploy_app, stop_app, is_app_deployed, warm_up_container
 from utils.chat_history import filter_messages_only_final
 from utils.run_cancellation import (
     RunCancelledError,
@@ -40,6 +40,15 @@ logger = logging.getLogger(__name__)
 
 STREAM_MESSAGE_EMIT_INTERVAL_SECONDS = 0.1
 CODE_YIELD_STEP_PREFIX_RE = re.compile(r"^\s*Step\s+\d+[^:]*:\s*")
+
+
+def _get_parallel_executions_from_env() -> int:
+    raw = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
+    try:
+        value = int(raw) if raw is not None else 1
+    except Exception:
+        value = 1
+    return max(1, value)
 
 
 def _strip_code_yield_step_prefix(content: str, metadata: dict) -> str:
@@ -154,25 +163,6 @@ def login_modal():
             else:
                 st.error("Incorrect password")
 
-@st.dialog("Sandbox")
-def sandbox_modal():
-    st.markdown(f"App Deployed: **{'Yes' if st.session_state.app_deployed else 'No'}**")
-    st.info("Note: Keeping a container warm costs ~$55/month. Stop when not in use to save costs.")
-
-    spin_up_disabled = st.session_state.app_deployed
-    kill_disabled = not st.session_state.app_deployed
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Spin-up", disabled=spin_up_disabled, key="spin_up", icon=":material/rocket_launch:"):
-            if not st.session_state.app_deployed:
-                deploy_app()
-            st.rerun()
-    with col2:
-        if st.button("Kill", disabled=kill_disabled, key="kill", icon=":material/block:"):
-            stop_app()
-            st.rerun()
-
 @st.dialog("Delete All Artefacts")
 def delete_artefacts_modal():
     st.markdown(
@@ -252,8 +242,7 @@ def render_initial_ui() -> None:
     register_project_configs(st.secrets.get("project_data", {}))
     set_default_project_key(st.session_state.get("selected_project_key"))
     if "app_deployed" not in st.session_state:
-        st.session_state.app_deployed = is_app_deployed()
-        logger.info(f"app_deployed after setting session state variable: {st.session_state.app_deployed}")
+        st.session_state.app_deployed = False
         
     st.markdown(
         """
@@ -397,45 +386,12 @@ def render_initial_ui() -> None:
         icon_image="mgs-small-logo.svg"
     )
 
-    def _majority_threshold(count: int) -> int:
-        return max(1, (count // 2) + 1)
-
-    parallel_plans = {
-        "Economy": {"agents": 3, "label": "Economy — 3 agents"},
-        "Reliable": {"agents": 5, "label": "Reliable — 5 agents"},
-        "Performance": {"agents": 7, "label": "Performance — 7 agents"},
-    }
-
-    completion_strategies = {
-        "Intelligent": {
-            "label": "Intelligent — consistency-based",
-            "resolve": _majority_threshold,
-        },
-        "Quick": {
-            "label": "Quick — first completion",
-            "resolve": lambda n: 1,
-        },
-        "Balanced": {
-            "label": "Balanced — majority completion",
-            "resolve": _majority_threshold,
-        },
-        "Max": {
-            "label": "Max — all agents complete",
-            "resolve": lambda n: max(1, n),
-        },
-    }
     def _rebuild_graph():
-        selected_plan = st.session_state.get("parallel_plan", "Economy")
-        plan = parallel_plans.get(selected_plan, parallel_plans["Economy"])
-        st.session_state.num_parallel_executions = plan["agents"]
-
-        selected_strategy = st.session_state.get("completion_strategy", "Intelligent")
-        strategy = completion_strategies.get(selected_strategy, completion_strategies["Intelligent"])
-        st.session_state.num_completions_before_response = strategy["resolve"](st.session_state.num_parallel_executions)
+        parallel_count = _get_parallel_executions_from_env()
 
         min_successful = min(
             st.session_state.get("min_successful_responses", 3),
-            st.session_state.num_parallel_executions,
+            parallel_count,
         )
         st.session_state.min_successful_responses = min_successful
         st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.7))
@@ -450,19 +406,11 @@ def render_initial_ui() -> None:
             thread_id=st.session_state.thread_id,
             user_id=st.session_state.selected_user_id,
             global_hierarchy_access=st.session_state.global_hierarchy_access,
-            num_parallel_executions=st.session_state.num_parallel_executions,
-            num_completions_before_response=st.session_state.num_completions_before_response,
-            response_mode=selected_strategy,
             min_successful_responses=st.session_state.min_successful_responses,
             min_explained_variance=st.session_state.min_explained_variance,
             selected_project_key=st.session_state.get("selected_project_key"),
             stream_sandbox_logs=st.session_state.get("sandbox_logging", True),
         )
-        try:
-            if st.session_state.get("app_deployed"):
-                warm_up_container()
-        except Exception:
-            pass
 
     with st.sidebar:
         st.divider()
@@ -487,10 +435,6 @@ def render_initial_ui() -> None:
                         return
                     _sync_selected_user_for_project(selected_key, force_reset=True)
                     try:
-                        st.session_state.modal_secrets = setup_modal.build_modal_secrets()
-                    except Exception:
-                        pass
-                    try:
                         st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
                     except Exception:
                         pass
@@ -509,7 +453,7 @@ def render_initial_ui() -> None:
                         )
                     except Exception as e:
                         logger.warning("Failed to refresh instrument selection cache for %s: %s", selected_key, e)
-                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "num_parallel_executions"]):
+                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access"]):
                         try:
                             logger.info("[Project Switch] Rebuilding agent graph for project=%s", selected_key)
                             st.session_state.graph = build_graph(
@@ -522,9 +466,6 @@ def render_initial_ui() -> None:
                                 thread_id=st.session_state.thread_id,
                                 user_id=st.session_state.selected_user_id,
                                 global_hierarchy_access=st.session_state.global_hierarchy_access,
-                                num_parallel_executions=st.session_state.num_parallel_executions,
-                                num_completions_before_response=st.session_state.get("num_completions_before_response", 1),
-                                response_mode=st.session_state.get("completion_strategy", "Intelligent"),
                                 min_successful_responses=st.session_state.get("min_successful_responses", 3),
                                 min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
                                 selected_project_key=selected_key,
@@ -543,7 +484,7 @@ def render_initial_ui() -> None:
                         st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
                     except Exception:
                         pass
-                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access", "num_parallel_executions"]):
+                    if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access"]):
                         try:
                             st.session_state.graph = build_graph(
                                 llms=st.session_state.llms,
@@ -555,9 +496,6 @@ def render_initial_ui() -> None:
                                 thread_id=st.session_state.thread_id,
                                 user_id=st.session_state.selected_user_id,
                                 global_hierarchy_access=st.session_state.global_hierarchy_access,
-                                num_parallel_executions=st.session_state.num_parallel_executions,
-                                num_completions_before_response=st.session_state.get("num_completions_before_response", 1),
-                                response_mode=st.session_state.get("completion_strategy", "Intelligent"),
                                 min_successful_responses=st.session_state.get("min_successful_responses", 3),
                                 min_explained_variance=st.session_state.get("min_explained_variance", 0.7),
                                 selected_project_key=st.session_state.get("selected_project_key"),
@@ -596,48 +534,25 @@ def render_initial_ui() -> None:
                     help="Select which MissionOS user to query as.",
                     on_change=_on_user_change,
                 )
-        plan_keys = list(parallel_plans.keys())
-        # Uncomment to re-enable subscription plan selection
-        # st.selectbox(
-        #     label="Subscription Plan",
-        #     options=plan_keys,
-        #     format_func=lambda key: parallel_plans[key]["label"],
-        #     key="parallel_plan",
-        #     help="Economy: 3 agents • Reliable: 5 agents • Performance: 7 agents",
-        #     on_change=_rebuild_graph,
-        # )
-        strategy_keys = list(completion_strategies.keys())
-        # Uncomment to re-enable response mode selection
-        # st.selectbox(
-        #     label="Response Mode",
-        #     options=strategy_keys,
-        #     format_func=lambda key: completion_strategies[key]["label"],
-        #     key="completion_strategy",
-        #     help="Intelligent: consistency-based • Quick: first completion • Balanced: majority completion • Max: all agents complete",
-        #     on_change=_rebuild_graph,
-        # )
-        if st.session_state.get("completion_strategy", "Intelligent") == "Intelligent":
-            selected_plan_key = st.session_state.get("parallel_plan", "Performance")
-            selected_plan = parallel_plans.get(selected_plan_key, parallel_plans["Performance"])
-            max_success_needed = selected_plan.get("agents", 7)
-            st.session_state.min_successful_responses = min(max_success_needed, st.session_state.min_successful_responses)
-            st.slider(
-                label="Minimum No. of Successful Responses to Await",
-                min_value=1,
-                max_value=max_success_needed,
-                step=1,
-                key="min_successful_responses",
-                help="Stop early when consistency is stable after at least this many successful responses.",
-                on_change=_rebuild_graph,
-            )
-            st.slider(
-                label="Minimum Explained Variance",
-                min_value=0.5,
-                max_value=1.0,
-                key="min_explained_variance",
-                help="Regularised Explained Variance threshold for Intelligent mode termination.",
-                on_change=_rebuild_graph,
-            )
+        parallel_count = _get_parallel_executions_from_env()
+        st.session_state.min_successful_responses = min(parallel_count, st.session_state.min_successful_responses)
+        st.slider(
+            label="Minimum No. of Successful Responses to Await",
+            min_value=1,
+            max_value=parallel_count,
+            step=1,
+            key="min_successful_responses",
+            help="Stop early when consistency is stable after at least this many successful responses.",
+            on_change=_rebuild_graph,
+        )
+        st.slider(
+            label="Minimum Explained Variance",
+            min_value=0.5,
+            max_value=1.0,
+            key="min_explained_variance",
+            help="Regularised Explained Variance threshold for Intelligent mode termination.",
+            on_change=_rebuild_graph,
+        )
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
@@ -662,14 +577,6 @@ def render_initial_ui() -> None:
                     key="sandbox_logging",
                     help="Toggle sandbox log streaming",
                     on_change=_rebuild_graph,
-                )
-                st.button(
-                    label="Sandbox App",
-                    icon=":material/developer_board:",
-                    key="sandbox_button",
-                    help="Manage Sandbox app and containers",
-                    on_click=sandbox_modal,
-                    use_container_width=True
                 )
                 if st.button(
                     label="Template Sandbox",
@@ -778,6 +685,8 @@ def render_chat_content() -> None:
     if not st.session_state.setup_complete:
         return
 
+    parallel_count = _get_parallel_executions_from_env()
+
     handle_clear_chat()
 
     chat_col, stop_col = st.columns([9, 1], vertical_alignment="bottom")
@@ -878,6 +787,31 @@ def render_chat_content() -> None:
         _set_active_run_controller(controller, token)
 
         try:
+            parallel_count = _get_parallel_executions_from_env()
+            logger.info(
+                "[E2B Pool] Prestarting sandboxes run_id=%s count=%s",
+                controller.run_id,
+                parallel_count,
+            )
+            pool_envs = build_sandbox_envs_for_pool(
+                user_id=st.session_state.selected_user_id,
+                global_hierarchy_access=st.session_state.global_hierarchy_access,
+                thread_id=st.session_state.thread_id,
+                selected_project_key=st.session_state.get("selected_project_key"),
+            )
+            start_sandbox_pool(
+                run_id=controller.run_id,
+                count=parallel_count,
+                envs=pool_envs,
+                idle_timeout=120.0,
+                max_retries=5,
+                stagger_seconds=0.2,
+                controller=controller,
+            )
+        except Exception as exc:
+            logger.warning("Failed to prestart E2B sandbox pool: %s", exc)
+
+        try:
             with chat_col:
                 with st.chat_message("assistant"):
                     status_container_placeholder = st.empty()
@@ -976,12 +910,12 @@ def render_chat_content() -> None:
                             parallel_slots = parallel_status_child_slots.get(stage)
                             parallel_buffers = parallel_status_child_buffers.get(stage)
                             if parallel_slots is None:
-                                cols = status.columns(st.session_state.num_parallel_executions)
+                                cols = status.columns(parallel_count)
                                 parallel_slots = []
                                 for col in cols:
                                     parallel_slots.append(col.empty())
                                 parallel_status_child_slots[stage] = parallel_slots
-                                parallel_buffers = [[] for _ in range(st.session_state.num_parallel_executions)]
+                                parallel_buffers = [[] for _ in range(parallel_count)]
                                 parallel_status_child_buffers[stage] = parallel_buffers
 
                             if parallel_buffers is None:
@@ -1120,4 +1054,9 @@ def render_chat_content() -> None:
             logger.exception("Unexpected error during stream: %s", exc)
             st.error("Unexpected error while generating the response. Please retry.")
         finally:
+            try:
+                logger.info("[E2B Pool] Shutting down pool run_id=%s", controller.run_id)
+                shutdown_sandbox_pool(controller.run_id)
+            except Exception:
+                pass
             _clear_active_run_controller()

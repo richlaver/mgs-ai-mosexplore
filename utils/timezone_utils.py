@@ -101,22 +101,6 @@ def fetch_project_timezone(db) -> dict:
 
 
 def fetch_sandbox_timezone() -> dict:
-    try:
-        from modal_sandbox_remote import sandbox_timezone_probe
-
-        result = sandbox_timezone_probe.remote()
-        if isinstance(result, dict):
-            offset = result.get("offset") or "unknown"
-            label = result.get("tzname") or "sandbox"
-            return {
-                "label": label,
-                "tzname": label,
-                "offset": offset,
-                "source": "sandbox-probe",
-                "display": f"{label} (UTC{offset})",
-            }
-    except Exception:
-        logger.exception("Failed to fetch sandbox timezone; falling back to app timezone")
     fallback_tz = datetime.now().astimezone().tzinfo
     return describe_timezone(fallback_tz, label="sandbox-fallback", source="sandbox-fallback")
 

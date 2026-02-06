@@ -62,6 +62,8 @@ VERTEX_ENDPOINT = _normalize_api_endpoint(
         else f"{VERTEX_LOCATION}-aiplatform.googleapis.com",
     )
 )
+E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
+PARALLEL_EXECUTIONS = 2
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
@@ -415,6 +417,24 @@ def set_vertex_env() -> None:
         logging.info("Set VERTEX_ENDPOINT from default")
 
 
+def set_parallel_executions_env() -> None:
+    """Expose the configured parallel execution count as an environment variable."""
+
+    os.environ["MGS_NUM_PARALLEL_EXECUTIONS"] = str(PARALLEL_EXECUTIONS)
+    logging.info("Set MGS_NUM_PARALLEL_EXECUTIONS=%s", PARALLEL_EXECUTIONS)
+
+
+def get_parallel_executions() -> int:
+    """Read the configured parallel execution count from the environment."""
+
+    raw = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
+    try:
+        value = int(raw) if raw is not None else PARALLEL_EXECUTIONS
+    except Exception:
+        value = PARALLEL_EXECUTIONS
+    return max(1, value)
+
+
 def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
     """Build the E2B sandbox template used by the app."""
     if not os.environ.get("E2B_API_KEY"):
@@ -427,7 +447,8 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
         raise RuntimeError("E2B SDK is required to build the sandbox template") from exc
 
     repo_root = Path(__file__).resolve().parent
-    template_name = template_name or os.getenv("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
+    template_name = template_name or os.getenv("E2B_TEMPLATE_NAME", E2B_TEMPLATE_NAME)
+    os.environ["E2B_TEMPLATE_NAME"] = template_name
 
     packages = [
         "langchain_community",
@@ -480,6 +501,7 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
             .set_envs({
                 "PYTHONPATH": "/root",
                 "E2B_SERVICE_INIT": "lazy",
+                "MGS_REPO_ROOT": "/root",
             })
             .set_workdir("/root")
             .pip_install(packages)

@@ -134,7 +134,7 @@ def create_timeseries_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: Ge
                 content = str(result)
                 artefacts = []
             logger.debug("plot_tool.run returned content type: %s; artefacts type: %s", type(content).__name__, type(artefacts).__name__)
-            logger.debug("plot_tool.run content (truncated): %s", (content[:500] if isinstance(content, str) else str(content)))
+            logger.debug("plot_tool.run content (truncated): %s", (content[:100] if isinstance(content, str) else str(content)))
             logger.debug("plot_tool.run artefacts keys: %s", [list(a.keys()) for a in artefacts] if isinstance(artefacts, list) else artefacts)
             if content.startswith("Error:"):
                 raise ValueError(content)

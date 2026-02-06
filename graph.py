@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import random
 import threading
 import time
@@ -38,7 +39,7 @@ from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
-from modal_sandbox_remote import run_sandboxed_code
+from e2b_sandbox import execute_remote_sandbox
 from setup import clone_llm_with_overrides
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
@@ -111,6 +112,15 @@ def _ensure_run_not_cancelled(stage: str) -> None:
         controller.raise_if_cancelled(stage)
 
 
+def _get_parallel_executions_from_env() -> int:
+    raw = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
+    try:
+        value = int(raw) if raw is not None else 1
+    except Exception:
+        value = 1
+    return max(1, value)
+
+
 def build_graph(
     llms: Dict[str, BaseLanguageModel],
     db: SQLDatabase,
@@ -121,15 +131,14 @@ def build_graph(
     thread_id: str,
     user_id: int,
     global_hierarchy_access: bool,
-    num_parallel_executions: int = 7,
-    num_completions_before_response: int = 2,
-    response_mode: str = "Intelligent",
     min_successful_responses: int = 3,
     min_explained_variance: float = 0.7,
     selected_project_key: str | None = None,
     stream_sandbox_logs: bool = True,
 ) -> StateGraph:
     st.toast("Building graph...", icon=":material/account_tree:")
+
+    num_parallel_executions = _get_parallel_executions_from_env()
 
     timezone_context_default = st.session_state.get("timezone_context")
 
@@ -235,7 +244,6 @@ def build_graph(
     response_facts: List[Dict[str, Any]] = []
     counted_branches: dict[int, int] = {}
     success_order_counter = 0
-    response_mode_normalized = (response_mode or "").strip().lower()
 
     def _stop_child_message_emitter() -> None:
         nonlocal child_emitter_token
@@ -375,20 +383,6 @@ def build_graph(
                 _start_child_message_emitter(next_stage, process_name)
             else:
                 _stop_child_message_emitter()
-
-    def _terminate_running_branches_if_threshold_met(successes: int) -> None:
-        nonlocal termination_triggered
-        if successes < num_completions_before_response:
-            return
-        with termination_lock:
-            if termination_triggered:
-                return
-            termination_triggered = True
-        _set_thinking_stage(4, "_terminate_running_branches_if_threshold_met")
-        controller = get_active_run_controller()
-        if controller:
-            controller.cancel_active_resources("sufficiency threshold met")
-        logger.info("[MainGraph] Termination triggered at success count %d", successes)
 
     def _evaluate_consistency_and_maybe_terminate(branch_id: int) -> None:
         nonlocal termination_triggered
@@ -812,7 +806,6 @@ def build_graph(
             llm=llms["BALANCED"],
             executions=state.executions,
             context=state.context,
-            response_mode=response_mode,
             successful_executions=list(successful_executions),
             response_facts=list(response_facts),
         )
@@ -1240,7 +1233,7 @@ def build_graph(
                 if code_to_run:
                     try:
                         _set_thinking_stage(3, "_execute_code")
-                        gen = run_sandboxed_code.remote(
+                        gen = execute_remote_sandbox(
                             code=code_to_run,
                             table_info=table_info,
                             table_relationship_graph=table_relationship_graph,
@@ -1530,17 +1523,14 @@ def build_graph(
                 "[Sufficiency] Branch %d tally after update: %d/%d (is_sufficient=%s, actionable_errors=%d, total_errors=%d, counted=%s)",
                 branch_id,
                 successes,
-                num_completions_before_response,
+                min_successful_responses,
                 is_sufficient,
                 len(error_logs_actionable),
                 len(error_logs_all),
                 list(counted_branches.items()),
             )
-            if response_mode_normalized == "intelligent":
-                if is_sufficient:
-                    _evaluate_consistency_and_maybe_terminate(branch_id)
-            else:
-                _terminate_running_branches_if_threshold_met(successes)
+            if is_sufficient:
+                _evaluate_consistency_and_maybe_terminate(branch_id)
 
             return payload or {}
 

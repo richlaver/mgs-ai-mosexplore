@@ -47,15 +47,14 @@ def response_selector(
     llm: BaseLanguageModel,
     executions: List[Execution],
     context: Optional[Context],
-    response_mode: str | None = None,
     successful_executions: Optional[List[dict]] = None,
     response_facts: Optional[List[dict]] = None,
 ) -> List[Execution]:
     """Select best execution.
 
-    Intelligent mode: project each successful execution's fact-occurrence vector onto
-    the latest principal component and pick the top score (ties: artefacts count, then
-    response length). Other modes: fall back to pairwise LLM selection.
+    Project each successful execution's fact-occurrence vector onto the latest principal
+    component and pick the top score (ties: artefacts count, then response length).
+    Falls back to pairwise LLM selection when no principal component is available.
     """
     if not executions:
         return executions
@@ -64,81 +63,81 @@ def response_selector(
         if ex.is_best:
             ex.is_best = False
 
-    mode = (response_mode or "").strip().lower()
-    if mode == "intelligent":
-        # Require principal component from latest successful execution
-        latest_pc_entry = None
-        if successful_executions:
-            try:
-                latest_pc_entry = max(
-                    (e for e in successful_executions if isinstance(e, dict) and e.get("principal_component_1")),
-                    key=lambda e: e.get("order", -1),
-                )
-            except Exception:
-                latest_pc_entry = None
+    # Require principal component from latest successful execution
+    latest_pc_entry = None
+    if successful_executions:
+        try:
+            latest_pc_entry = max(
+                (e for e in successful_executions if isinstance(e, dict) and e.get("principal_component_1")),
+                key=lambda e: e.get("order", -1),
+            )
+        except Exception:
+            latest_pc_entry = None
 
-        if not latest_pc_entry:
-            logger.info("response_selector: No principal component available; falling back to LLM selection.")
+    if not latest_pc_entry:
+        logger.info("response_selector: No principal component available; falling back to LLM selection.")
+    else:
+        pc_facts = latest_pc_entry.get("principal_component_facts") or []
+        pc_weights = latest_pc_entry.get("principal_component_1") or []
+        if not pc_facts or not pc_weights or len(pc_facts) != len(pc_weights):
+            logger.info("response_selector: Invalid principal component data; falling back to LLM selection.")
         else:
-            pc_facts = latest_pc_entry.get("principal_component_facts") or []
-            pc_weights = latest_pc_entry.get("principal_component_1") or []
-            if not pc_facts or not pc_weights or len(pc_facts) != len(pc_weights):
-                logger.info("response_selector: Invalid principal component data; falling back to LLM selection.")
+            fact_index = {num: idx for idx, num in enumerate(pc_facts) if isinstance(num, int)}
+
+            def _exec_fact_indices(ex: Execution) -> List[int]:
+                if not successful_executions:
+                    return []
+                matches = [
+                    e
+                    for e in successful_executions
+                    if isinstance(e, dict)
+                    and e.get("branch_id") == ex.parallel_agent_id
+                    and e.get("retry_number") == ex.retry_number
+                ]
+                if not matches:
+                    return []
+                return matches[-1].get("response_fact_indices") or []
+
+            def _response_text(ex: Execution) -> str:
+                if ex.final_response and isinstance(ex.final_response, AIMessage):
+                    return _strip_material_icons(str(ex.final_response.content or ""))
+                return ""
+
+            def _score(ex: Execution) -> tuple[float, int, int, str]:
+                indices = _exec_fact_indices(ex)
+                vec = [0.0] * len(pc_facts)
+                for num in indices:
+                    if num in fact_index:
+                        vec[fact_index[num]] = 1.0
+                score = sum(w * v for w, v in zip(pc_weights, vec))
+                artefact_count = len(ex.artefacts or [])
+                text = _response_text(ex)
+                return score, artefact_count, len(text), text
+
+            candidates = [ex for ex in executions if ex.is_sufficient]
+            if not candidates:
+                logger.info("response_selector: No successful executions; falling back to LLM selection.")
             else:
-                fact_index = {num: idx for idx, num in enumerate(pc_facts) if isinstance(num, int)}
-                def _exec_fact_indices(ex: Execution) -> List[int]:
-                    if not successful_executions:
-                        return []
-                    matches = [
-                        e for e in successful_executions
-                        if isinstance(e, dict)
-                        and e.get("branch_id") == ex.parallel_agent_id
-                        and e.get("retry_number") == ex.retry_number
-                    ]
-                    if not matches:
-                        return []
-                    return matches[-1].get("response_fact_indices") or []
-
-                def _response_text(ex: Execution) -> str:
-                    if ex.final_response and isinstance(ex.final_response, AIMessage):
-                        return _strip_material_icons(str(ex.final_response.content or ""))
-                    return ""
-
-                def _score(ex: Execution) -> tuple[float, int, int, str]:
-                    indices = _exec_fact_indices(ex)
-                    vec = [0.0] * len(pc_facts)
-                    for num in indices:
-                        if num in fact_index:
-                            vec[fact_index[num]] = 1.0
-                    score = sum(w * v for w, v in zip(pc_weights, vec))
-                    artefact_count = len(ex.artefacts or [])
-                    text = _response_text(ex)
-                    return score, artefact_count, len(text), text
-
-                candidates = [ex for ex in executions if ex.is_sufficient]
-                if not candidates:
-                    logger.info("response_selector: No successful executions; falling back to LLM selection.")
-                else:
-                    best = None
-                    best_tuple = None
-                    for ex in candidates:
-                        score, artefacts_ct, text_len, text = _score(ex)
-                        logger.info(
-                            "[Intelligent Selector] Exec (branch=%d retry=%d) score=%0.4f artefacts=%d chars=%d text=%s",
-                            ex.parallel_agent_id,
-                            ex.retry_number,
-                            score,
-                            artefacts_ct,
-                            text_len,
-                            text,
-                        )
-                        key = (score, artefacts_ct, text_len)
-                        if best is None or key > best_tuple:
-                            best = ex
-                            best_tuple = key
-                    if best:
-                        best.is_best = True
-                        return executions
+                best = None
+                best_tuple = None
+                for ex in candidates:
+                    score, artefacts_ct, text_len, text = _score(ex)
+                    logger.info(
+                        "[Intelligent Selector] Exec (branch=%d retry=%d) score=%0.4f artefacts=%d chars=%d text=%s",
+                        ex.parallel_agent_id,
+                        ex.retry_number,
+                        score,
+                        artefacts_ct,
+                        text_len,
+                        text,
+                    )
+                    key = (score, artefacts_ct, text_len)
+                    if best is None or key > best_tuple:
+                        best = ex
+                        best_tuple = key
+                if best:
+                    best.is_best = True
+                    return executions
 
     # Fallback: existing LLM-based selection
     candidates = [ex for ex in executions if ex.final_response is not None]
@@ -163,8 +162,9 @@ def response_selector(
         challenger_text = _build_candidate_text(challenger)
         chain = prompt | llm
         try:
+            question = context.retrospective_query if context else ""
             result = chain.invoke({
-                "question": context.retrospective_query,
+                "question": question,
                 "answer_a": incumbent_text,
                 "answer_b": challenger_text,
             })
