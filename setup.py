@@ -417,6 +417,12 @@ def set_vertex_env() -> None:
         logging.info("Set VERTEX_ENDPOINT from default")
 
 
+def set_e2b_template_env() -> None:
+    if not os.environ.get("E2B_TEMPLATE_NAME"):
+        os.environ["E2B_TEMPLATE_NAME"] = E2B_TEMPLATE_NAME
+        logging.info("Set E2B_TEMPLATE_NAME from default")
+
+
 def set_parallel_executions_env() -> None:
     """Expose the configured parallel execution count as an environment variable."""
 
@@ -515,7 +521,7 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
         build_info = Template.build(
             template,
             template_name,
-            cpu_count=2,
+            cpu_count=1,
             memory_mb=2048,
         )
     finally:

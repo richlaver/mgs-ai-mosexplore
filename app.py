@@ -38,6 +38,7 @@ def perform_setup():
     setup.set_google_credentials()
     setup.set_project_data_env()
     setup.set_vertex_env()
+    setup.set_e2b_template_env()
     setup.set_parallel_executions_env()
     setup.enable_tracing()
     setup.set_blob_db_env()
