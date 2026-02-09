@@ -15,7 +15,6 @@ from typing import Any
 from classes import AgentState, Context
 from parameters import users, table_info
 from graph import build_graph, drain_stream_messages, clear_stream_message_queue
-from e2b_sandbox import build_sandbox_envs_for_pool, shutdown_sandbox_pool, start_sandbox_pool
 import setup
 from utils.project_selection import (
     list_projects,
@@ -787,31 +786,6 @@ def render_chat_content() -> None:
         _set_active_run_controller(controller, token)
 
         try:
-            parallel_count = _get_parallel_executions_from_env()
-            logger.info(
-                "[E2B Pool] Prestarting sandboxes run_id=%s count=%s",
-                controller.run_id,
-                parallel_count,
-            )
-            pool_envs = build_sandbox_envs_for_pool(
-                user_id=st.session_state.selected_user_id,
-                global_hierarchy_access=st.session_state.global_hierarchy_access,
-                thread_id=st.session_state.thread_id,
-                selected_project_key=st.session_state.get("selected_project_key"),
-            )
-            start_sandbox_pool(
-                run_id=controller.run_id,
-                count=parallel_count,
-                envs=pool_envs,
-                idle_timeout=120.0,
-                max_retries=5,
-                stagger_seconds=0.2,
-                controller=controller,
-            )
-        except Exception as exc:
-            logger.warning("Failed to prestart E2B sandbox pool: %s", exc)
-
-        try:
             with chat_col:
                 with st.chat_message("assistant"):
                     status_container_placeholder = st.empty()
@@ -903,7 +877,7 @@ def render_chat_content() -> None:
                             developer_view
                             and branch_id is not None
                             and isinstance(branch_id, int)
-                            and stage in (2, 3)
+                            and stage in (1, 2, 3)
                         )
 
                         if can_render_parallel:
@@ -1054,9 +1028,4 @@ def render_chat_content() -> None:
             logger.exception("Unexpected error during stream: %s", exc)
             st.error("Unexpected error while generating the response. Please retry.")
         finally:
-            try:
-                logger.info("[E2B Pool] Shutting down pool run_id=%s", controller.run_id)
-                shutdown_sandbox_pool(controller.run_id)
-            except Exception:
-                pass
             _clear_active_run_controller()

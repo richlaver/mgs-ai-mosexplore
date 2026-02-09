@@ -5,9 +5,10 @@ import os
 import queue
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from e2b_code_interpreter import AsyncSandbox
 from utils.run_cancellation import get_active_run_controller
@@ -16,21 +17,265 @@ logger = logging.getLogger(__name__)
 
 _PAYLOAD_PREFIX = "__E2B_PAYLOAD__:"
 
-_sandbox_pool_lock = threading.Lock()
-_sandbox_pools: Dict[str, "_SandboxPool"] = {}
-
 _async_loop: Optional[asyncio.AbstractEventLoop] = None
 _async_loop_thread: Optional[threading.Thread] = None
 _async_loop_ready = threading.Event()
 _async_loop_lock = threading.Lock()
+
+_SANDBOX_POOL_LOCK = threading.Lock()
+_SANDBOX_POOL_CONDITION = threading.Condition(_SANDBOX_POOL_LOCK)
+_SANDBOX_POOL: Dict[int, "SandboxSlot"] = {}
+_ACTIVE_EXECUTIONS_LOCK = threading.Lock()
+_ACTIVE_EXECUTIONS = 0
+
+
+@dataclass(slots=True)
+class SandboxSlot:
+    slot_id: int
+    sandbox: Optional[AsyncSandbox] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = "pending"
+    preinit_done: bool = False
+    in_use: bool = False
+    used: bool = False
+    last_error: Optional[str] = None
+    cancel_handle: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    cancelled: bool = False
+
+
+def _assert_template_ready(template_name: str) -> None:
+    if not template_name:
+        raise RuntimeError("E2B template name is required but missing")
+
+
+def _set_pool_slot(slot: SandboxSlot) -> None:
+    with _SANDBOX_POOL_CONDITION:
+        _SANDBOX_POOL[slot.slot_id] = slot
+        _SANDBOX_POOL_CONDITION.notify_all()
+
+
+def _get_pool_slot(slot_id: int) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        return _SANDBOX_POOL.get(slot_id)
+
+
+def _remove_pool_slot(slot_id: int) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        slot = _SANDBOX_POOL.pop(slot_id, None)
+        _SANDBOX_POOL_CONDITION.notify_all()
+        return slot
+
+
+def _claim_pool_slot(slot_id: int) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        slot = _SANDBOX_POOL.get(slot_id)
+        if (
+            not slot
+            or slot.cancelled
+            or not slot.preinit_done
+            or slot.in_use
+            or slot.used
+            or slot.sandbox is None
+        ):
+            return None
+        slot.in_use = True
+        slot.used = True
+        slot.status = "in_use"
+        _SANDBOX_POOL_CONDITION.notify_all()
+        return slot
+
+
+def _claim_preinit_failed_slot_locked(prefer_slot_id: Optional[int]) -> Optional[SandboxSlot]:
+    candidates = list(_SANDBOX_POOL.values())
+    if prefer_slot_id is not None:
+        prefer = _SANDBOX_POOL.get(prefer_slot_id)
+        if (
+            prefer
+            and not prefer.cancelled
+            and prefer.status == "preinit_failed"
+            and not prefer.in_use
+            and not prefer.used
+            and prefer.sandbox is not None
+        ):
+            prefer.in_use = True
+            prefer.used = True
+            prefer.status = "in_use"
+            _SANDBOX_POOL_CONDITION.notify_all()
+            return prefer
+
+    for slot in candidates:
+        if (
+            slot.cancelled
+            or slot.status != "preinit_failed"
+            or slot.in_use
+            or slot.used
+            or slot.sandbox is None
+        ):
+            continue
+        slot.in_use = True
+        slot.used = True
+        slot.status = "in_use"
+        _SANDBOX_POOL_CONDITION.notify_all()
+        return slot
+    return None
+
+
+def _claim_ready_slot_locked(prefer_slot_id: Optional[int]) -> Optional[SandboxSlot]:
+    candidates = list(_SANDBOX_POOL.values())
+    if prefer_slot_id is not None:
+        prefer = _SANDBOX_POOL.get(prefer_slot_id)
+        if (
+            prefer
+            and not prefer.cancelled
+            and prefer.preinit_done
+            and not prefer.in_use
+            and not prefer.used
+            and prefer.sandbox is not None
+        ):
+            prefer.in_use = True
+            prefer.used = True
+            prefer.status = "in_use"
+            _SANDBOX_POOL_CONDITION.notify_all()
+            return prefer
+
+    for slot in candidates:
+        if (
+            slot.cancelled
+            or not slot.preinit_done
+            or slot.in_use
+            or slot.used
+            or slot.sandbox is None
+        ):
+            continue
+        slot.in_use = True
+        slot.used = True
+        slot.status = "in_use"
+        _SANDBOX_POOL_CONDITION.notify_all()
+        return slot
+    return None
+
+
+def _claim_preinit_failed_slot(prefer_slot_id: Optional[int]) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        return _claim_preinit_failed_slot_locked(prefer_slot_id)
+
+
+def _claim_ready_slot(prefer_slot_id: Optional[int]) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        return _claim_ready_slot_locked(prefer_slot_id)
+
+
+def _has_in_progress_slots() -> bool:
+    in_progress_status = {"creating", "created", "preinit"}
+    with _SANDBOX_POOL_CONDITION:
+        return any(
+            slot.status in in_progress_status and not slot.cancelled for slot in _SANDBOX_POOL.values()
+        )
+
+
+def _wait_for_pool_slot(prefer_slot_id: Optional[int]) -> Optional[SandboxSlot]:
+    with _SANDBOX_POOL_CONDITION:
+        while True:
+            slot = _claim_ready_slot_locked(prefer_slot_id)
+            if slot:
+                return slot
+            slot = _claim_preinit_failed_slot_locked(prefer_slot_id)
+            if slot:
+                return slot
+            in_progress = any(
+                s.status in {"creating", "created", "preinit"} and not s.cancelled
+                for s in _SANDBOX_POOL.values()
+            )
+            if not in_progress:
+                return None
+            _SANDBOX_POOL_CONDITION.wait(timeout=1.0)
+
+
+def _get_parallel_executions() -> int:
+    raw = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
+    try:
+        value = int(raw) if raw is not None else 1
+    except Exception:
+        value = 1
+    return max(1, value)
+
+
+def _increment_active_executions() -> int:
+    global _ACTIVE_EXECUTIONS
+    with _ACTIVE_EXECUTIONS_LOCK:
+        _ACTIVE_EXECUTIONS += 1
+        return _ACTIVE_EXECUTIONS
+
+
+def _decrement_active_executions() -> int:
+    global _ACTIVE_EXECUTIONS
+    with _ACTIVE_EXECUTIONS_LOCK:
+        _ACTIVE_EXECUTIONS = max(0, _ACTIVE_EXECUTIONS - 1)
+        return _ACTIVE_EXECUTIONS
+
+
+def _cleanup_unused_pool(reason: str) -> None:
+    to_kill: List[SandboxSlot] = []
+    with _SANDBOX_POOL_CONDITION:
+        for slot_id, slot in list(_SANDBOX_POOL.items()):
+            if slot.in_use or slot.used:
+                continue
+            if slot.status not in {"creating", "created", "preinit", "preinit_failed"}:
+                continue
+            slot.cancelled = True
+            _SANDBOX_POOL.pop(slot_id, None)
+            to_kill.append(slot)
+        _SANDBOX_POOL_CONDITION.notify_all()
+
+    if not to_kill:
+        return
+    logger.info("[E2B Pool] Cleaning up unused sandboxes reason=%s count=%d", reason, len(to_kill))
+    for slot in to_kill:
+        sandbox = slot.sandbox
+        if sandbox is None:
+            continue
+        _kill_sandbox_sync(sandbox)
+
+
+def reset_sandbox_pool(reason: str | None = None) -> None:
+    slots: List[SandboxSlot] = []
+    with _SANDBOX_POOL_CONDITION:
+        slots = list(_SANDBOX_POOL.values())
+        _SANDBOX_POOL.clear()
+        _SANDBOX_POOL_CONDITION.notify_all()
+    if not slots:
+        return
+    logger.info("[E2B Pool] Resetting sandbox pool reason=%s count=%d", reason, len(slots))
+    for slot in slots:
+        sandbox = slot.sandbox
+        if sandbox is None:
+            continue
+        _kill_sandbox_sync(sandbox)
+
+
+def _build_preinit_code() -> str:
+    return """def execute_strategy():\n    return []\n"""
 
 
 def _ensure_async_loop() -> asyncio.AbstractEventLoop:
     global _async_loop
     global _async_loop_thread
     with _async_loop_lock:
-        if _async_loop and _async_loop.is_running():
-            return _async_loop
+        if _async_loop:
+            if _async_loop.is_closed():
+                logger.warning("[E2B] Async loop was closed; recreating")
+                _async_loop = None
+                _async_loop_thread = None
+            elif _async_loop.is_running():
+                return _async_loop
+            else:
+                if _async_loop_thread is None or not _async_loop_thread.is_alive():
+                    logger.warning("[E2B] Async loop thread not alive; recreating")
+                else:
+                    logger.warning("[E2B] Async loop not running; recreating")
+                _async_loop = None
+                _async_loop_thread = None
 
         _async_loop_ready.clear()
 
@@ -52,184 +297,6 @@ def _ensure_async_loop() -> asyncio.AbstractEventLoop:
         return _async_loop
 
 
-class _PooledSandbox:
-    def __init__(self, sandbox: AsyncSandbox, idle_timeout: float) -> None:
-        self.sandbox = sandbox
-        self._idle_timeout = idle_timeout
-        self._idle_event = threading.Event()
-        self._idle_thread = threading.Thread(target=self._idle_worker, daemon=True)
-        self._idle_thread.start()
-
-    def _idle_worker(self) -> None:
-        if not self._idle_event.wait(timeout=self._idle_timeout):
-            logger.info("[E2B Pool] Idle timeout reached; killing sandbox")
-            _kill_sandbox_sync(self.sandbox)
-
-    def mark_in_use(self) -> None:
-        self._idle_event.set()
-
-
-class _SandboxPool:
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        template_name: str,
-        envs: Dict[str, str],
-        idle_timeout: float,
-        max_retries: int,
-        stagger_seconds: float,
-    ) -> None:
-        self.run_id = run_id
-        self.template_name = template_name
-        self.envs = envs
-        self.idle_timeout = idle_timeout
-        self.max_retries = max_retries
-        self.stagger_seconds = max(0.0, stagger_seconds)
-        self._sandboxes: List[_PooledSandbox] = []
-        self._lock = threading.Lock()
-        self._stop_event = threading.Event()
-
-    def start(self, count: int) -> None:
-        logger.info("[E2B Pool] Starting prestart worker run_id=%s count=%s", self.run_id, count)
-        threading.Thread(target=self._start_worker, args=(count,), daemon=True).start()
-
-    def _start_worker(self, count: int) -> None:
-        google_creds_text = _load_google_credentials_text()
-        for idx in range(max(0, count)):
-            if self._stop_event.is_set():
-                break
-            logger.info("[E2B Pool] Creating sandbox %s/%s run_id=%s", idx + 1, count, self.run_id)
-            sandbox = _create_sandbox_with_retries(
-                template_name=self.template_name,
-                envs=self.envs,
-                max_retries=self.max_retries,
-            )
-            if sandbox is not None:
-                logger.info("[E2B Pool] Warming sandbox run_id=%s", self.run_id)
-                _warmup_sandbox_sync(sandbox, google_creds_text)
-                pooled = _PooledSandbox(sandbox, idle_timeout=self.idle_timeout)
-                with self._lock:
-                    self._sandboxes.append(pooled)
-                logger.info("[E2B Pool] Sandbox ready run_id=%s pool_size=%s", self.run_id, len(self._sandboxes))
-            else:
-                logger.warning("[E2B Pool] Sandbox create failed run_id=%s", self.run_id)
-            if self.stagger_seconds and idx < count - 1:
-                time.sleep(self.stagger_seconds)
-
-    def acquire(self) -> Optional[AsyncSandbox]:
-        with self._lock:
-            if not self._sandboxes:
-                logger.info("[E2B Pool] No prestarted sandbox available run_id=%s", self.run_id)
-                return None
-            pooled = self._sandboxes.pop(0)
-            logger.info("[E2B Pool] Acquired sandbox run_id=%s remaining=%s", self.run_id, len(self._sandboxes))
-        pooled.mark_in_use()
-        return pooled.sandbox
-
-    def kill_all(self) -> None:
-        self._stop_event.set()
-        with self._lock:
-            sandboxes = [p.sandbox for p in self._sandboxes]
-            self._sandboxes = []
-        logger.info("[E2B Pool] Killing %s prestarted sandboxes run_id=%s", len(sandboxes), self.run_id)
-        for sandbox in sandboxes:
-            _kill_sandbox_sync(sandbox)
-
-
-def _create_sandbox_with_retries(*, template_name: str, envs: Dict[str, str], max_retries: int) -> Optional[AsyncSandbox]:
-    attempts = max(1, int(max_retries))
-    for attempt in range(attempts):
-        try:
-            return _create_sandbox_sync(template_name=template_name, envs=envs)
-        except Exception:
-            logger.warning("[E2B Pool] Sandbox create attempt %s/%s failed", attempt + 1, attempts)
-            if attempt >= attempts - 1:
-                break
-            time.sleep(0.5 * (attempt + 1))
-    return None
-
-
-def _create_sandbox_sync(*, template_name: str, envs: Dict[str, str]) -> AsyncSandbox:
-    loop = _ensure_async_loop()
-
-    logger.info("[E2B] Creating sandbox (template=%s)", template_name)
-
-    async def _create() -> AsyncSandbox:
-        return await AsyncSandbox.create(
-            template=template_name,
-            timeout=500,
-            envs=envs,
-            request_timeout=500,
-        )
-
-    future = asyncio.run_coroutine_threadsafe(_create(), loop)
-    return future.result()
-
-
-def _warmup_sandbox_sync(sandbox: AsyncSandbox, google_creds_text: Optional[str]) -> None:
-    loop = _ensure_async_loop()
-
-    warmup_code = r'''
-import os
-import sys
-
-repo_root = os.environ.get("MGS_REPO_ROOT", "/root")
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
-if os.path.isdir(repo_root):
-    try:
-        os.chdir(repo_root)
-    except Exception:
-        pass
-
-try:
-    import numpy  # noqa: F401
-    import pandas  # noqa: F401
-    import sqlalchemy  # noqa: F401
-    import psycopg2  # noqa: F401
-    import b2sdk.v1  # noqa: F401
-    import geoalchemy2  # noqa: F401
-    import langchain_community  # noqa: F401
-    import langchain_google_vertexai  # noqa: F401
-except Exception:
-    pass
-
-try:
-    import parameters  # noqa: F401
-    import table_info  # noqa: F401
-    import agents.extraction_sandbox_agent  # noqa: F401
-    import agents.timeseries_plot_sandbox_agent  # noqa: F401
-    import agents.map_plot_sandbox_agent  # noqa: F401
-    import agents.review_level_agents  # noqa: F401
-    import tools.sql_security_toolkit  # noqa: F401
-    import tools.artefact_toolkit  # noqa: F401
-    import tools.create_output_toolkit  # noqa: F401
-    import utils.project_selection  # noqa: F401
-except Exception:
-    pass
-
-print("[warmup] ok")
-'''
-
-    async def _warmup() -> None:
-        if google_creds_text:
-            try:
-                await sandbox.files.write("/home/user/google_credentials.json", google_creds_text)
-            except Exception:
-                pass
-        try:
-            await sandbox.run_code(warmup_code)
-        except Exception:
-            pass
-
-    future = asyncio.run_coroutine_threadsafe(_warmup(), loop)
-    try:
-        future.result(timeout=30)
-    except Exception:
-        pass
-
-
 def _kill_sandbox_sync(sandbox: AsyncSandbox) -> None:
     loop = _ensure_async_loop()
 
@@ -246,67 +313,6 @@ def _kill_sandbox_sync(sandbox: AsyncSandbox) -> None:
         future.result(timeout=10)
     except Exception:
         pass
-
-
-def start_sandbox_pool(
-    *,
-    run_id: str,
-    count: int,
-    envs: Dict[str, str],
-    template_name: Optional[str] = None,
-    idle_timeout: float = 120.0,
-    max_retries: int = 5,
-    stagger_seconds: float = 0.2,
-    controller: Any | None = None,
-) -> None:
-    if not run_id:
-        return
-    template = template_name or os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
-    logger.info("[E2B Pool] Initializing pool run_id=%s template=%s", run_id, template)
-    pool = _SandboxPool(
-        run_id=run_id,
-        template_name=template,
-        envs=envs,
-        idle_timeout=idle_timeout,
-        max_retries=max_retries,
-        stagger_seconds=stagger_seconds,
-    )
-    with _sandbox_pool_lock:
-        existing = _sandbox_pools.pop(run_id, None)
-        if existing:
-            logger.info("[E2B Pool] Replacing existing pool run_id=%s", run_id)
-            existing.kill_all()
-        _sandbox_pools[run_id] = pool
-    pool.start(count)
-    if controller is not None:
-        controller.register_generic(lambda: shutdown_sandbox_pool(run_id), label="e2b_pool")
-
-
-def shutdown_sandbox_pool(run_id: str) -> None:
-    if not run_id:
-        return
-    with _sandbox_pool_lock:
-        pool = _sandbox_pools.pop(run_id, None)
-    if pool:
-        logger.info("[E2B Pool] Shutdown requested run_id=%s", run_id)
-        pool.kill_all()
-
-
-def build_sandbox_envs_for_pool(
-    *,
-    user_id: int,
-    global_hierarchy_access: bool,
-    thread_id: str,
-    selected_project_key: Optional[str],
-) -> Dict[str, str]:
-    envs = _build_sandbox_envs(
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-        thread_id=thread_id,
-        selected_project_key=selected_project_key,
-    )
-    envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
-    return envs
 
 
 def _make_step_payload(content: str, typ: str, *, origin: str = "sandbox") -> Dict[str, Any]:
@@ -736,6 +742,7 @@ def _collect_stream_payloads(stdout_queue, stderr_queue, stdout_stream, stderr_s
 async def _run():
     _ensure_basic_logging()
     _ensure_sandbox_session_limits()
+    logger = logging.getLogger("e2b_runner")
 
     repo_root = os.environ.get("MGS_REPO_ROOT", "/root")
     if repo_root not in sys.path:
@@ -766,155 +773,208 @@ async def _run():
     from tools.sql_security_toolkit import GeneralSQLQueryTool
     from tools.artefact_toolkit import WriteArtefactTool
 
-    project_data = _get_env_json("PROJECT_DATA_JSON") or {}
-    project_configs = _get_project_configs(project_data)
-
-    selected_project_key = os.environ.get("SANDBOX_PROJECT_KEY")
-    cfg = project_configs.get(selected_project_key)
-    if not cfg:
-        raise RuntimeError(f"PROJECT_DATA_JSON missing or project config not found for key: {selected_project_key}")
-
-    host = str(cfg.get("db_host", ""))
-    user = str(cfg.get("db_user", ""))
-    password = str(cfg.get("db_pass", ""))
-    database = str(cfg.get("db_name", ""))
-    port = str(cfg.get("port", "3306"))
-    if not all([host, user, password, database]):
-        raise RuntimeError("PROJECT_DATA_JSON missing db_host/db_user/db_pass/db_name")
-
-    uri = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
-    engine = create_engine(
-        uri,
-        echo=False,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        pool_timeout=30,
-        connect_args={"connection_timeout": 10},
-    )
-    metadata = MetaData()
-    Table('3d_condours', metadata, Column('id', Integer, primary_key=True), Column('contour_bound', Geometry))
-    session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
-    session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
-    _attach_session_configuration(engine, session_tmp_table_size, session_max_heap_table_size)
-
-    db = SQLDatabase(
-        engine=engine,
-        metadata=metadata,
-        include_tables=include_tables,
-        sample_rows_in_table_info=3,
-        lazy_table_reflection=True,
-    )
-
-    user_id = int(os.environ.get("SANDBOX_USER_ID", "0"))
-    gha_env = os.environ.get("SANDBOX_GLOBAL_HIERARCHY_ACCESS", "1")
-    global_hierarchy_access = gha_env.lower() not in {"0", "false", "no"}
-    thread_id = os.environ.get("SANDBOX_THREAD_ID", "e2b-thread")
-
-    vertex_location = os.environ.get("VERTEX_LOCATION", "global")
-    vertex_endpoint = os.environ.get("VERTEX_ENDPOINT")
-    llm = ChatVertexAI(
-        model="gemini-2.5-flash",
-        temperature=0.5,
-        location=vertex_location,
-        api_endpoint=vertex_endpoint,
-    )
-
-    general_sql_query_tool = GeneralSQLQueryTool(
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    metadata_db = psycopg2.connect(
-        host=os.environ["ARTEFACT_METADATA_RDS_HOST"],
-        user=os.environ["ARTEFACT_METADATA_RDS_USER"],
-        password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
-        database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
-        port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
-        connect_timeout=10,
-        options="-c statement_timeout=30000",
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=3,
-    )
-    info = b2.InMemoryAccountInfo()
-    b2_api = b2.B2Api(info)
-    b2_api.authorize_account(
-        "production",
-        os.environ["ARTEFACT_BLOB_B2_KEY_ID"],
-        os.environ["ARTEFACT_BLOB_B2_KEY"],
-    )
-    blob_db = b2_api.get_bucket_by_name(os.environ["ARTEFACT_BLOB_B2_BUCKET"])
-    write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
-
-    extraction_tool = extraction_sandbox_agent(
-        llm=llm,
-        db=db,
-        table_info=table_info,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    timeseries_plot_tool = timeseries_plot_sandbox_agent(
-        llm=llm,
-        sql_tool=general_sql_query_tool,
-        write_artefact_tool=write_artefact_tool,
-        thread_id=thread_id,
-        user_id=user_id,
-    )
-    map_plot_tool = map_plot_sandbox_agent(
-        llm=llm,
-        sql_tool=general_sql_query_tool,
-        write_artefact_tool=write_artefact_tool,
-        thread_id=thread_id,
-        user_id=user_id,
-    )
-    review_by_value_tool = review_by_value_agent(
-        llm=llm,
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    review_by_time_tool = review_by_time_agent(
-        llm=llm,
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    review_schema_tool = review_schema_agent(
-        llm=llm,
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    breach_instr_tool = breach_instr_agent(
-        llm=llm,
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    review_changes_across_period_tool = review_changes_across_period_agent(
-        llm=llm,
-        db=db,
-        table_relationship_graph=table_relationship_graph,
-        user_id=user_id,
-        global_hierarchy_access=global_hierarchy_access,
-    )
-    csv_saver_tool = CSVSaverTool(
-        write_artefact_tool=write_artefact_tool,
-        thread_id=thread_id,
-        user_id=user_id,
-    )
-
-    tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
-    tool_limit = max(1, tool_limit)
+    preinit = globals().get("MGS_PREINIT")
+    preinit_ready = isinstance(preinit, dict) and preinit.get("ready")
     global tool_semaphore
-    tool_semaphore = asyncio.Semaphore(tool_limit)
+
+    if preinit_ready:
+        logger.info("[runner] using preinitialized cache")
+        table_info = preinit.get("table_info", table_info)
+        table_relationship_graph = preinit.get("table_relationship_graph", table_relationship_graph)
+        db = preinit["db"]
+        llm = preinit["llm"]
+        general_sql_query_tool = preinit["general_sql_query_tool"]
+        metadata_db = preinit["metadata_db"]
+        blob_db = preinit["blob_db"]
+        write_artefact_tool = preinit["write_artefact_tool"]
+        extraction_tool = preinit["extraction_tool"]
+        timeseries_plot_tool = preinit["timeseries_plot_tool"]
+        map_plot_tool = preinit["map_plot_tool"]
+        review_by_value_tool = preinit["review_by_value_tool"]
+        review_by_time_tool = preinit["review_by_time_tool"]
+        review_schema_tool = preinit["review_schema_tool"]
+        breach_instr_tool = preinit["breach_instr_tool"]
+        review_changes_across_period_tool = preinit["review_changes_across_period_tool"]
+        csv_saver_tool = preinit["csv_saver_tool"]
+        tool_semaphore = preinit.get("tool_semaphore")
+        if tool_semaphore is None:
+            tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
+            tool_limit = max(1, tool_limit)
+            tool_semaphore = asyncio.Semaphore(tool_limit)
+            preinit["tool_semaphore"] = tool_semaphore
+    else:
+        logger.info("[runner] preinit cache missing; initializing")
+        project_data = _get_env_json("PROJECT_DATA_JSON") or {}
+        project_configs = _get_project_configs(project_data)
+
+        selected_project_key = os.environ.get("SANDBOX_PROJECT_KEY")
+        cfg = project_configs.get(selected_project_key)
+        if not cfg:
+            raise RuntimeError(f"PROJECT_DATA_JSON missing or project config not found for key: {selected_project_key}")
+
+        host = str(cfg.get("db_host", ""))
+        user = str(cfg.get("db_user", ""))
+        password = str(cfg.get("db_pass", ""))
+        database = str(cfg.get("db_name", ""))
+        port = str(cfg.get("port", "3306"))
+        if not all([host, user, password, database]):
+            raise RuntimeError("PROJECT_DATA_JSON missing db_host/db_user/db_pass/db_name")
+
+        uri = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
+        engine = create_engine(
+            uri,
+            echo=False,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_timeout=30,
+            connect_args={"connection_timeout": 10},
+        )
+        metadata = MetaData()
+        Table('3d_condours', metadata, Column('id', Integer, primary_key=True), Column('contour_bound', Geometry))
+        session_tmp_table_size = _get_int_env("SANDBOX_SESSION_TMP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
+        session_max_heap_table_size = _get_int_env("SANDBOX_SESSION_MAX_HEAP_TABLE_SIZE", SANDBOX_SESSION_TABLE_LIMIT_BYTES)
+        _attach_session_configuration(engine, session_tmp_table_size, session_max_heap_table_size)
+
+        db = SQLDatabase(
+            engine=engine,
+            metadata=metadata,
+            include_tables=include_tables,
+            sample_rows_in_table_info=3,
+            lazy_table_reflection=True,
+        )
+
+        user_id = int(os.environ.get("SANDBOX_USER_ID", "0"))
+        gha_env = os.environ.get("SANDBOX_GLOBAL_HIERARCHY_ACCESS", "1")
+        global_hierarchy_access = gha_env.lower() not in {"0", "false", "no"}
+        thread_id = os.environ.get("SANDBOX_THREAD_ID", "e2b-thread")
+
+        vertex_location = os.environ.get("VERTEX_LOCATION", "global")
+        vertex_endpoint = os.environ.get("VERTEX_ENDPOINT")
+        llm = ChatVertexAI(
+            model="gemini-2.5-flash",
+            temperature=0.5,
+            location=vertex_location,
+            api_endpoint=vertex_endpoint,
+        )
+
+        general_sql_query_tool = GeneralSQLQueryTool(
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        metadata_db = psycopg2.connect(
+            host=os.environ["ARTEFACT_METADATA_RDS_HOST"],
+            user=os.environ["ARTEFACT_METADATA_RDS_USER"],
+            password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
+            database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
+            port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
+            connect_timeout=10,
+            options="-c statement_timeout=30000",
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+        )
+        info = b2.InMemoryAccountInfo()
+        b2_api = b2.B2Api(info)
+        b2_api.authorize_account(
+            "production",
+            os.environ["ARTEFACT_BLOB_B2_KEY_ID"],
+            os.environ["ARTEFACT_BLOB_B2_KEY"],
+        )
+        blob_db = b2_api.get_bucket_by_name(os.environ["ARTEFACT_BLOB_B2_BUCKET"])
+        write_artefact_tool = WriteArtefactTool(blob_db=blob_db, metadata_db=metadata_db)
+
+        extraction_tool = extraction_sandbox_agent(
+            llm=llm,
+            db=db,
+            table_info=table_info,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        timeseries_plot_tool = timeseries_plot_sandbox_agent(
+            llm=llm,
+            sql_tool=general_sql_query_tool,
+            write_artefact_tool=write_artefact_tool,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+        map_plot_tool = map_plot_sandbox_agent(
+            llm=llm,
+            sql_tool=general_sql_query_tool,
+            write_artefact_tool=write_artefact_tool,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+        review_by_value_tool = review_by_value_agent(
+            llm=llm,
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        review_by_time_tool = review_by_time_agent(
+            llm=llm,
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        review_schema_tool = review_schema_agent(
+            llm=llm,
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        breach_instr_tool = breach_instr_agent(
+            llm=llm,
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        review_changes_across_period_tool = review_changes_across_period_agent(
+            llm=llm,
+            db=db,
+            table_relationship_graph=table_relationship_graph,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+        )
+        csv_saver_tool = CSVSaverTool(
+            write_artefact_tool=write_artefact_tool,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+
+        tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
+        tool_limit = max(1, tool_limit)
+        tool_semaphore = asyncio.Semaphore(tool_limit)
+
+        globals()["MGS_PREINIT"] = {
+            "ready": True,
+            "table_info": table_info,
+            "table_relationship_graph": table_relationship_graph,
+            "db": db,
+            "llm": llm,
+            "general_sql_query_tool": general_sql_query_tool,
+            "metadata_db": metadata_db,
+            "blob_db": blob_db,
+            "write_artefact_tool": write_artefact_tool,
+            "extraction_tool": extraction_tool,
+            "timeseries_plot_tool": timeseries_plot_tool,
+            "map_plot_tool": map_plot_tool,
+            "review_by_value_tool": review_by_value_tool,
+            "review_by_time_tool": review_by_time_tool,
+            "review_schema_tool": review_schema_tool,
+            "breach_instr_tool": breach_instr_tool,
+            "review_changes_across_period_tool": review_changes_across_period_tool,
+            "csv_saver_tool": csv_saver_tool,
+            "tool_semaphore": tool_semaphore,
+        }
+        logger.info("[runner] preinit cache stored")
 
     if stream_sandbox_logs:
         stdout_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
@@ -1017,7 +1077,8 @@ async def _run():
             root_logger.removeHandler(queue_logging_handler)
             queue_logging_handler.close()
         try:
-            metadata_db.close()
+            if not locals().get("preinit_ready", False):
+                metadata_db.close()
         except Exception:
             pass
 
@@ -1093,6 +1154,152 @@ def _load_google_credentials_text() -> Optional[str]:
     return path.read_text(encoding="utf-8")
 
 
+def prewarm_sandbox(
+    *,
+    slot_id: int,
+    table_info: List[Dict],
+    table_relationship_graph: Dict[str, List[tuple]],
+    thread_id: str,
+    user_id: int,
+    global_hierarchy_access: bool,
+    selected_project_key: Optional[str] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
+) -> SandboxSlot:
+    def _log(message: str, level: str = "debug") -> None:
+        if log_callback:
+            log_callback(message, level)
+
+    existing = _get_pool_slot(slot_id)
+    if existing and existing.preinit_done and existing.sandbox is not None:
+        _log(f"Sandbox slot {slot_id} already prewarmed", "debug")
+        return existing
+    if existing and existing.status in {"creating", "preinit"}:
+        _log(f"Sandbox slot {slot_id} already prewarming", "debug")
+        return existing
+
+    slot = SandboxSlot(slot_id=slot_id, status="creating")
+    slot.metadata = {
+        "slot_id": str(slot_id),
+        "branch_id": str(slot_id),
+        "purpose": "mgs_preinit",
+    }
+    _set_pool_slot(slot)
+
+    template_name = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
+    _assert_template_ready(template_name)
+    envs = _build_sandbox_envs(
+        user_id=user_id,
+        global_hierarchy_access=global_hierarchy_access,
+        thread_id=thread_id,
+        selected_project_key=selected_project_key,
+    )
+    envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
+    google_creds_text = _load_google_credentials_text()
+
+    run_input = {
+        "table_info": table_info,
+        "table_relationship_graph": table_relationship_graph,
+        "stream_sandbox_logs": False,
+    }
+
+    _log(f"Sandbox slot {slot_id} creating (template={template_name})", "debug")
+
+    async def _run_async() -> None:
+        controller = get_active_run_controller()
+        try:
+            sandbox = await AsyncSandbox.create(
+                template=template_name,
+                timeout=500,
+                envs=envs,
+                request_timeout=500,
+                metadata=slot.metadata,
+            )
+            slot.sandbox = sandbox
+            with _SANDBOX_POOL_CONDITION:
+                slot.status = "created"
+                _SANDBOX_POOL_CONDITION.notify_all()
+            _log(f"Sandbox slot {slot_id} created", "debug")
+
+            if slot.cancelled:
+                _log(f"Sandbox slot {slot_id} cancelled after create", "debug")
+                try:
+                    await sandbox.kill()
+                except Exception:
+                    pass
+                _remove_pool_slot(slot_id)
+                return
+
+            if controller is not None:
+                slot.cancel_handle = controller.register_generic(
+                    lambda: _kill_sandbox_sync(sandbox),
+                    label=f"e2b_sandbox_prewarm_{slot_id}",
+                )
+
+            if google_creds_text:
+                _log(f"Sandbox slot {slot_id} writing google credentials", "debug")
+                await sandbox.files.write("/home/user/google_credentials.json", google_creds_text)
+
+            _log(f"Sandbox slot {slot_id} writing run_input", "debug")
+            await sandbox.files.write("/home/user/run_input.json", json.dumps(run_input))
+            _log(f"Sandbox slot {slot_id} writing preinit code", "debug")
+            await sandbox.files.write("/home/user/llm_code.py", _build_preinit_code())
+
+            runner_code = _build_runner_code()
+            _log(f"Sandbox slot {slot_id} running preinit", "debug")
+            with _SANDBOX_POOL_CONDITION:
+                slot.status = "preinit"
+                _SANDBOX_POOL_CONDITION.notify_all()
+
+            def _handle_stream(data: Any, origin: str) -> None:
+                for chunk in _iter_log_chunks(data):
+                    for payload in _process_stream_chunk(chunk, origin, True):
+                        content = str(payload.get("content", "")).strip()
+                        additional = payload.get("additional_kwargs")
+                        level = "debug"
+                        if isinstance(additional, dict):
+                            level = str(additional.get("level") or level)
+                        if content:
+                            _log(content, "error" if level == "error" else "debug")
+
+            await sandbox.run_code(
+                runner_code,
+                on_stdout=lambda data: _handle_stream(data, "stdout"),
+                on_stderr=lambda data: _handle_stream(data, "stderr"),
+                on_error=lambda error: _log(str(error), "error"),
+            )
+
+            with _SANDBOX_POOL_CONDITION:
+                slot.preinit_done = True
+                slot.status = "ready"
+                _SANDBOX_POOL_CONDITION.notify_all()
+            _log(f"Sandbox slot {slot_id} preinit complete", "debug")
+        except Exception as exc:
+            slot.last_error = str(exc)
+            if slot.sandbox is not None:
+                with _SANDBOX_POOL_CONDITION:
+                    slot.status = "preinit_failed"
+                    slot.preinit_done = False
+                    _SANDBOX_POOL_CONDITION.notify_all()
+            else:
+                with _SANDBOX_POOL_CONDITION:
+                    slot.status = "error"
+                    _SANDBOX_POOL_CONDITION.notify_all()
+            _log(f"Sandbox slot {slot_id} preinit failed: {exc}", "error")
+            if slot.sandbox is None:
+                _remove_pool_slot(slot_id)
+            if slot.cancelled and slot.sandbox is not None:
+                try:
+                    await slot.sandbox.kill()
+                except Exception:
+                    pass
+                _remove_pool_slot(slot_id)
+
+    loop = _ensure_async_loop()
+    future = asyncio.run_coroutine_threadsafe(_run_async(), loop)
+    future.result(timeout=600)
+    return slot
+
+
 def execute_remote_sandbox(
     code: str,
     table_info: List[Dict],
@@ -1105,9 +1312,10 @@ def execute_remote_sandbox(
     first_payload_timeout: Optional[int] = None,
     stream_sandbox_logs: bool = True,
 ) -> Generator[dict, None, None]:
-    del container_slot
+    logger.info("[E2B Sandbox] execute_remote_sandbox start thread_id=%s user_id=%s", thread_id, user_id)
 
     template_name = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
+    _assert_template_ready(template_name)
     envs = _build_sandbox_envs(
         user_id=user_id,
         global_hierarchy_access=global_hierarchy_access,
@@ -1141,60 +1349,102 @@ def execute_remote_sandbox(
                 origin["process"] = "sandbox_status"
         _queue_payload(payload)
 
+    pooled_slot = None
+    if isinstance(container_slot, int):
+        pooled_slot = _claim_pool_slot(container_slot)
+    if pooled_slot is None:
+        pooled_slot = _claim_ready_slot(container_slot if isinstance(container_slot, int) else None)
+    if pooled_slot is None:
+        pooled_slot = _claim_preinit_failed_slot(container_slot if isinstance(container_slot, int) else None)
+    if pooled_slot is None:
+        pooled_slot = _wait_for_pool_slot(container_slot if isinstance(container_slot, int) else None)
+    if pooled_slot is not None:
+        _queue_status(f"Using pooled sandbox slot {pooled_slot.slot_id}")
+
     _queue_status(f"Sandbox queued (template={template_name})")
+    logger.info("[E2B Sandbox] status queued template=%s", template_name)
 
     def _handle_stream_data(data: Any, origin: str) -> None:
         if not stream_sandbox_logs:
             raw = "" if data is None else str(data)
             if _PAYLOAD_PREFIX not in raw:
                 return
+        if not getattr(_handle_stream_data, "_first_seen", False):
+            _handle_stream_data._first_seen = True  # type: ignore[attr-defined]
+            logger.info("[E2B Sandbox] first sandbox log received origin=%s", origin)
         for chunk in _iter_log_chunks(data):
             for payload in _process_stream_chunk(chunk, origin, stream_sandbox_logs):
                 _queue_payload(payload)
 
     async def _run_async() -> None:
         controller = get_active_run_controller()
-        pooled_sandbox: Optional[AsyncSandbox] = None
-        if controller is not None:
-            with _sandbox_pool_lock:
-                pool = _sandbox_pools.get(controller.run_id)
-            if pool is not None:
-                pooled_sandbox = pool.acquire()
-
-        sandbox = pooled_sandbox
-        if sandbox is None:
-            sandbox = await AsyncSandbox.create(
-                template=template_name,
-                timeout=500,
-                envs=envs,
-                request_timeout=500,
-            )
-
+        active_count = _increment_active_executions()
+        parallel_count = _get_parallel_executions()
+        if active_count >= parallel_count:
+            _cleanup_unused_pool("all_branches_active")
+        sandbox = None
         cancel_handle: Optional[str] = None
-        if controller is not None:
-            cancel_handle = controller.register_generic(
-                lambda: _kill_sandbox_sync(sandbox),
-                label="e2b_sandbox",
-            )
+        if pooled_slot and pooled_slot.sandbox is not None:
+            sandbox = pooled_slot.sandbox
+            logger.info("[E2B Sandbox] using prewarmed sandbox slot=%s", pooled_slot.slot_id)
+            if controller is not None and pooled_slot.cancel_handle is None:
+                pooled_slot.cancel_handle = controller.register_generic(
+                    lambda: _kill_sandbox_sync(sandbox),
+                    label=f"e2b_sandbox_pooled_{pooled_slot.slot_id}",
+                )
+                cancel_handle = pooled_slot.cancel_handle
+            else:
+                cancel_handle = pooled_slot.cancel_handle
+        else:
+            if sandbox is None:
+                logger.info("[E2B Sandbox] creating sandbox")
+            metadata = {
+                "slot_id": str(container_slot) if container_slot is not None else "",
+                "branch_id": str(container_slot) if container_slot is not None else "",
+                "purpose": "mgs_on_demand",
+            }
+            if sandbox is None:
+                sandbox = await AsyncSandbox.create(
+                    template=template_name,
+                    timeout=500,
+                    envs=envs,
+                    request_timeout=500,
+                    metadata=metadata,
+                )
+                if controller is not None:
+                    cancel_handle = controller.register_generic(
+                        lambda: _kill_sandbox_sync(sandbox),
+                        label="e2b_sandbox",
+                    )
         try:
+            logger.info("[E2B Sandbox] preparing sandbox files")
             if google_creds_text:
                 await sandbox.files.write("/home/user/google_credentials.json", google_creds_text)
             await sandbox.files.write("/home/user/run_input.json", json.dumps(run_input))
             await sandbox.files.write("/home/user/llm_code.py", code)
+            logger.info("[E2B Sandbox] files written, launching runner")
             runner_code = _build_runner_code()
+            logger.info("[E2B Sandbox] runner_code built, starting run_code")
             await sandbox.run_code(
                 runner_code,
                 on_stdout=lambda data: _handle_stream_data(data, "stdout"),
                 on_stderr=lambda data: _handle_stream_data(data, "stderr"),
                 on_error=lambda error: _queue_payload(_make_step_payload(str(error), "error", origin="stderr")),
             )
+            logger.info("[E2B Sandbox] run_code completed")
         finally:
             try:
-                await sandbox.kill()
+                if sandbox is not None:
+                    await sandbox.kill()
             except Exception:
                 pass
+            if pooled_slot is not None:
+                _remove_pool_slot(pooled_slot.slot_id)
             if controller is not None and cancel_handle:
                 controller.unregister(cancel_handle)
+            remaining = _decrement_active_executions()
+            if remaining >= _get_parallel_executions():
+                _cleanup_unused_pool("all_branches_active")
 
     loop = _ensure_async_loop()
     future = asyncio.run_coroutine_threadsafe(_run_async(), loop)

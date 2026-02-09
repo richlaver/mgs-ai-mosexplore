@@ -39,7 +39,7 @@ from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
-from e2b_sandbox import execute_remote_sandbox
+from e2b_sandbox import execute_remote_sandbox, prewarm_sandbox, reset_sandbox_pool
 from setup import clone_llm_with_overrides
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
@@ -262,6 +262,10 @@ def build_graph(
         with thinking_stage_lock:
             thinking_stage = 0
         _stop_child_message_emitter()
+        try:
+            reset_sandbox_pool("new_run")
+        except Exception:
+            pass
 
     def _init_child_messages() -> None:
         nonlocal child_messages_pool
@@ -795,6 +799,11 @@ def build_graph(
         targets = [Send(f"run_branch_{i}", state) for i in range(num_parallel_executions)]
         return Command(goto=targets)
 
+    def sandbox_prewarm_enter_node(state: AgentState):
+        _ensure_run_not_cancelled("sandbox_prewarm_enter")
+        targets = [Send(f"sandbox_prewarm_{i}", state) for i in range(num_parallel_executions)]
+        return Command(goto=targets)
+
     def exit_parallel_execution_node(state: AgentState):
         _ensure_run_not_cancelled("exit_parallel_execution")
         _set_thinking_stage(4, "exit_parallel_execution_node")
@@ -837,6 +846,24 @@ def build_graph(
         return {"messages": new_messages}
 
     graph = StateGraph(AgentState)
+
+    def _emit_sandbox_prewarm_log(message: str, level: str, branch_id: int) -> None:
+        msg = AIMessage(
+            content=message,
+            additional_kwargs={
+                "level": level,
+                "is_final": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "origin": {
+                    "process": "sandbox_log",
+                    "thinking_stage": 1,
+                    "branch_id": branch_id,
+                },
+                "is_child": True,
+                "artefacts": [],
+            },
+        )
+        enqueue_stream_message(msg)
 
     def make_run_branch(branch_id: int):
         def _progress_msg(
@@ -1536,10 +1563,34 @@ def build_graph(
 
         return run_branch
 
+    def make_sandbox_prewarm_branch(branch_id: int):
+        def run_prewarm(state: AgentState) -> dict:
+            _ensure_run_not_cancelled(f"sandbox_prewarm_{branch_id}")
+            _emit_sandbox_prewarm_log(f"Sandbox prewarm start (branch={branch_id})", "debug", branch_id)
+            try:
+                prewarm_sandbox(
+                    slot_id=branch_id,
+                    table_info=table_info,
+                    table_relationship_graph=table_relationship_graph,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    global_hierarchy_access=global_hierarchy_access,
+                    selected_project_key=selected_project_key,
+                    log_callback=lambda msg, lvl="debug": _emit_sandbox_prewarm_log(msg, lvl, branch_id),
+                )
+            except Exception as exc:
+                _emit_sandbox_prewarm_log(f"Sandbox prewarm failed: {exc}", "error", branch_id)
+            else:
+                _emit_sandbox_prewarm_log(f"Sandbox prewarm ready (branch={branch_id})", "debug", branch_id)
+            return {}
+
+        return run_prewarm
+
     graph.add_node("history_summariser_node", history_summariser_node)
     graph.add_node("context_orchestrator_node", context_orchestrator_node)
     graph.add_node("query_clarifier_node", query_clarifier_node)
     graph.add_node("execution_initializer_node", execution_initializer_node)
+    graph.add_node("sandbox_prewarm_enter_node", sandbox_prewarm_enter_node)
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
     graph.add_node("response_selector_node", response_selector_node)
@@ -1553,8 +1604,12 @@ def build_graph(
         {"continue_execution": "execution_initializer_node", "request_clarification": "query_clarifier_node"},
     )
     graph.add_edge("query_clarifier_node", END)
+    graph.add_edge("execution_initializer_node", "sandbox_prewarm_enter_node")
     graph.add_edge("execution_initializer_node", "enter_parallel_execution_node")
 
+    for i in range(num_parallel_executions):
+        graph.add_node(f"sandbox_prewarm_{i}", make_sandbox_prewarm_branch(i))
+        graph.add_edge(f"sandbox_prewarm_{i}", END)
     for i in range(num_parallel_executions):
         graph.add_node(f"run_branch_{i}", make_run_branch(i))
         graph.add_edge(f"run_branch_{i}", "exit_parallel_execution_node")
