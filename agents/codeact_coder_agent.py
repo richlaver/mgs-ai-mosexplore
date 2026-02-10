@@ -137,6 +137,29 @@ def strip_code_tags(code: str) -> str:
   return code
 
 
+def strip_think_blocks(text: str) -> str:
+  """Remove <think>...</think> or <think>...<\\think> blocks from text."""
+  if not text:
+    return text
+  cleaned = re.sub(
+    r"<think>.*?(</think>|<\\think>)",
+    "",
+    text,
+    flags=re.DOTALL | re.IGNORECASE,
+  )
+  return cleaned.lstrip("\n").rstrip()
+
+
+def extract_json_object(text: str) -> str | None:
+  if not text:
+    return None
+  start = text.find("{")
+  end = text.rfind("}")
+  if start == -1 or end == -1 or end <= start:
+    return None
+  return text[start:end + 1]
+
+
 def strip_trailing_asyncio_run_notice(code: str) -> str:
   lines = code.rstrip().splitlines()
   while lines and "asyncio.run(execute_strategy())" in lines[-1]:
@@ -260,7 +283,9 @@ def codeact_coder_agent(
         if candidate is None:
           raise ValueError("Structured output returned no result.")
 
-        cleaned_code = strip_trailing_asyncio_run_notice(strip_code_tags(candidate.code))
+        cleaned_code = strip_trailing_asyncio_run_notice(
+          strip_code_tags(candidate.code)
+        )
         if not cleaned_code:
           raise ValueError("Structured output contained no code.")
 
@@ -283,6 +308,24 @@ def codeact_coder_agent(
           ]
         )
         if is_format_issue and attempt < max_format_retries:
+          try:
+            raw_message = generating_llm.invoke([message])
+            raw_content = getattr(raw_message, "content", str(raw_message))
+            raw_content = strip_think_blocks(raw_content)
+            json_blob = extract_json_object(raw_content)
+            if json_blob:
+              candidate = CodeactCoderResponse.model_validate_json(json_blob)
+              cleaned_code = strip_trailing_asyncio_run_notice(
+                strip_code_tags(candidate.code)
+              )
+              if cleaned_code:
+                response = candidate
+                break
+          except Exception as raw_exc:
+            logger.warning(
+              "Raw-response parsing failed after structured output error: %s",
+              raw_exc,
+            )
           logger.warning(
             "Structured code generation retry (attempt %d/%d); retrying: %s",
             attempt + 1,
@@ -297,7 +340,9 @@ def codeact_coder_agent(
 
     objective = response.objective.strip()
     plan_steps = response.plan
-    cleaned_code = strip_trailing_asyncio_run_notice(strip_code_tags(response.code))
+    cleaned_code = strip_trailing_asyncio_run_notice(
+      strip_code_tags(response.code)
+    )
 
     logger.debug("Generated objective: %s", objective)
     logger.debug("Generated plan: %s", plan_steps)

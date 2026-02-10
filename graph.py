@@ -17,7 +17,7 @@ import streamlit as st
 from langchain_community.utilities import SQLDatabase
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage, BaseMessage
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 from pydantic import BaseModel, ValidationError
 
@@ -39,7 +39,7 @@ from agents.timeseries_plot_sandbox_agent import timeseries_plot_sandbox_agent
 from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
-from e2b_sandbox import execute_remote_sandbox, prewarm_sandbox, reset_sandbox_pool
+from e2b_sandbox import execute_remote_sandbox, reset_sandbox_pool
 from setup import clone_llm_with_overrides
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
@@ -47,6 +47,7 @@ from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from utils.chat_history import filter_messages_only_final
 from utils.run_cancellation import get_active_run_controller
+from utils.sandbox_prewarm import start_sandbox_prewarm_threads
 
 logger = logging.getLogger(__name__)
 
@@ -656,6 +657,24 @@ def build_graph(
             logger.info("[Consistency] REV below threshold; not terminating.")
             return
 
+        if min_successful_responses == 1:
+            with termination_lock:
+                if termination_triggered:
+                    logger.info("[Consistency] Termination already triggered; skipping duplicate cancel.")
+                    return
+                termination_triggered = True
+
+            _set_thinking_stage(4, "_evaluate_consistency_and_maybe_terminate")
+
+            controller = get_active_run_controller()
+            if controller:
+                controller.cancel_active_resources("consistency threshold met (single response)")
+            logger.info(
+                "[Consistency] Termination triggered with single sufficient response (REV=%0.4f).",
+                explained_variance,
+            )
+            return
+
         with termination_lock:
             latest_snapshot = list(successful_executions)
 
@@ -705,6 +724,16 @@ def build_graph(
 
     def history_summariser_node(state: AgentState) -> dict:
         _reset_run_state()
+        start_sandbox_prewarm_threads(
+            num_slots=num_parallel_executions,
+            table_info=table_info,
+            table_relationship_graph=table_relationship_graph,
+            thread_id=thread_id,
+            user_id=user_id,
+            global_hierarchy_access=global_hierarchy_access,
+            selected_project_key=selected_project_key,
+            log_callback=_emit_sandbox_prewarm_log,
+        )
         _ensure_run_not_cancelled("history_summariser")
         retrospective_query = history_summariser(messages=state.messages, llm=llms["BALANCED"])
         base_context = state.context if isinstance(state.context, Context) else None
@@ -797,11 +826,6 @@ def build_graph(
         _ensure_run_not_cancelled("enter_parallel_execution")
         _set_thinking_stage(2, "enter_parallel_execution_node")
         targets = [Send(f"run_branch_{i}", state) for i in range(num_parallel_executions)]
-        return Command(goto=targets)
-
-    def sandbox_prewarm_enter_node(state: AgentState):
-        _ensure_run_not_cancelled("sandbox_prewarm_enter")
-        targets = [Send(f"sandbox_prewarm_{i}", state) for i in range(num_parallel_executions)]
         return Command(goto=targets)
 
     def exit_parallel_execution_node(state: AgentState):
@@ -1563,40 +1587,16 @@ def build_graph(
 
         return run_branch
 
-    def make_sandbox_prewarm_branch(branch_id: int):
-        def run_prewarm(state: AgentState) -> dict:
-            _ensure_run_not_cancelled(f"sandbox_prewarm_{branch_id}")
-            _emit_sandbox_prewarm_log(f"Sandbox prewarm start (branch={branch_id})", "debug", branch_id)
-            try:
-                prewarm_sandbox(
-                    slot_id=branch_id,
-                    table_info=table_info,
-                    table_relationship_graph=table_relationship_graph,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    global_hierarchy_access=global_hierarchy_access,
-                    selected_project_key=selected_project_key,
-                    log_callback=lambda msg, lvl="debug": _emit_sandbox_prewarm_log(msg, lvl, branch_id),
-                )
-            except Exception as exc:
-                _emit_sandbox_prewarm_log(f"Sandbox prewarm failed: {exc}", "error", branch_id)
-            else:
-                _emit_sandbox_prewarm_log(f"Sandbox prewarm ready (branch={branch_id})", "debug", branch_id)
-            return {}
-
-        return run_prewarm
-
     graph.add_node("history_summariser_node", history_summariser_node)
     graph.add_node("context_orchestrator_node", context_orchestrator_node)
     graph.add_node("query_clarifier_node", query_clarifier_node)
     graph.add_node("execution_initializer_node", execution_initializer_node)
-    graph.add_node("sandbox_prewarm_enter_node", sandbox_prewarm_enter_node)
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
     graph.add_node("response_selector_node", response_selector_node)
     graph.add_node("reporter_node", reporter_node)
 
-    graph.set_entry_point("history_summariser_node")
+    graph.add_edge(START, "history_summariser_node")
     graph.add_edge("history_summariser_node", "context_orchestrator_node")
     graph.add_conditional_edges(
         "context_orchestrator_node",
@@ -1604,12 +1604,8 @@ def build_graph(
         {"continue_execution": "execution_initializer_node", "request_clarification": "query_clarifier_node"},
     )
     graph.add_edge("query_clarifier_node", END)
-    graph.add_edge("execution_initializer_node", "sandbox_prewarm_enter_node")
     graph.add_edge("execution_initializer_node", "enter_parallel_execution_node")
 
-    for i in range(num_parallel_executions):
-        graph.add_node(f"sandbox_prewarm_{i}", make_sandbox_prewarm_branch(i))
-        graph.add_edge(f"sandbox_prewarm_{i}", END)
     for i in range(num_parallel_executions):
         graph.add_node(f"run_branch_{i}", make_run_branch(i))
         graph.add_edge(f"run_branch_{i}", "exit_parallel_execution_node")

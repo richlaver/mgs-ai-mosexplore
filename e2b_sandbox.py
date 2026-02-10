@@ -823,6 +823,7 @@ async def _run():
     table_info = run_input.get("table_info") or []
     table_relationship_graph = run_input.get("table_relationship_graph") or {}
     stream_sandbox_logs = bool(run_input.get("stream_sandbox_logs", True))
+    prewarm_mode = bool(run_input.get("prewarm", False))
 
     from parameters import include_tables
     from agents.extraction_sandbox_agent import extraction_sandbox_agent
@@ -838,6 +839,36 @@ async def _run():
     from tools.create_output_toolkit import CSVSaverTool
     from tools.sql_security_toolkit import GeneralSQLQueryTool
     from tools.artefact_toolkit import WriteArtefactTool
+
+    def _connect_metadata_db():
+        return psycopg2.connect(
+            host=os.environ["ARTEFACT_METADATA_RDS_HOST"],
+            user=os.environ["ARTEFACT_METADATA_RDS_USER"],
+            password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
+            database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
+            port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
+            connect_timeout=10,
+            options="-c statement_timeout=30000",
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+        )
+
+    def _ensure_metadata_db(conn):
+        try:
+            if conn is None or getattr(conn, "closed", 1):
+                return _connect_metadata_db(), True
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return conn, False
+        except Exception:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+            return _connect_metadata_db(), True
 
     preinit = globals().get("MGS_PREINIT")
     preinit_ready = isinstance(preinit, dict) and preinit.get("ready")
@@ -862,6 +893,12 @@ async def _run():
         breach_instr_tool = preinit["breach_instr_tool"]
         review_changes_across_period_tool = preinit["review_changes_across_period_tool"]
         csv_saver_tool = preinit["csv_saver_tool"]
+        metadata_db, refreshed = _ensure_metadata_db(metadata_db)
+        if refreshed:
+            write_artefact_tool.metadata_db = metadata_db
+            preinit["metadata_db"] = metadata_db
+            preinit["write_artefact_tool"] = write_artefact_tool
+
         tool_semaphore = preinit.get("tool_semaphore")
         if tool_semaphore is None:
             tool_limit = _get_int_env("SANDBOX_MAX_CONCURRENT_TOOL_CALLS", 8) or 8
@@ -929,19 +966,7 @@ async def _run():
             user_id=user_id,
             global_hierarchy_access=global_hierarchy_access,
         )
-        metadata_db = psycopg2.connect(
-            host=os.environ["ARTEFACT_METADATA_RDS_HOST"],
-            user=os.environ["ARTEFACT_METADATA_RDS_USER"],
-            password=os.environ["ARTEFACT_METADATA_RDS_PASS"],
-            database=os.environ["ARTEFACT_METADATA_RDS_DATABASE"],
-            port=os.environ.get("ARTEFACT_METADATA_RDS_PORT", "5432"),
-            connect_timeout=10,
-            options="-c statement_timeout=30000",
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=3,
-        )
+        metadata_db = _connect_metadata_db()
         info = b2.InMemoryAccountInfo()
         b2_api = b2.B2Api(info)
         b2_api.authorize_account(
@@ -1143,7 +1168,7 @@ async def _run():
             root_logger.removeHandler(queue_logging_handler)
             queue_logging_handler.close()
         try:
-            if not locals().get("preinit_ready", False):
+            if not prewarm_mode and not locals().get("preinit_ready", False):
                 metadata_db.close()
         except Exception:
             pass
@@ -1266,6 +1291,7 @@ def prewarm_sandbox(
         "table_info": table_info,
         "table_relationship_graph": table_relationship_graph,
         "stream_sandbox_logs": False,
+        "prewarm": True,
     }
 
     _log(f"Sandbox slot {slot_id} creating (template={template_name})", "debug")
@@ -1394,6 +1420,7 @@ def execute_remote_sandbox(
         "table_info": table_info,
         "table_relationship_graph": table_relationship_graph,
         "stream_sandbox_logs": bool(stream_sandbox_logs),
+        "prewarm": False,
     }
 
     output_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()

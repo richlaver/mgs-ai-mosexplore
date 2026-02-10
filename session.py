@@ -44,10 +44,10 @@ def setup_session() -> None:
         st.session_state.sandbox_logging = True
     if "min_successful_responses" not in st.session_state:
         # st.session_state.min_successful_responses = 3
-        st.session_state.min_successful_responses = 2
+        st.session_state.min_successful_responses = 1
     if "min_explained_variance" not in st.session_state:
         # st.session_state.min_explained_variance = 0.7
-        st.session_state.min_explained_variance = 0.6
+        st.session_state.min_explained_variance = 0.5
     if "setup_complete" not in st.session_state:
         st.session_state.setup_complete = False
     if "need_rebuild_graph" not in st.session_state:

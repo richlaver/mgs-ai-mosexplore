@@ -624,7 +624,7 @@ def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int
         max_tokens=max_tokens,
         extra_body={
             "chat_template_kwargs": {
-                "enable_thinking": False
+                "enable_thinking": True
             }
         }
     )
@@ -655,8 +655,10 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
         ),
         "CODING": _build_deepinfra_llm(
             "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+            # "Qwen/Qwen3-235B-A22B-Thinking-2507",
             temperature=0.1,
             max_tokens=4096,
+            # max_tokens=8192,
         ),
     }
 
