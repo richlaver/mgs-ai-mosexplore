@@ -1296,9 +1296,10 @@ def prewarm_sandbox(
                 return
 
             if controller is not None:
-                slot.cancel_handle = controller.register_generic(
-                    lambda: _kill_sandbox_sync(sandbox),
+                slot.cancel_handle = controller.register_e2b_sandbox(
+                    sandbox,
                     label=f"e2b_sandbox_prewarm_{slot_id}",
+                    kill_callback=lambda: _kill_sandbox_sync(sandbox),
                 )
 
             if google_creds_text:
@@ -1452,9 +1453,10 @@ def execute_remote_sandbox(
             sandbox = pooled_slot.sandbox
             logger.info("[E2B Sandbox] using prewarmed sandbox slot=%s", pooled_slot.slot_id)
             if controller is not None and pooled_slot.cancel_handle is None:
-                pooled_slot.cancel_handle = controller.register_generic(
-                    lambda: _kill_sandbox_sync(sandbox),
+                pooled_slot.cancel_handle = controller.register_e2b_sandbox(
+                    sandbox,
                     label=f"e2b_sandbox_pooled_{pooled_slot.slot_id}",
+                    kill_callback=lambda: _kill_sandbox_sync(sandbox),
                 )
                 cancel_handle = pooled_slot.cancel_handle
             else:
@@ -1476,9 +1478,10 @@ def execute_remote_sandbox(
                     metadata=metadata,
                 )
                 if controller is not None:
-                    cancel_handle = controller.register_generic(
-                        lambda: _kill_sandbox_sync(sandbox),
+                    cancel_handle = controller.register_e2b_sandbox(
+                        sandbox,
                         label="e2b_sandbox",
+                        kill_callback=lambda: _kill_sandbox_sync(sandbox),
                     )
         try:
             logger.info("[E2B Sandbox] preparing sandbox files")

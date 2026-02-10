@@ -1,7 +1,7 @@
 """Centralized run cancellation controller and helpers.
 
 This module provides a single place to coordinate cancellation across
-LLM calls, SQL queries, Modal sandbox executions, and artefact writes.
+LLM calls, SQL queries, E2B sandbox executions, and artefact writes.
 The controller can be activated via a contextvar so any downstream code
 can introspect the currently active run and short-circuit work when a
 user presses the stop button.
@@ -9,8 +9,10 @@ user presses the stop button.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
+import inspect
 import logging
 import threading
 import uuid
@@ -49,16 +51,39 @@ class RunCancellationController:
     # ---------------------------------------------------------------------
     # Resource registration helpers
     # ------------------------------------------------------------------
-    def register_modal_call(self, call_obj: Any, *, label: str = "modal") -> str:
-        """Register a Modal FunctionCall-like object that exposes cancel()."""
+    def register_e2b_sandbox(
+        self,
+        sandbox: Any,
+        *,
+        label: str = "e2b_sandbox",
+        kill_callback: Optional[CancelCallback] = None,
+    ) -> str:
+        """Register an E2B sandbox-like object for termination on cancel."""
 
         def _cancel() -> None:
             try:
-                call_obj.cancel()
+                if kill_callback is not None:
+                    logger.info("[RunCancel %s] Invoking E2B kill callback label=%s", self.run_id, label)
+                    kill_callback()
+                    return
+                kill = getattr(sandbox, "kill", None)
+                if kill is None:
+                    logger.warning("[RunCancel %s] E2B sandbox missing kill() label=%s", self.run_id, label)
+                    return
+                result = kill()
+                if inspect.isawaitable(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        logger.info("[RunCancel %s] Running E2B async kill label=%s", self.run_id, label)
+                        asyncio.run(result)
+                    else:
+                        loop.create_task(result)
+                        logger.info("[RunCancel %s] Scheduled E2B async kill label=%s", self.run_id, label)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Failed to cancel Modal call %s: %s", label, exc)
+                logger.warning("[RunCancel %s] Failed to cancel E2B sandbox %s: %s", self.run_id, label, exc)
 
-        return self._register_callback(_cancel, label=f"{label}:modal")
+        return self._register_callback(_cancel, label=f"{label}:e2b")
 
     def register_sql_connection(self, connection: Any, *, label: str = "sql") -> str:
         """Register a SQLAlchemy connection for forced closure on cancel."""
@@ -88,13 +113,30 @@ class RunCancellationController:
         with self._lock:
             self._resources[handle] = _RegisteredResource(label=label, cancel=callback)
             trigger_now = self._cancelled.is_set()
+            resource_count = len(self._resources)
+        logger.info(
+            "[RunCancel %s] Registered resource handle=%s label=%s trigger_now=%s total=%d",
+            self.run_id,
+            handle,
+            label,
+            trigger_now,
+            resource_count,
+        )
         if trigger_now:
             self._invoke_callback(handle, callback, label)
         return handle
 
     def unregister(self, handle: str) -> None:
         with self._lock:
-            self._resources.pop(handle, None)
+            removed = self._resources.pop(handle, None)
+            remaining = len(self._resources)
+        logger.info(
+            "[RunCancel %s] Unregistered resource handle=%s removed=%s remaining=%d",
+            self.run_id,
+            handle,
+            bool(removed),
+            remaining,
+        )
 
     # ------------------------------------------------------------------
     # Cancellation lifecycle
@@ -104,9 +146,22 @@ class RunCancellationController:
 
         if reason:
             logger.info("[RunCancel %s] Cancelling run: %s", self.run_id, reason)
+        else:
+            logger.info("[RunCancel %s] Cancelling run", self.run_id)
         handles, resources = self._snapshot_callbacks()
+        logger.info(
+            "[RunCancel %s] Snapshot for cancel handles=%d",
+            self.run_id,
+            len(handles),
+        )
         self._cancelled.set()
         for handle, resource in zip(handles, resources, strict=False):
+            logger.info(
+                "[RunCancel %s] Cancelling resource handle=%s label=%s",
+                self.run_id,
+                handle,
+                resource.label,
+            )
             self._invoke_callback(handle, resource.cancel, resource.label)
 
     def cancel_active_resources(self, reason: str | None = None) -> None:
@@ -129,11 +184,29 @@ class RunCancellationController:
         with self._lock:
             handles = list(self._resources.keys())
             callbacks = list(self._resources.values())
+            logger.debug(
+                "[RunCancel %s] Snapshot handles=%d labels=%s",
+                self.run_id,
+                len(handles),
+                [resource.label for resource in callbacks],
+            )
         return handles, callbacks
 
     def _invoke_callback(self, handle: str, callback: CancelCallback, label: str) -> None:
+        logger.info(
+            "[RunCancel %s] Invoking cancel callback handle=%s label=%s",
+            self.run_id,
+            handle,
+            label,
+        )
         try:
             callback()
+            logger.info(
+                "[RunCancel %s] Cancel callback completed handle=%s label=%s",
+                self.run_id,
+                handle,
+                label,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "[RunCancel %s] Resource callback '%s' failed during cancel: %s",
@@ -143,17 +216,28 @@ class RunCancellationController:
             )
         finally:
             with self._lock:
-                self._resources.pop(handle, None)
+                removed = self._resources.pop(handle, None)
+                remaining = len(self._resources)
+            logger.info(
+                "[RunCancel %s] Cancel cleanup handle=%s removed=%s remaining=%d",
+                self.run_id,
+                handle,
+                bool(removed),
+                remaining,
+            )
 
     # ------------------------------------------------------------------
     # Introspection helpers
     # ------------------------------------------------------------------
     def is_cancelled(self) -> bool:
-        return self._cancelled.is_set()
+        cancelled = self._cancelled.is_set()
+        #logger.debug("[RunCancel %s] is_cancelled=%s", self.run_id, cancelled)
+        return cancelled
 
     def raise_if_cancelled(self, where: str | None = None) -> None:
         if self.is_cancelled():
             suffix = f" ({where})" if where else ""
+            logger.info("[RunCancel %s] raise_if_cancelled triggered%s", self.run_id, suffix)
             raise RunCancelledError(f"Run cancelled{suffix}")
 
 

@@ -731,7 +731,6 @@ def render_chat_content() -> None:
 
         active_controller = st.session_state.get("active_run_controller")
         controller_busy = bool(active_controller and not getattr(active_controller, "is_cancelled", lambda: False)())
-        pending_stop_button = st.session_state.get("stop_button_pending", False)
         input_disabled = controller_busy
         chat_placeholder = (
             "Ask a query about project data:"
@@ -746,10 +745,9 @@ def render_chat_content() -> None:
         )
     if question:
         st.session_state.stop_button_pending = True
-        pending_stop_button = True
 
     with stop_col:
-        stop_disabled = not (pending_stop_button or controller_busy)
+        stop_disabled = not st.session_state.get("stop_button_pending", False)
         if st.button(
             label="",
             icon=":material/stop_circle:",
@@ -761,6 +759,7 @@ def render_chat_content() -> None:
         ):
             _cancel_active_run("User pressed stop button")
             st.toast("Stopping current response...", icon=":material/stop_circle:")
+            st.rerun()
 
     if question:
         user_message = HumanMessage(content=question, additional_kwargs={"type": "query"})
