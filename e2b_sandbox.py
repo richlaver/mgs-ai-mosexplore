@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -17,10 +18,88 @@ logger = logging.getLogger(__name__)
 
 _PAYLOAD_PREFIX = "__E2B_PAYLOAD__:"
 
-_async_loop: Optional[asyncio.AbstractEventLoop] = None
-_async_loop_thread: Optional[threading.Thread] = None
-_async_loop_ready = threading.Event()
-_async_loop_lock = threading.Lock()
+class _AsyncLoopRunner:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._shutdown = threading.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._thread_id: Optional[int] = None
+
+    def _thread_main(self) -> None:
+        while not self._shutdown.is_set():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            with self._lock:
+                self._loop = loop
+                self._thread_id = threading.get_ident()
+                self._ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                try:
+                    loop.stop()
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._loop = None
+                    self._thread_id = None
+                    self._ready.clear()
+            if not self._shutdown.is_set():
+                time.sleep(0.05)
+
+    def ensure_loop(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            if loop is not None and loop.is_running():
+                return loop
+            if thread is None or not thread.is_alive():
+                self._thread = threading.Thread(target=self._thread_main, daemon=True)
+                self._thread.start()
+
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("Failed to initialize E2B async event loop")
+        with self._lock:
+            if self._loop is None or not self._loop.is_running():
+                raise RuntimeError("E2B async event loop not running")
+            return self._loop
+
+    def is_loop_thread(self) -> bool:
+        with self._lock:
+            return self._thread_id == threading.get_ident() and self._loop is not None
+
+    def stop_loop(self) -> None:
+        with self._lock:
+            loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+
+    def submit(self, coro: Any) -> concurrent.futures.Future:
+        last_exc: Exception | None = None
+        for _ in range(2):
+            loop = self.ensure_loop()
+            try:
+                return asyncio.run_coroutine_threadsafe(coro, loop)
+            except RuntimeError as exc:
+                last_exc = exc
+                self.stop_loop()
+                time.sleep(0.05)
+                continue
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Failed to schedule coroutine")
+
+
+_ASYNC_LOOP_RUNNER = _AsyncLoopRunner()
 
 _SANDBOX_POOL_LOCK = threading.Lock()
 _SANDBOX_POOL_CONDITION = threading.Condition(_SANDBOX_POOL_LOCK)
@@ -258,48 +337,7 @@ def _build_preinit_code() -> str:
     return """def execute_strategy():\n    return []\n"""
 
 
-def _ensure_async_loop() -> asyncio.AbstractEventLoop:
-    global _async_loop
-    global _async_loop_thread
-    with _async_loop_lock:
-        if _async_loop:
-            if _async_loop.is_closed():
-                logger.warning("[E2B] Async loop was closed; recreating")
-                _async_loop = None
-                _async_loop_thread = None
-            elif _async_loop.is_running():
-                return _async_loop
-            else:
-                if _async_loop_thread is None or not _async_loop_thread.is_alive():
-                    logger.warning("[E2B] Async loop thread not alive; recreating")
-                else:
-                    logger.warning("[E2B] Async loop not running; recreating")
-                _async_loop = None
-                _async_loop_thread = None
-
-        _async_loop_ready.clear()
-
-        def _loop_worker() -> None:
-            global _async_loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            _async_loop = loop
-            _async_loop_ready.set()
-            loop.run_forever()
-
-        _async_loop_thread = threading.Thread(target=_loop_worker, daemon=True)
-        _async_loop_thread.start()
-        _async_loop_ready.wait(timeout=5)
-
-        if _async_loop is None:
-            raise RuntimeError("Failed to initialize E2B async event loop")
-
-        return _async_loop
-
-
 def _kill_sandbox_sync(sandbox: AsyncSandbox) -> None:
-    loop = _ensure_async_loop()
-
     logger.info("[E2B] Killing sandbox")
 
     async def _kill() -> None:
@@ -308,11 +346,39 @@ def _kill_sandbox_sync(sandbox: AsyncSandbox) -> None:
         except Exception:
             pass
 
-    future = asyncio.run_coroutine_threadsafe(_kill(), loop)
+    if _ASYNC_LOOP_RUNNER.is_loop_thread():
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_kill())
+        except Exception:
+            pass
+        return
+
+    future = _ASYNC_LOOP_RUNNER.submit(_kill())
     try:
         future.result(timeout=10)
     except Exception:
         pass
+
+
+def _run_async_with_retry(coro_factory: Callable[[], Any], *, timeout: Optional[float], label: str) -> None:
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        future = _ASYNC_LOOP_RUNNER.submit(coro_factory())
+        try:
+            future.result(timeout=timeout)
+            return
+        except (RuntimeError, concurrent.futures.CancelledError) as exc:
+            last_exc = exc
+            message = str(exc).lower()
+            if attempt == 0 and ("loop" in message or "event loop" in message):
+                logger.warning("[E2B] %s failed due to loop error; restarting loop", label)
+                _ASYNC_LOOP_RUNNER.stop_loop()
+                time.sleep(0.05)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
 
 
 def _make_step_payload(content: str, typ: str, *, origin: str = "sandbox") -> Dict[str, Any]:
@@ -1294,9 +1360,7 @@ def prewarm_sandbox(
                     pass
                 _remove_pool_slot(slot_id)
 
-    loop = _ensure_async_loop()
-    future = asyncio.run_coroutine_threadsafe(_run_async(), loop)
-    future.result(timeout=600)
+    _run_async_with_retry(_run_async, timeout=600, label="sandbox_prewarm")
     return slot
 
 
@@ -1446,8 +1510,7 @@ def execute_remote_sandbox(
             if remaining >= _get_parallel_executions():
                 _cleanup_unused_pool("all_branches_active")
 
-    loop = _ensure_async_loop()
-    future = asyncio.run_coroutine_threadsafe(_run_async(), loop)
+    future = _ASYNC_LOOP_RUNNER.submit(_run_async())
 
     def _on_done(done_future: "asyncio.Future[None]") -> None:
         try:

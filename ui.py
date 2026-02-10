@@ -535,15 +535,18 @@ def render_initial_ui() -> None:
                 )
         parallel_count = _get_parallel_executions_from_env()
         st.session_state.min_successful_responses = min(parallel_count, st.session_state.min_successful_responses)
-        st.slider(
-            label="Minimum No. of Successful Responses to Await",
-            min_value=1,
-            max_value=parallel_count,
-            step=1,
-            key="min_successful_responses",
-            help="Stop early when consistency is stable after at least this many successful responses.",
-            on_change=_rebuild_graph,
-        )
+        if parallel_count > 1:
+            st.slider(
+                label="Minimum No. of Successful Responses to Await",
+                min_value=1,
+                max_value=parallel_count,
+                step=1,
+                key="min_successful_responses",
+                help="Stop early when consistency is stable after at least this many successful responses.",
+                on_change=_rebuild_graph,
+            )
+        else:
+            st.session_state.min_successful_responses = 1
         st.slider(
             label="Minimum Explained Variance",
             min_value=0.5,
@@ -663,7 +666,9 @@ def _render_final_message(message: AIMessage) -> None:
 
 def _run_graph_stream_worker(stream_queue: queue.Queue, graph, initial_state, config, controller) -> None:
     stream = None
+    token = None
     try:
+        token = activate_controller(controller)
         stream = graph.stream(initial_state, stream_mode="messages", config=config)
         for state_update in stream:
             if controller.is_cancelled():
@@ -675,6 +680,11 @@ def _run_graph_stream_worker(stream_queue: queue.Queue, graph, initial_state, co
         if stream is not None:
             try:
                 stream.close()
+            except Exception:
+                pass
+        if token is not None:
+            try:
+                reset_controller(token)
             except Exception:
                 pass
         stream_queue.put(("done", None))
