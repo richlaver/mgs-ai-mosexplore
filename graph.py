@@ -669,6 +669,10 @@ def build_graph(
             controller = get_active_run_controller()
             if controller:
                 controller.cancel_active_resources("consistency threshold met (single response)")
+            try:
+                reset_sandbox_pool("terminated_early")
+            except Exception:
+                pass
             logger.info(
                 "[Consistency] Termination triggered with single sufficient response (REV=%0.4f).",
                 explained_variance,
@@ -716,6 +720,10 @@ def build_graph(
         controller = get_active_run_controller()
         if controller:
             controller.cancel_active_resources("consistency threshold met")
+        try:
+            reset_sandbox_pool("terminated_early")
+        except Exception:
+            pass
         logger.info(
             "[Consistency] Termination triggered after REV=%0.4f with stable ranking %s.",
             explained_variance,
@@ -831,6 +839,10 @@ def build_graph(
     def exit_parallel_execution_node(state: AgentState):
         _ensure_run_not_cancelled("exit_parallel_execution")
         _set_thinking_stage(4, "exit_parallel_execution_node")
+        try:
+            reset_sandbox_pool("execution_complete")
+        except Exception:
+            pass
         return {}
 
     def response_selector_node(state: AgentState) -> dict:
@@ -1405,7 +1417,11 @@ def build_graph(
                 )
 
                 error_text = updated_attempt.error_summary or ""
-                has_syntax_error = "SyntaxError" in error_text or "AttributeError" in error_text
+                has_syntax_error = error_text in [
+                    "SyntaxError",
+                    "AttributeError",
+                    "IndentationError",
+                ]
                 logger.info("Syntax error detected in branch %d: %s", branch_id, has_syntax_error)
                 deterministic_error = bool(error_logs_actionable)
                 message_errors = any(

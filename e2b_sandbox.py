@@ -1527,15 +1527,37 @@ def execute_remote_sandbox(
             )
             logger.info("[E2B Sandbox] run_code completed")
         finally:
-            try:
-                if sandbox is not None:
-                    await sandbox.kill()
-            except Exception:
-                pass
-            if pooled_slot is not None:
-                _remove_pool_slot(pooled_slot.slot_id)
-            if controller is not None and cancel_handle:
-                controller.unregister(cancel_handle)
+            keep_sandbox = False
+            if pooled_slot is not None and sandbox is not None:
+                keep_sandbox = True
+                with _SANDBOX_POOL_CONDITION:
+                    pooled_slot.in_use = False
+                    pooled_slot.used = False
+                    pooled_slot.preinit_done = True
+                    pooled_slot.status = "ready"
+                    _SANDBOX_POOL_CONDITION.notify_all()
+            elif sandbox is not None and isinstance(container_slot, int):
+                keep_sandbox = True
+                with _SANDBOX_POOL_CONDITION:
+                    slot = _SANDBOX_POOL.get(container_slot)
+                    if slot is None:
+                        slot = SandboxSlot(slot_id=container_slot)
+                        _SANDBOX_POOL[container_slot] = slot
+                    slot.sandbox = sandbox
+                    slot.in_use = False
+                    slot.used = False
+                    slot.preinit_done = True
+                    slot.status = "ready"
+                    _SANDBOX_POOL_CONDITION.notify_all()
+
+            if not keep_sandbox:
+                try:
+                    if sandbox is not None:
+                        await sandbox.kill()
+                except Exception:
+                    pass
+                if controller is not None and cancel_handle:
+                    controller.unregister(cancel_handle)
             remaining = _decrement_active_executions()
             if remaining >= _get_parallel_executions():
                 _cleanup_unused_pool("all_branches_active")

@@ -612,6 +612,20 @@ def _set_deepinfra_env() -> Optional[str]:
     return token
 
 
+def _set_kimi_env() -> Optional[str]:
+    token = os.environ.get("KIMI_API_KEY")
+    if token:
+        os.environ["KIMI_API_KEY"] = str(token)
+        return token
+    try:
+        token = st.secrets.get("KIMI_API_KEY")
+    except Exception:
+        token = None
+    if token:
+        os.environ["KIMI_API_KEY"] = str(token)
+    return token
+
+
 def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
     api_key = _set_deepinfra_env()
     if not api_key:
@@ -627,6 +641,19 @@ def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int
                 "enable_thinking": True
             }
         }
+    )
+
+
+def _build_kimi_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
+    api_key = _set_kimi_env()
+    if not api_key:
+        raise ValueError("KIMI_API_KEY missing for Kimi models")
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url="https://api.moonshot.ai/v1",
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -653,13 +680,18 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
             temperature=0.5,
             **common_kwargs,
         ),
-        "CODING": _build_deepinfra_llm(
-            "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
-            # "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "CODING": _build_kimi_llm(
+            # "kimi-k2.5",
+            # "kimi-k2-thinking-turbo",
+            "kimi-k2-turbo-preview",
             temperature=0.1,
             max_tokens=4096,
-            # max_tokens=8192,
         ),
+        # "CODING": _build_deepinfra_llm(
+        #     "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        # ),
     }
 
 
