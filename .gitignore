@@ -17,5 +17,3 @@ table_info.py
 parameters_with_tcn_table.py
 commit_list.csv
 *_0.*
-build_e2b_modal_image.py
-e2b_modal_sandbox.Dockerfile
