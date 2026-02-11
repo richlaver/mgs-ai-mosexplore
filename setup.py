@@ -681,6 +681,11 @@ def _build_together_llm(model_name: str, *, temperature: float, max_tokens: int)
         base_url="https://api.together.xyz/v1",
         temperature=temperature,
         max_tokens=max_tokens,
+        extra_body={
+            "chat_template_kwargs": {
+                "enable_thinking": False
+            }
+        }
     )
 
 
@@ -721,7 +726,8 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
         #     max_tokens=4096,
         # ),
         "CODING": _build_together_llm(
-            "moonshotai/Kimi-K2-Instruct-0905",
+            # "moonshotai/Kimi-K2-Instruct-0905",
+            "moonshotai/Kimi-K2.5",
             temperature=0.1,
             max_tokens=4096,
         ),
