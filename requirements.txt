@@ -1,4 +1,4 @@
-streamlit==1.32.0
+streamlit==1.33.0
 b2sdk==2.10.1
 e2b>=2.13.0
 e2b-code-interpreter>=2.4.1
