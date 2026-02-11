@@ -626,6 +626,20 @@ def _set_kimi_env() -> Optional[str]:
     return token
 
 
+def _set_together_env() -> Optional[str]:
+    token = os.environ.get("TOGETHER_API_KEY")
+    if token:
+        os.environ["TOGETHER_API_KEY"] = str(token)
+        return token
+    try:
+        token = st.secrets.get("TOGETHER_API_KEY")
+    except Exception:
+        token = None
+    if token:
+        os.environ["TOGETHER_API_KEY"] = str(token)
+    return token
+
+
 def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
     api_key = _set_deepinfra_env()
     if not api_key:
@@ -657,6 +671,19 @@ def _build_kimi_llm(model_name: str, *, temperature: float, max_tokens: int) -> 
     )
 
 
+def _build_together_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
+    api_key = _set_together_env()
+    if not api_key:
+        raise ValueError("TOGETHER_API_KEY missing for Together.AI models")
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url="https://api.together.xyz/v1",
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
 def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
     """Initialize the language models.
 
@@ -680,18 +707,24 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
             temperature=0.5,
             **common_kwargs,
         ),
-        "CODING": _build_kimi_llm(
-            # "kimi-k2.5",
-            # "kimi-k2-thinking-turbo",
-            "kimi-k2-turbo-preview",
-            temperature=0.1,
-            max_tokens=4096,
-        ),
-        # "CODING": _build_deepinfra_llm(
-        #     "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+        # "CODING": _build_kimi_llm(
+        #     # "kimi-k2.5",
+        #     # "kimi-k2-thinking-turbo",
+        #     "kimi-k2-turbo-preview",
         #     temperature=0.1,
         #     max_tokens=4096,
         # ),
+        # "CODING": _build_deepinfra_llm(
+        #     # "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+        #     "moonshotai/Kimi-K2-Instruct-0905",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        # ),
+        "CODING": _build_together_llm(
+            "moonshotai/Kimi-K2-Instruct-0905",
+            temperature=0.1,
+            max_tokens=4096,
+        ),
     }
 
 
