@@ -27,6 +27,7 @@ from utils.cancelable_sql import CancelableSQLDatabase
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from geoalchemy2 import Geometry
 from parameters import include_tables, table_info
+from llm_library import PROVIDERS, LLM_MODELS
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any, List, Tuple, Dict, Union, Optional
@@ -597,96 +598,124 @@ def set_google_credentials() -> None:
     _GOOGLE_CREDENTIALS_SET = True
 
 
-def _set_deepinfra_env() -> Optional[str]:
-    token = os.environ.get("DEEPINFRA_API_TOKEN")
+def _get_provider_config(provider: str) -> Dict[str, Any]:
+    if not provider:
+        raise ValueError("Provider is required to build an LLM")
+    config = PROVIDERS.get(provider)
+    if not config:
+        raise ValueError(f"Unknown LLM provider: {provider}")
+    return config
+
+
+def _ensure_provider_api_key(provider: str) -> Optional[str]:
+    config = _get_provider_config(provider)
+    env_name = config.get("api_key_env")
+    if not env_name:
+        return None
+    token = os.environ.get(env_name)
     if token:
-        os.environ.setdefault("OPENAI_API_KEY", str(token))
-        return token
+        if provider == "deepinfra":
+            os.environ.setdefault("OPENAI_API_KEY", str(token))
+        return str(token)
     try:
-        token = st.secrets.get("DEEPINFRA_API_TOKEN")
+        token = st.secrets.get(env_name)
     except Exception:
         token = None
     if token:
-        os.environ["DEEPINFRA_API_TOKEN"] = str(token)
-        os.environ.setdefault("OPENAI_API_KEY", str(token))
-    return token
+        os.environ[env_name] = str(token)
+        if provider == "deepinfra":
+            os.environ.setdefault("OPENAI_API_KEY", str(token))
+    return str(token) if token else None
 
 
-def _set_kimi_env() -> Optional[str]:
-    token = os.environ.get("KIMI_API_KEY")
-    if token:
-        os.environ["KIMI_API_KEY"] = str(token)
-        return token
-    try:
-        token = st.secrets.get("KIMI_API_KEY")
-    except Exception:
-        token = None
-    if token:
-        os.environ["KIMI_API_KEY"] = str(token)
-    return token
+def _infer_provider_from_llm(llm: ChatOpenAI) -> Optional[str]:
+    model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+    base_url = getattr(llm, "base_url", None)
+    if base_url:
+        normalized = str(base_url).rstrip("/")
+        for provider_key, cfg in PROVIDERS.items():
+            if cfg.get("lc_type") is ChatOpenAI:
+                cfg_url = cfg.get("base_url")
+                if cfg_url and normalized == str(cfg_url).rstrip("/"):
+                    return provider_key
+    if model_name:
+        for entry in LLM_MODELS.values():
+            if entry.get("name") == model_name:
+                return entry.get("provider")
+    return None
 
 
-def _set_together_env() -> Optional[str]:
-    token = os.environ.get("TOGETHER_API_KEY")
-    if token:
-        os.environ["TOGETHER_API_KEY"] = str(token)
-        return token
-    try:
-        token = st.secrets.get("TOGETHER_API_KEY")
-    except Exception:
-        token = None
-    if token:
-        os.environ["TOGETHER_API_KEY"] = str(token)
-    return token
-
-
-def _build_deepinfra_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
-    api_key = _set_deepinfra_env()
-    if not api_key:
-        raise ValueError("DEEPINFRA_API_TOKEN missing for DeepInfra models")
-    return ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url="https://api.deepinfra.com/v1/openai",
-        temperature=temperature,
-        max_tokens=max_tokens,
-        extra_body={
+def build_llm(
+    model_name: str,
+    provider: str,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    thinking_mode: bool = False,
+) -> Any:
+    provider_cfg = _get_provider_config(provider)
+    lc_type = provider_cfg.get("lc_type")
+    if lc_type is ChatVertexAI:
+        set_vertex_env()
+        return InterruptibleChatVertexAI(
+            model=model_name,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            location=VERTEX_LOCATION,
+            api_endpoint=VERTEX_ENDPOINT,
+        )
+    if lc_type is ChatOpenAI:
+        api_key = _ensure_provider_api_key(provider)
+        if not api_key:
+            env_name = provider_cfg.get("api_key_env") or "API_KEY"
+            raise ValueError(f"{env_name} missing for {provider} models")
+        extra_body = {
             "chat_template_kwargs": {
-                "enable_thinking": True
+                "enable_thinking": bool(thinking_mode),
             }
         }
-    )
+        return ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            base_url=provider_cfg.get("base_url"),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
+    raise ValueError(f"Unsupported provider type for {provider}")
 
 
-def _build_kimi_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
-    api_key = _set_kimi_env()
-    if not api_key:
-        raise ValueError("KIMI_API_KEY missing for Kimi models")
-    return ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url="https://api.moonshot.ai/v1",
+def build_llm_from_library(
+    model_key: str,
+    *,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    thinking_mode: bool = False,
+) -> Any:
+    entry = LLM_MODELS.get(model_key)
+    if not entry:
+        raise ValueError(f"Unknown LLM model key: {model_key}")
+    return build_llm(
+        entry["name"],
+        entry["provider"],
         temperature=temperature,
         max_tokens=max_tokens,
+        thinking_mode=thinking_mode,
     )
 
 
-def _build_together_llm(model_name: str, *, temperature: float, max_tokens: int) -> ChatOpenAI:
-    api_key = _set_together_env()
-    if not api_key:
-        raise ValueError("TOGETHER_API_KEY missing for Together.AI models")
-    return ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url="https://api.together.xyz/v1",
-        temperature=temperature,
-        max_tokens=max_tokens,
-        extra_body={
-            "chat_template_kwargs": {
-                "enable_thinking": False
-            }
-        }
-    )
+def _normalize_llm_overrides(overrides: Dict[str, Any], target: str) -> Dict[str, Any]:
+    normalized = dict(overrides)
+    if target == "vertex":
+        if "max_output_tokens" not in normalized and "max_tokens" in normalized:
+            normalized["max_output_tokens"] = normalized.get("max_tokens")
+        normalized.pop("max_tokens", None)
+        return normalized
+    if target == "openai":
+        if "max_tokens" not in normalized and "max_output_tokens" in normalized:
+            normalized["max_tokens"] = normalized.get("max_output_tokens")
+        normalized.pop("max_output_tokens", None)
+        return normalized
+    return normalized
 
 
 def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
@@ -696,40 +725,82 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
         A dictionary of language model instances configured with Google APIs.
     """
     st.toast("Setting up LLMs...", icon=":material/build:")
-    common_kwargs = {
-        "location": VERTEX_LOCATION,
-        "api_endpoint": VERTEX_ENDPOINT,
-    }
-
     return {
-        "FAST": InterruptibleChatVertexAI(
-            model="gemini-2.5-flash-lite",
-            temperature=0.3,
-            **common_kwargs,
-        ),
-        "BALANCED": InterruptibleChatVertexAI(
-            model="gemini-2.5-flash",
-            temperature=0.5,
-            **common_kwargs,
-        ),
-        # "CODING": _build_kimi_llm(
-        #     # "kimi-k2.5",
-        #     # "kimi-k2-thinking-turbo",
-        #     "kimi-k2-turbo-preview",
-        #     temperature=0.1,
+        # "FAST": build_llm_from_library(
+        #     "GEMINI_2_5_FLASH_LITE",
+        #     temperature=0.3,
         #     max_tokens=4096,
         # ),
-        # "CODING": _build_deepinfra_llm(
-        #     # "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
-        #     "moonshotai/Kimi-K2-Instruct-0905",
+        # "LONG": build_llm_from_library(
+        #     "QWEN3_NEXT_80B_A3B_DEEPINFRA",
         #     temperature=0.1,
         #     max_tokens=4096,
+        #     thinking_mode=False,
         # ),
-        "CODING": _build_together_llm(
-            # "moonshotai/Kimi-K2-Instruct-0905",
-            "moonshotai/Kimi-K2.5",
+        "LONG": build_llm_from_library(
+            "GEMINI_2_5_FLASH",
             temperature=0.1,
             max_tokens=4096,
+            thinking_mode=False,
+        ),
+        "FAST": build_llm_from_library(
+            "GEMINI_2_5_FLASH",
+            temperature=0.1,
+            max_tokens=4096,
+            thinking_mode=False,
+        ),
+        # "BALANCED": build_llm_from_library(
+        #     "GEMINI_2_5_FLASH",
+        #     temperature=0.5,
+        #     max_tokens=4096,
+        # ),
+        "BALANCED": build_llm_from_library(
+            "GEMINI_2_5_FLASH",
+            temperature=0.1,
+            max_tokens=4096,
+            thinking_mode=False,
+        ),
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_TURBO_PREVIEW",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=False,
+        # ),
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_5",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=False,
+        # ),
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_THINKING_TURBO",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=True,
+        # ),
+        # "CODING": build_llm_from_library(
+        #     "QWEN3_CODER_480B_A35B_DEEPINFRA",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=True,
+        # ),
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_INSTRUCT_0905_DEEPINFRA",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=True,
+        # ),
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_INSTRUCT_0905_TOGETHER",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=False,
+        # ),
+        "CODING": build_llm_from_library(
+            "KIMI_K2_5_TOGETHER",
+            temperature=0.1,
+            max_tokens=4096,
+            thinking_mode=False,
         ),
     }
 
@@ -744,27 +815,33 @@ def get_llm(model: str = "FAST") -> Any:
 
 def clone_llm_with_overrides(llm: Any, **overrides) -> Any:
     """Clone an LLM while preserving cancellation awareness where possible."""
-
     if isinstance(llm, ChatVertexAI):
-        return clone_interruptible_llm(llm, **overrides)
+        normalized_overrides = _normalize_llm_overrides(overrides, "vertex")
+        return clone_interruptible_llm(llm, **normalized_overrides)
     if isinstance(llm, ChatOpenAI):
+        normalized_overrides = _normalize_llm_overrides(overrides, "openai")
         base_params = {
             "model": getattr(llm, "model", None),
             "temperature": getattr(llm, "temperature", None),
             "max_tokens": getattr(llm, "max_tokens", None),
             "base_url": getattr(llm, "base_url", None),
             "api_key": getattr(llm, "api_key", None),
+            "extra_body": getattr(llm, "extra_body", None),
         }
-        model_name = base_params.get("model") or getattr(llm, "model_name", None)
-        is_qwen = isinstance(model_name, str) and model_name.startswith("Qwen/")
-        if not base_params.get("base_url") and is_qwen:
-            base_params["base_url"] = "https://api.deepinfra.com/v1/openai"
-        if is_qwen:
-            token = base_params.get("api_key") or _set_deepinfra_env()
-            if not token:
-                raise ValueError("DEEPINFRA_API_TOKEN missing for DeepInfra models")
-            base_params["api_key"] = token
-        base_params.update({k: v for k, v in overrides.items() if v is not None})
+        if not base_params.get("model"):
+            base_params["model"] = getattr(llm, "model_name", None)
+        provider_key = _infer_provider_from_llm(llm)
+        provider_cfg = PROVIDERS.get(provider_key) if provider_key else None
+        if provider_cfg:
+            if not base_params.get("base_url") and provider_cfg.get("base_url"):
+                base_params["base_url"] = provider_cfg.get("base_url")
+            if provider_cfg.get("api_key_env") and not base_params.get("api_key"):
+                token = _ensure_provider_api_key(provider_key)
+                if not token:
+                    env_name = provider_cfg.get("api_key_env") or "API_KEY"
+                    raise ValueError(f"{env_name} missing for {provider_key} models")
+                base_params["api_key"] = token
+        base_params.update({k: v for k, v in normalized_overrides.items() if v is not None})
         filtered = {k: v for k, v in base_params.items() if v is not None}
         return ChatOpenAI(**filtered)
     return llm

@@ -1,6 +1,8 @@
 import datetime
 import json
-from typing import List
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, List, Optional, TypeVar
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseLanguageModel
@@ -9,6 +11,16 @@ from pydantic import BaseModel, Field
 
 from classes import RelevantDateRange, ContextState
 from utils.json_utils import strip_to_json_payload
+from utils.run_cancellation import (
+    ScopedRunCancellationController,
+    activate_controller,
+    get_active_run_controller,
+    reset_controller,
+)
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class PeriodExpertOutput(BaseModel):
@@ -94,19 +106,69 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
 
     current_datetime = datetime.datetime.now().isoformat() + "Z"
 
+    def _race_llm_calls(
+        fn: Callable[[], T],
+        parallel_calls: int,
+        label: str,
+    ) -> T:
+        if parallel_calls <= 1:
+            return fn()
+
+        scope = ScopedRunCancellationController(
+            parent=get_active_run_controller(),
+            label=label,
+        )
+
+        def _worker() -> T:
+            token = activate_controller(scope)
+            try:
+                return fn()
+            finally:
+                reset_controller(token)
+
+        with ThreadPoolExecutor(max_workers=parallel_calls) as executor:
+            futures = [executor.submit(_worker) for _ in range(parallel_calls)]
+            last_exc: Optional[Exception] = None
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:  # pragma: no cover - best effort
+                    last_exc = exc
+                    logger.warning("Period expert parallel call failed: %s", exc)
+                    continue
+                scope.cancel_active_resources(reason="period_expert_parallel_race")
+                for pending in futures:
+                    if pending is not future:
+                        pending.cancel()
+                return result
+            if last_exc:
+                raise last_exc
+        raise ValueError("Period expert parallel calls returned no result")
+
     result: PeriodExpertOutput | None = None
     try:
         chain = prompt | llm.with_structured_output(PeriodExpertOutput)
-        result = chain.invoke({
-            "query": query,
-            "current_datetime": current_datetime,
-        })
+        logger.info("Period expert invoking structured output")
+        result = _race_llm_calls(
+            lambda: chain.invoke({
+                "query": query,
+                "current_datetime": current_datetime,
+            }),
+            parallel_calls=2,
+            label="period_expert_structured",
+        )
+        logger.info("Period expert structured output received")
     except Exception:
         result = None
 
     if result is None:
-        response = llm.invoke(
-            prompt.format_prompt(query=query, current_datetime=current_datetime).to_messages()
+        logger.info("Period expert invoking fallback LLM")
+        response = _race_llm_calls(
+            lambda: llm.invoke(
+                prompt.format_prompt(query=query, current_datetime=current_datetime).to_messages()
+            ),
+            parallel_calls=2,
+            label="period_expert_fallback",
         )
         raw_text = getattr(response, "content", "") or str(response)
         raw_text = strip_to_json_payload(

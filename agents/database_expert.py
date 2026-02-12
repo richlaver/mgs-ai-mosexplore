@@ -1,7 +1,8 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import setup
 from langchain_core.language_models import BaseLanguageModel
@@ -13,8 +14,16 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from utils.context_data import get_instrument_context
 from utils.json_utils import strip_to_json_payload
+from utils.run_cancellation import (
+    ScopedRunCancellationController,
+    activate_controller,
+    get_active_run_controller,
+    reset_controller,
+)
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 def _log_instrument_cache_summary(instrument_data: dict[str, Any]) -> None:
     """Log a concise summary of the instrument context cache contents."""
@@ -124,13 +133,61 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         ("human", human_template),
     ])
 
+    def _race_llm_calls(
+        fn: Callable[[], T],
+        parallel_calls: int,
+        label: str,
+    ) -> T:
+        if parallel_calls <= 1:
+            return fn()
+
+        scope = ScopedRunCancellationController(
+            parent=get_active_run_controller(),
+            label=label,
+        )
+
+        def _worker() -> T:
+            token = activate_controller(scope)
+            try:
+                return fn()
+            finally:
+                reset_controller(token)
+
+        with ThreadPoolExecutor(max_workers=parallel_calls) as executor:
+            futures = [executor.submit(_worker) for _ in range(parallel_calls)]
+            last_exc: Optional[Exception] = None
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:  # pragma: no cover - best effort
+                    last_exc = exc
+                    logger.warning("Instrument selection parallel call failed: %s", exc)
+                    continue
+                scope.cancel_active_resources(reason="instrument_selection_parallel_race")
+                for pending in futures:
+                    if pending is not future:
+                        pending.cancel()
+                return result
+            if last_exc:
+                raise last_exc
+        raise ValueError("Instrument selection parallel calls returned no result")
+
     result: list[dict[str, Any]] | None = None
     try:
+        cached_context = setup.build_instrument_selection_cached_context(context)
+        cached_content_id = setup.get_or_refresh_cached_content(
+            cache_key="instrument_selection",
+            content_text=cached_context,
+            llm=llm,
+            display_prefix="instrument-selection-cache",
+            legacy_hash_keys=["instrument_selection_cached_context_hash"],
+        )
         structured_llm = llm.with_structured_output(
             InstrumentSelectionList,
             method="json_mode",
         )
 
+        # Prompt to use if injecting cached content in `cached_llm_content/instrument_selection_prompt_static.md`
         prompt_text = (
             "Query: {query}\n\n"
             "Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names "
@@ -139,7 +196,18 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             "Return JSON with instrument keys and their relevant fields only."
         ).format(query=query, verified_str=verified_str)
         message = HumanMessage(content=prompt_text)
-        structured_response = structured_llm.invoke([message])
+        if cached_content_id:
+            structured_response = _race_llm_calls(
+                lambda: structured_llm.invoke([message], cached_content=cached_content_id),
+                parallel_calls=2,
+                label="instrument_selection_structured_cached",
+            )
+        else:
+            structured_response = _race_llm_calls(
+                lambda: structured_llm.invoke([message]),
+                parallel_calls=2,
+                label="instrument_selection_structured",
+            )
 
         if structured_response is None:
             raise ValueError("Structured output returned no result.")
@@ -149,8 +217,12 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         logger.warning("Structured output failed; falling back to raw parsing: %s", structured_error)
 
     if result is None:
-        chain = prompt | llm
-        response = chain.invoke(call_inputs)
+        chain = prompt_text | llm
+        response = _race_llm_calls(
+            lambda: chain.invoke(call_inputs),
+            parallel_calls=2,
+            label="instrument_selection_raw",
+        )
         try:
             logger.debug(f"Raw LLM response: {response.content}")
             response_text = strip_to_json_payload(

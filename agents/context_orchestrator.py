@@ -1,7 +1,9 @@
-from typing import Dict
+import logging
+import os
+import threading
+from typing import Dict, Optional
+
 from langchain_core.language_models import BaseLanguageModel
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command, Send
 
@@ -12,191 +14,266 @@ from agents.period_expert import period_expert
 from agents.project_insider import project_insider
 from agents.platform_expert import platform_expert
 from classes import ContextState
-
-def create_handoff_tool(*, agent_name: str, description: str | None = None):
-    name = f"transfer_to_{agent_name}"
-    description = description or f"Transfer control to {agent_name}."
-
-    @tool(name, description=description)
-    def handoff_tool(payload: dict | None = None) -> str:
-        return f"Transferred to {agent_name}"
-
-    return handoff_tool
-
-transfer_to_instrument_id_validator = create_handoff_tool(
-    agent_name="instrument_id_validator",
-    description="Transfer to instrument validator for identifying valid and potentially invalid instrument IDs in the query."
+from utils.run_cancellation import (
+    ScopedRunCancellationController,
+    activate_controller,
+    get_active_run_controller,
+    reset_controller,
 )
 
-transfer_to_instrument_type_validator = create_handoff_tool(
-    agent_name="instrument_type_validator",
-    description="Transfer to instrument type validator for identifying instrument types and subtypes mentioned in the query."
-)
+logger = logging.getLogger(__name__)
 
-transfer_to_database_expert = create_handoff_tool(
-    agent_name="database_expert",
-    description="Transfer to database expert for retrieving essential information on how to access data in the database to answer the query."
-)
+def _get_parallel_setting(env_key: str, default: int) -> int:
+    raw = os.environ.get(env_key)
+    try:
+        value = int(raw) if raw is not None else default
+    except Exception:
+        value = default
+    return max(1, value)
 
-transfer_to_period_expert = create_handoff_tool(
-    agent_name="period_expert",
-    description="Transfer to period expert for deducing relevant date ranges from the query."
-)
 
-transfer_to_platform_expert = create_handoff_tool(
-    agent_name="platform_expert",
-    description="Transfer to platform expert for retrieving platform-specific terminology semantics and database guidance."
-)
+DB_EXPERT_PARALLEL_EXECUTIONS = _get_parallel_setting("MGS_DB_EXPERT_PARALLEL_EXECUTIONS", 1)
+PERIOD_EXPERT_PARALLEL_EXECUTIONS = _get_parallel_setting("MGS_PERIOD_EXPERT_PARALLEL_EXECUTIONS", 1)
 
-transfer_to_project_insider = create_handoff_tool(
-    agent_name="project_insider",
-    description="Transfer to project insider for retrieving ad-hoc insights specific to the project."
-)
+
+def _has_clarification_requests(state: ContextState) -> bool:
+    try:
+        if isinstance(state.context, dict):
+            clar = state.context.get("clarification_requests") or []
+            return bool(clar)
+        clar = getattr(state.context, "clarification_requests", []) or []
+        return bool(clar)
+    except Exception:
+        return False
 
 def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_project_key: str | None) -> any:
-    tools = [
-        transfer_to_instrument_id_validator,
-        transfer_to_instrument_type_validator,
-        transfer_to_database_expert,
-        transfer_to_period_expert,
-        transfer_to_platform_expert,
-        transfer_to_project_insider,
-    ]
+    db_scope_lock = threading.Lock()
+    db_scope: Optional[ScopedRunCancellationController] = None
+    db_winner_lock = threading.Lock()
+    db_winner_set = False
 
-    def supervisor_node(state: ContextState):
-        has_clar_reqs = False
+    period_scope_lock = threading.Lock()
+    period_scope: Optional[ScopedRunCancellationController] = None
+    period_winner_lock = threading.Lock()
+    period_winner_set = False
+
+    def _get_db_scope() -> ScopedRunCancellationController:
+        nonlocal db_scope
+        with db_scope_lock:
+            if db_scope is None:
+                db_scope = ScopedRunCancellationController(
+                    parent=get_active_run_controller(),
+                    label="context_db_expert",
+                )
+        return db_scope
+
+    def _get_period_scope() -> ScopedRunCancellationController:
+        nonlocal period_scope
+        with period_scope_lock:
+            if period_scope is None:
+                period_scope = ScopedRunCancellationController(
+                    parent=get_active_run_controller(),
+                    label="context_period_expert",
+                )
+        return period_scope
+
+    def _run_with_scope(scope: ScopedRunCancellationController, fn):
+        token = activate_controller(scope)
         try:
-            if isinstance(state.context, dict):
-                clar = state.context.get("clarification_requests") or []
-                has_clar_reqs = bool(clar)
-            else:
-                clar = getattr(state.context, "clarification_requests", []) or []
-                has_clar_reqs = bool(clar)
-        except Exception:
-            has_clar_reqs = False
+            return fn()
+        finally:
+            reset_controller(token)
 
-        if has_clar_reqs:
-            return Command(goto=END)
+    def instrument_id_validator_node(state: ContextState):
+        logger.info("Context node enter: instrument_id_validator")
+        if _has_clarification_requests(state):
+            logger.info("instrument_id_validator skipped due to clarification requests")
+            return {}
+        result = instrument_id_validator(state, llms["FAST"], db)
+        logger.info("Context node exit: instrument_id_validator")
+        return result
 
-        user_input = (
-            state.context.get("retrospective_query", "")
-            if isinstance(state.context, dict)
-            else getattr(state.context, "retrospective_query", "")
+    def instrument_type_validator_node(state: ContextState):
+        logger.info("Context node enter: instrument_type_validator")
+        if _has_clarification_requests(state):
+            logger.info("instrument_type_validator skipped due to clarification requests")
+            return {}
+        result = instrument_type_validator(state, selected_project_key)
+        logger.info("Context node exit: instrument_type_validator")
+        return result
+
+    def database_expert_node(state: ContextState):
+        nonlocal db_winner_set
+        logger.info("Context node enter: database_expert")
+        if _has_clarification_requests(state):
+            logger.info("database_expert skipped due to clarification requests")
+            return {}
+
+        with db_winner_lock:
+            if db_winner_set:
+                logger.info("database_expert branch skipped (winner already selected)")
+                return {}
+
+        scope = _get_db_scope()
+        result = _run_with_scope(
+            scope,
+            lambda: database_expert(state, llms["LONG"], db, selected_project_key),
         )
-        scratch_lines = []
-        if state.period_deduced:
-            scratch_lines.append("INTERNAL: Period deduction completed.")
-        if state.instrument_ids_validated:
-            scratch_lines.append("INTERNAL: Instrument validation completed.")
-        if state.instrument_types_validated:
-            scratch_lines.append("INTERNAL: Instrument type validation completed.")
-        if state.db_context_provided:
-            scratch_lines.append("INTERNAL: Database context retrieval completed.")
-        if state.platform_context_provided:
-            scratch_lines.append("INTERNAL: Platform semantics retrieval completed.")
-        if state.project_specifics_retrieved:
-            scratch_lines.append("INTERNAL: Project-specific insights retrieval completed.")
-        agent_scratchpad = "\n".join(scratch_lines)
 
-        system_content = f"""
-You are a supervisor that delegates by calling tools to transfer control to agents.
-STRICT ROUTING CONTRACT (follow exactly, highest precedence first):
-1) If has_clarification_requests is true:
-    - Do NOT call any tools.
-    - Return NO tool calls.
-2) If ALL are true, do NOT call any tools:
-    - period_deduced == true
-    - instrument_ids_validated == true
-    - instrument_types_validated == true
-    - db_context_provided == true
-    - platform_context_provided == true
-    - project_specifics_retrieved == true
-3) Otherwise (has_clarification_requests is false):
-    - If period_deduced == false, call transfer_to_period_expert.
-    - If instrument_ids_validated == false, call transfer_to_instrument_id_validator.
-    - If instrument_types_validated == false, call transfer_to_instrument_type_validator.
-    - If platform_context_provided == false, call transfer_to_platform_expert.
-    - If project_specifics_retrieved == false, call transfer_to_project_insider.
-    - If instrument_ids_validated == true AND instrument_types_validated == true AND db_context_provided == false, call transfer_to_database_expert.
+        winner = False
+        with db_winner_lock:
+            if not db_winner_set:
+                db_winner_set = True
+                winner = True
 
-Notes:
-- Call tools in parallel when multiple conditions in (3) apply.
-- If unsure, prefer calling fewer tools; never call any tool when rule (1) applies.
-- Do not explain your reasoning; just make the appropriate tool calls or none.
+        if winner:
+            scope.cancel_active_resources(reason="database_expert_branch_complete")
+            logger.info("database_expert branch selected as winner")
+            logger.info("Context node exit: database_expert")
+            return result
 
-Current status:
-- period_deduced={state.period_deduced}
-- instrument_ids_validated={state.instrument_ids_validated}
-- instrument_types_validated={state.instrument_types_validated}
-- db_context_provided={state.db_context_provided}
-- platform_context_provided={state.platform_context_provided}
-- project_specifics_retrieved={state.project_specifics_retrieved}
-- has_clarification_requests={has_clar_reqs}
-{agent_scratchpad}
-"""
+        logger.info("database_expert branch completed after winner selected")
+        logger.info("Context node exit: database_expert")
+        return {}
 
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=user_input),
+    def period_expert_node(state: ContextState, branch_id: int):
+        nonlocal period_winner_set
+        logger.info("Context node enter: period_expert branch=%d", branch_id)
+        if _has_clarification_requests(state):
+            logger.info("period_expert skipped due to clarification requests")
+            return {}
+
+        with period_winner_lock:
+            if period_winner_set:
+                logger.info("period_expert branch skipped (winner already selected)")
+                return {}
+
+        scope = _get_period_scope()
+        result = _run_with_scope(
+            scope,
+            lambda: period_expert(state, llms["FAST"], db),
+        )
+
+        winner = False
+        with period_winner_lock:
+            if not period_winner_set:
+                period_winner_set = True
+                winner = True
+
+        if winner:
+            scope.cancel_active_resources(reason="period_expert_branch_complete")
+            logger.info("period_expert branch selected as winner")
+            logger.info("Context node exit: period_expert branch=%d", branch_id)
+            return result
+
+        logger.info("period_expert branch completed after winner selected")
+        logger.info("Context node exit: period_expert branch=%d", branch_id)
+        return {}
+
+    def platform_expert_node(state: ContextState):
+        logger.info("Context node enter: platform_expert")
+        if _has_clarification_requests(state):
+            logger.info("platform_expert skipped due to clarification requests")
+            return {}
+        result = platform_expert(state)
+        logger.info("Context node exit: platform_expert")
+        return result
+
+    def project_insider_node(state: ContextState):
+        logger.info("Context node enter: project_insider")
+        if _has_clarification_requests(state):
+            logger.info("project_insider skipped due to clarification requests")
+            return {}
+        result = project_insider(state, selected_project_key)
+        logger.info("Context node exit: project_insider")
+        return result
+
+    def instrument_db_fan_out(state: ContextState):
+        logger.info("Context subgraph fan-out: instrument validators")
+        if _has_clarification_requests(state):
+            logger.info("instrument_db_fan_out aborted due to clarification requests")
+            return Command(goto=END)
+        return Command(goto=[
+            Send("instrument_id_validator", state),
+            Send("instrument_type_validator", state),
+        ])
+
+    def instrument_db_fan_in(_: ContextState):
+        logger.info("Context subgraph fan-in: instrument validators")
+        return {}
+
+    def database_expert_fan_out(state: ContextState):
+        logger.info("Context subgraph fan-out: database_expert (%d branches)", DB_EXPERT_PARALLEL_EXECUTIONS)
+        if _has_clarification_requests(state):
+            logger.info("database_expert fan-out aborted due to clarification requests")
+            return Command(goto="database_expert_fan_in")
+        return Command(goto=[
+            Send(f"database_expert_{i}", state)
+            for i in range(DB_EXPERT_PARALLEL_EXECUTIONS)
+        ])
+
+    def database_expert_fan_in(_: ContextState):
+        logger.info("Context subgraph fan-in: database_expert")
+        return {}
+
+    instrument_db_graph = StateGraph(ContextState)
+    instrument_db_graph.add_node("instrument_db_fan_out", instrument_db_fan_out)
+    instrument_db_graph.add_node("instrument_id_validator", instrument_id_validator_node)
+    instrument_db_graph.add_node("instrument_type_validator", instrument_type_validator_node)
+    instrument_db_graph.add_node("instrument_db_fan_in", instrument_db_fan_in)
+    instrument_db_graph.add_node("database_expert_fan_out", database_expert_fan_out)
+    instrument_db_graph.add_node("database_expert_fan_in", database_expert_fan_in)
+    for i in range(DB_EXPERT_PARALLEL_EXECUTIONS):
+        instrument_db_graph.add_node(f"database_expert_{i}", database_expert_node)
+        instrument_db_graph.add_edge(f"database_expert_{i}", "database_expert_fan_in")
+
+    instrument_db_graph.add_edge(START, "instrument_db_fan_out")
+    instrument_db_graph.add_edge("instrument_id_validator", "instrument_db_fan_in")
+    instrument_db_graph.add_edge("instrument_type_validator", "instrument_db_fan_in")
+    instrument_db_graph.add_edge("instrument_db_fan_in", "database_expert_fan_out")
+    instrument_db_graph.add_edge("database_expert_fan_out", "database_expert_fan_in")
+    instrument_db_graph.add_edge("database_expert_fan_in", END)
+
+    instrument_db_subgraph = instrument_db_graph.compile()
+
+    def parent_fan_out(state: ContextState):
+        logger.info("Context parent fan-out: launching parallel context branches")
+        if _has_clarification_requests(state):
+            logger.info("parent_fan_out aborted due to clarification requests")
+            return Command(goto=END)
+        targets = [
+            Send("instrument_db_subgraph", state),
+            Send("platform_expert", state),
+            Send("project_insider", state),
         ]
+        targets.extend(
+            Send(f"period_expert_{i}", state)
+            for i in range(PERIOD_EXPERT_PARALLEL_EXECUTIONS)
+        )
+        return Command(goto=targets)
 
-        llm_with_tools = llms["BALANCED"].bind_tools(tools)
-        try:
-            response = llm_with_tools.invoke(messages)
-        except Exception:
-            return Command(goto=END)
-
-        requested_targets = []
-        if hasattr(response, 'tool_calls') and response.tool_calls:
-            for tc in response.tool_calls:
-                tool_name = tc['name']
-                if tool_name == "transfer_to_instrument_id_validator":
-                    requested_targets.append("instrument_id_validator")
-                elif tool_name == "transfer_to_instrument_type_validator":
-                    requested_targets.append("instrument_type_validator")
-                elif tool_name == "transfer_to_database_expert":
-                    requested_targets.append("database_expert")
-                elif tool_name == "transfer_to_period_expert":
-                    requested_targets.append("period_expert")
-                elif tool_name == "transfer_to_platform_expert":
-                    requested_targets.append("platform_expert")
-                elif tool_name == "transfer_to_project_insider":
-                    requested_targets.append("project_insider")
-
-        allowed_targets = set()
-        if not state.period_deduced:
-            allowed_targets.add("period_expert")
-        if not state.instrument_ids_validated:
-            allowed_targets.add("instrument_id_validator")
-        if not state.instrument_types_validated:
-            allowed_targets.add("instrument_type_validator")
-        if not state.platform_context_provided:
-            allowed_targets.add("platform_expert")
-        if not state.project_specifics_retrieved:
-            allowed_targets.add("project_insider")
-        if state.instrument_ids_validated and state.instrument_types_validated and not state.db_context_provided:
-            allowed_targets.add("database_expert")
-
-        final_targets = set(requested_targets).intersection(allowed_targets) if requested_targets else allowed_targets
-
-        if not final_targets:
-            return Command(goto=END)
-
-        return Command(goto=[Send(target, state) for target in final_targets])
+    def parent_fan_in(_: ContextState):
+        logger.info("Context parent fan-in: merging context updates")
+        return {}
 
     graph = StateGraph(ContextState)
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("instrument_id_validator", lambda state: instrument_id_validator(state, llms['FAST'], db))
-    graph.add_node("instrument_type_validator", lambda state: instrument_type_validator(state, selected_project_key))
-    graph.add_node("database_expert", lambda state: database_expert(state, llms["FAST"], db, selected_project_key))
-    graph.add_node("period_expert", lambda state: period_expert(state, llms['FAST'], db))
-    graph.add_node("project_insider", lambda state: project_insider(state, selected_project_key))
-    graph.add_node("platform_expert", platform_expert)
-    graph.add_edge(START, "supervisor")
-    graph.add_edge("instrument_id_validator", "supervisor")
-    graph.add_edge("instrument_type_validator", "supervisor")
-    graph.add_edge("database_expert", "supervisor")
-    graph.add_edge("period_expert", "supervisor")
-    graph.add_edge("project_insider", "supervisor")
-    graph.add_edge("platform_expert", "supervisor")
+    graph.add_node("parent_fan_out", parent_fan_out)
+    graph.add_node("parent_fan_in", parent_fan_in)
+    graph.add_node("instrument_db_subgraph", instrument_db_subgraph)
+    graph.add_node("platform_expert", platform_expert_node)
+    graph.add_node("project_insider", project_insider_node)
+    for i in range(PERIOD_EXPERT_PARALLEL_EXECUTIONS):
+        graph.add_node(
+            f"period_expert_{i}",
+            lambda state, branch_id=i: period_expert_node(state, branch_id),
+        )
+
+    graph.add_edge(START, "parent_fan_out")
+    graph.add_edge("instrument_db_subgraph", "parent_fan_in")
+    graph.add_edge("platform_expert", "parent_fan_in")
+    graph.add_edge("project_insider", "parent_fan_in")
+    for i in range(PERIOD_EXPERT_PARALLEL_EXECUTIONS):
+        graph.add_edge(f"period_expert_{i}", "parent_fan_in")
+    graph.add_edge("parent_fan_in", END)
+
     return graph.compile()

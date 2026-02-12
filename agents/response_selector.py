@@ -59,9 +59,8 @@ def response_selector(
     if not executions:
         return executions
 
-    for ex in executions:
-        if ex.is_best:
-            ex.is_best = False
+    if any(getattr(ex, "is_best", False) for ex in executions):
+        return executions
 
     # Require principal component from latest successful execution
     latest_pc_entry = None

@@ -144,7 +144,7 @@ def build_graph(
     timezone_context_default = st.session_state.get("timezone_context")
 
     tools_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.1)
-    sufficiency_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=256)
+    sufficiency_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_tokens=256)
 
     extraction_tool = extraction_sandbox_agent(
         llm=tools_llm,
@@ -1124,7 +1124,7 @@ def build_graph(
                 "user_query": retrospective_query,
             }
 
-            fact_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_output_tokens=768)
+            fact_llm = clone_llm_with_overrides(llms["BALANCED"], temperature=0.0, max_tokens=768)
             structured_llm = fact_llm.with_structured_output(FactsResponse)
 
             max_format_retries = 1
@@ -1193,6 +1193,7 @@ def build_graph(
             return current_indices
 
         def run_branch(state: AgentState):
+            nonlocal termination_triggered
             _ensure_run_not_cancelled(f"run_branch_{branch_id}")
             ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
             if not ex or ex.final_response is not None:
@@ -1403,6 +1404,7 @@ def build_graph(
             max_retry_number = 2
             max_codegen_retries = 2
             codegen_retry_number = 0
+            fast_path = False
 
             while True:
                 attempt_messages, final_msg, artefacts, error_logs_all, error_logs_actionable, exec_duration = _execute_code(current_code)
@@ -1455,16 +1457,37 @@ def build_graph(
                 else:
                     is_sufficient = False
 
-                if is_sufficient:
+                fast_path = (
+                    is_sufficient
+                    and min_successful_responses == 1
+                    and min_explained_variance == 0.5
+                )
+
+                if is_sufficient and not fast_path:
                     fact_numbers = _decompose_and_update_facts(final_msg, state)
                     try:
                         logger.info("[Facts] Current response fact indices: %s", fact_numbers)
                         logger.info("[Facts] Stored response_facts (count=%d): %s", len(response_facts), response_facts)
                     except Exception as exc:
                         logger.error("[Facts] Logging failed: %s", exc)
-
-                updated_attempt = updated_attempt.model_copy(update={"is_sufficient": is_sufficient})
+                updated_attempt = updated_attempt.model_copy(
+                    update={"is_sufficient": is_sufficient, "is_best": True if fast_path else updated_attempt.is_best}
+                )
                 execution_updates.append(updated_attempt)
+
+                if fast_path:
+                    with termination_lock:
+                        if not termination_triggered:
+                            termination_triggered = True
+                    _set_thinking_stage(4, "fast_path_termination")
+                    controller = get_active_run_controller()
+                    if controller:
+                        controller.cancel_active_resources("fast path: single sufficient response")
+                    try:
+                        reset_sandbox_pool("terminated_early")
+                    except Exception:
+                        pass
+                    break
 
                 if has_syntax_error and current_execution.retry_number < max_retry_number:
                     _progress_msg(
@@ -1596,7 +1619,7 @@ def build_graph(
                 len(error_logs_all),
                 list(counted_branches.items()),
             )
-            if is_sufficient:
+            if is_sufficient and not fast_path:
                 _evaluate_consistency_and_maybe_terminate(branch_id)
 
             return payload or {}

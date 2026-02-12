@@ -241,6 +241,117 @@ class RunCancellationController:
             raise RunCancelledError(f"Run cancelled{suffix}")
 
 
+class ScopedRunCancellationController:
+    """Scoped cancellation controller for a subset of resources.
+
+    Uses a parent controller for run-level cancellation checks while
+    tracking and cancelling only the resources registered within this scope.
+    """
+
+    def __init__(self, *, parent: Optional[RunCancellationController], label: str) -> None:
+        self._parent = parent
+        self._label = label
+        self._lock = threading.RLock()
+        self._cancelled = threading.Event()
+        self._resources: Dict[str, _RegisteredResource] = {}
+        self._parent_handle: Optional[str] = None
+        if parent:
+            self._parent_handle = parent.register_generic(
+                lambda: self.cancel_active_resources(reason=f"parent_cancel:{label}"),
+                label=f"scope:{label}",
+            )
+
+    def register_generic(self, callback: CancelCallback, *, label: str) -> str:
+        handle = uuid.uuid4().hex
+        with self._lock:
+            self._resources[handle] = _RegisteredResource(label=label, cancel=callback)
+            trigger_now = self._cancelled.is_set()
+        logger.info(
+            "[RunCancelScope %s] Registered resource handle=%s label=%s trigger_now=%s",
+            self._label,
+            handle,
+            label,
+            trigger_now,
+        )
+        if trigger_now:
+            self._invoke_callback(handle, callback, label)
+        return handle
+
+    def unregister(self, handle: str) -> None:
+        with self._lock:
+            removed = self._resources.pop(handle, None)
+            remaining = len(self._resources)
+        logger.info(
+            "[RunCancelScope %s] Unregistered resource handle=%s removed=%s remaining=%d",
+            self._label,
+            handle,
+            bool(removed),
+            remaining,
+        )
+
+    def cancel_active_resources(self, reason: str | None = None) -> None:
+        handles, resources = self._snapshot_callbacks()
+        if reason:
+            logger.info(
+                "[RunCancelScope %s] Cancelling active resources: %s (handles=%d)",
+                self._label,
+                reason,
+                len(handles),
+            )
+        if not handles:
+            logger.info("[RunCancelScope %s] No active resources to cancel", self._label)
+        self._cancelled.set()
+        for handle, resource in zip(handles, resources, strict=False):
+            self._invoke_callback(handle, resource.cancel, resource.label)
+
+    def cancel(self, reason: str | None = None) -> None:
+        if reason:
+            logger.info("[RunCancelScope %s] Cancelling scope: %s", self._label, reason)
+        else:
+            logger.info("[RunCancelScope %s] Cancelling scope", self._label)
+        self.cancel_active_resources(reason=reason)
+
+    def is_cancelled(self) -> bool:
+        if self._cancelled.is_set():
+            return True
+        if self._parent:
+            return self._parent.is_cancelled()
+        return False
+
+    def raise_if_cancelled(self, where: str | None = None) -> None:
+        if self._cancelled.is_set():
+            suffix = f" ({where})" if where else ""
+            raise RunCancelledError(f"Scoped cancellation{suffix}")
+        if self._parent:
+            self._parent.raise_if_cancelled(where)
+
+    def _snapshot_callbacks(self) -> tuple[list[str], list[_RegisteredResource]]:
+        with self._lock:
+            handles = list(self._resources.keys())
+            callbacks = list(self._resources.values())
+        return handles, callbacks
+
+    def _invoke_callback(self, handle: str, callback: CancelCallback, label: str) -> None:
+        logger.info(
+            "[RunCancelScope %s] Invoking cancel callback handle=%s label=%s",
+            self._label,
+            handle,
+            label,
+        )
+        try:
+            callback()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[RunCancelScope %s] Resource callback '%s' failed during cancel: %s",
+                self._label,
+                label,
+                exc,
+            )
+        finally:
+            with self._lock:
+                self._resources.pop(handle, None)
+
+
 _current_controller: contextvars.ContextVar[Optional[RunCancellationController]] = contextvars.ContextVar(
     "current_run_cancellation_controller",
     default=None,
@@ -268,6 +379,7 @@ def get_active_run_controller() -> Optional[RunCancellationController]:
 __all__ = [
     "RunCancelledError",
     "RunCancellationController",
+    "ScopedRunCancellationController",
     "activate_controller",
     "reset_controller",
     "get_active_run_controller",
