@@ -61,7 +61,7 @@ def perform_setup():
     try:
         setup.refresh_instrument_selection_cache(
             st.session_state.get("selected_project_key"),
-            st.session_state.llms["FAST"],
+            st.session_state.llms["LONG"],
         )
     except Exception as exc:
         logger.warning("Failed to refresh instrument selection cache at startup: %s", exc)

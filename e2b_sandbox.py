@@ -1435,7 +1435,7 @@ def execute_remote_sandbox(
         payload = _make_step_payload(message, "progress", origin="sandbox")
         additional = payload.get("additional_kwargs")
         if isinstance(additional, dict):
-            additional["level"] = "info"
+            additional["level"] = "debug"
             origin = additional.get("origin")
             if isinstance(origin, dict):
                 origin["process"] = "sandbox_status"

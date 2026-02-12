@@ -118,7 +118,7 @@ def _get_vertex_config_for_cache(llm: Any) -> VertexConfig:
     project_id = get_project_id()
     location = os.environ.get("VERTEX_LOCATION", VERTEX_LOCATION)
     api_endpoint = _normalize_api_endpoint(os.environ.get("VERTEX_ENDPOINT", VERTEX_ENDPOINT))
-    model_id = _get_llm_model_id(llm, "gemini-2.0-flash-lite")
+    model_id = _get_llm_model_id(llm, "gemini-2.5-flash")
     return VertexConfig(
         project_id=project_id,
         location=location,

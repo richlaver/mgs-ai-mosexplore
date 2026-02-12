@@ -76,7 +76,7 @@ for task in done:
 - Adopt the project timezone for all database queries and datetime calculations.
 - If you need the current time inside the sandbox which runs your generated code, convert `datetime.datetime.now()` from sandbox timezone to the project timezone before using it.
 - When interpreting times specified in the query, honour the query timezone interpretation above; assume project timezone if unspecified.
-- State all times in yielded outputs with respect to the project timezone and explicitly note that the project timezone is being used in the final output so downstream agents can correctly interpret the times.
+- State all times in yielded outputs with respect to the project timezone with a timezone indicator (UTC+XX:00) so downstream agents can correctly interpret the times.
 
 ## Yielded Output
 - Yield dictionaries as:

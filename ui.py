@@ -448,7 +448,7 @@ def render_initial_ui() -> None:
                     try:
                         setup.refresh_instrument_selection_cache(
                             selected_key,
-                            st.session_state.llms["FAST"],
+                            st.session_state.llms["LONG"],
                         )
                     except Exception as e:
                         logger.warning("Failed to refresh instrument selection cache for %s: %s", selected_key, e)
