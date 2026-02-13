@@ -10,6 +10,7 @@ import re
 import time
 import threading
 import queue
+import random
 from typing import Any
 
 from classes import AgentState, Context
@@ -28,6 +29,7 @@ from utils.context_data import (
 )
 from tools.artefact_toolkit import ReadArtefactsTool, DeleteArtefactsTool
 from utils.chat_history import filter_messages_only_final
+from suggestions import suggested_queries
 from utils.run_cancellation import (
     RunCancelledError,
     RunCancellationController,
@@ -39,6 +41,118 @@ logger = logging.getLogger(__name__)
 
 STREAM_MESSAGE_EMIT_INTERVAL_SECONDS = 0.1
 CODE_YIELD_STEP_PREFIX_RE = re.compile(r"^\s*Step\s+\d+[^:]*:\s*")
+NEW_CHAT_TITLE = "How can I help you explore your data?"
+NEW_CHAT_QUERY_PLACEHOLDER = "Ask a query about project data:"
+
+
+def _resample_new_chat_suggestions() -> list[str]:
+    pool = [q for q in suggested_queries if isinstance(q, str) and q.strip()]
+    if len(pool) >= 3:
+        sampled = random.sample(pool, 3)
+    else:
+        sampled = pool[:]
+        while sampled and len(sampled) < 3:
+            sampled.append(sampled[-1])
+    st.session_state.new_chat_suggestions = sampled
+    return sampled
+
+
+def _get_new_chat_suggestions() -> list[str]:
+    suggestions = st.session_state.get("new_chat_suggestions")
+    if isinstance(suggestions, list) and len(suggestions) >= 3:
+        return suggestions[:3]
+    return _resample_new_chat_suggestions()
+
+
+def _apply_chat_input_layout_css(*, new_chat_view: bool) -> None:
+    if new_chat_view:
+        st.markdown(
+            """
+            <style>
+            .stChatInput {
+                position: static !important;
+                width: 100% !important;
+                max-width: 860px !important;
+                margin: 0 auto !important;
+                background-color: transparent !important;
+                z-index: auto !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        """
+        <style>
+        .stChatInput {
+            position: fixed;
+            bottom: 10px;
+            width: calc(100% - 60px - 336px);
+            margin: 0 auto;
+            background-color: white;
+            z-index: 1000;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_new_chat_view(*, disabled: bool) -> str | None:
+    suggestions = _get_new_chat_suggestions()
+
+    st.markdown(
+        """
+        <style>
+        .new-chat-vertical-center {
+            height: 18vh;
+        }
+        .new-chat-title {
+            color: #D65A00 !important;
+            font-size: 2.2rem;
+            line-height: 1.2;
+            font-weight: 700;
+            margin: 0;
+            text-align: center !important;
+            width: 100%;
+        }
+        .new-chat-medium-gap {
+            height: 32px;
+        }
+        .new-chat-large-gap {
+            height: 72px;
+        }
+        </style>
+        <div class="new-chat-vertical-center"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    selected_question = None
+
+    _, center_col, _ = st.columns([1, 2.2, 1])
+    with center_col:
+        st.markdown(f'<div class="new-chat-title">{NEW_CHAT_TITLE}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="new-chat-medium-gap"></div>', unsafe_allow_html=True)
+        for i, suggestion in enumerate(suggestions):
+            if st.button(
+                suggestion,
+                key=f"new_chat_suggestion_button_{i}",
+                use_container_width=True,
+                disabled=disabled,
+            ):
+                selected_question = suggestion
+
+        st.markdown('<div class="new-chat-large-gap"></div>', unsafe_allow_html=True)
+        typed_question = st.chat_input(
+            placeholder=NEW_CHAT_QUERY_PLACEHOLDER,
+            key="new_chat_input",
+            disabled=disabled,
+        )
+
+    return selected_question or typed_question
 
 
 def _get_parallel_executions_from_env() -> int:
@@ -218,7 +332,9 @@ def template_sandbox_modal():
 
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
+    _cancel_active_run("User pressed new chat button")
     st.session_state.clear_chat = True
+    _resample_new_chat_suggestions()
     try:
         clear_stream_message_queue()
     except Exception:
@@ -271,15 +387,6 @@ def render_initial_ui() -> None:
             padding-bottom: 10px;
             margin-bottom: 10px;
             margin-top: 10px;
-        }
-        .stChatInput {
-            position: fixed;
-            bottom: 10px;
-            width: calc(100% - 60px - 336px);
-            # max-width: calc(1100px - 120px);
-            margin: 0 auto;
-            background-color: white;
-            z-index: 1000;
         }
         .st-key-stop_active_run_button {
             position: fixed !important;
@@ -597,13 +704,17 @@ def render_initial_ui() -> None:
                     use_container_width=True
                 )
 
-    chat_col, stop_col = st.columns([9, 1], vertical_alignment="bottom")
-    with chat_col:
-        st.chat_input(
-            placeholder="Setting up, please wait...",
-            disabled=True,
-            key="initial_chat_input"
-        )
+    if "new_chat_suggestions" not in st.session_state:
+        _resample_new_chat_suggestions()
+
+    pre_setup_new_chat_placeholder = st.empty()
+
+    if not st.session_state.get("setup_complete", False):
+        with pre_setup_new_chat_placeholder.container():
+            _apply_chat_input_layout_css(new_chat_view=True)
+            _render_new_chat_view(disabled=True)
+    else:
+        pre_setup_new_chat_placeholder.empty()
 
 def _render_final_message(message: AIMessage) -> None:
     metadata = message.additional_kwargs or {}
@@ -697,69 +808,88 @@ def render_chat_content() -> None:
     parallel_count = _get_parallel_executions_from_env()
 
     handle_clear_chat()
+    pending_question = st.session_state.pop("pending_user_question", None)
+    messages = st.session_state.get("messages", [])
+    show_new_chat_view = len(messages) == 0 and not pending_question
+    new_chat_placeholder = st.empty()
 
-    chat_col, stop_col = st.columns([9, 1], vertical_alignment="bottom")
+    chat_col = st.container()
+    question = pending_question
 
-    question = None
-    with chat_col:
-        st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
+    if show_new_chat_view:
+        with new_chat_placeholder.container():
+            _apply_chat_input_layout_css(new_chat_view=True)
+            question = _render_new_chat_view(disabled=False)
+        if question:
+            st.session_state.pending_user_question = question
+            st.rerun()
+    else:
+        new_chat_placeholder.empty()
+        _apply_chat_input_layout_css(new_chat_view=False)
+        chat_col, stop_col = st.columns([9, 1], vertical_alignment="bottom")
 
-        messages = st.session_state.get("messages", [])
+        with chat_col:
+            st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
 
-        def _consume_assistant_messages(start_index: int) -> int:
-            idx = start_index
-            while idx < len(messages) and isinstance(messages[idx], (AIMessage, AIMessageChunk)):
-                if isinstance(messages[idx], AIMessage):
-                    _render_final_message(messages[idx])
-                idx += 1
-            return idx
+            def _consume_assistant_messages(start_index: int) -> int:
+                idx = start_index
+                while idx < len(messages) and isinstance(messages[idx], (AIMessage, AIMessageChunk)):
+                    if isinstance(messages[idx], AIMessage):
+                        _render_final_message(messages[idx])
+                    idx += 1
+                return idx
 
-        i = 0
-        query_index = 0
-        while i < len(messages):
-            message = messages[i]
-            if isinstance(message, HumanMessage):
-                with chat_col.chat_message("user"):
-                    st.markdown(message.content)
-                with chat_col.chat_message("assistant"):
-                    i = _consume_assistant_messages(i + 1)
-                query_index += 1
-                continue
-            i += 1
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+            i = 0
+            query_index = 0
+            while i < len(messages):
+                message = messages[i]
+                if isinstance(message, HumanMessage):
+                    with chat_col.chat_message("user"):
+                        st.markdown(message.content)
+                    with chat_col.chat_message("assistant"):
+                        i = _consume_assistant_messages(i + 1)
+                    query_index += 1
+                    continue
+                i += 1
 
-        active_controller = st.session_state.get("active_run_controller")
-        controller_busy = bool(active_controller and not getattr(active_controller, "is_cancelled", lambda: False)())
-        input_disabled = controller_busy
-        chat_placeholder = (
-            "Ask a query about project data:"
-            if not input_disabled
-            else "Start a new chat to continue querying."
-        )
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        question = st.chat_input(
-            placeholder=chat_placeholder,
-            key="active_chat_input",
-            disabled=input_disabled,
-        )
+            active_controller = st.session_state.get("active_run_controller")
+            controller_busy = bool(active_controller and not getattr(active_controller, "is_cancelled", lambda: False)())
+            input_disabled = controller_busy
+            chat_placeholder = (
+                NEW_CHAT_QUERY_PLACEHOLDER
+                if not input_disabled
+                else "Start a new chat to continue querying."
+            )
+
+            typed_question = st.chat_input(
+                placeholder=chat_placeholder,
+                key="active_chat_input",
+                disabled=input_disabled,
+            )
+            if not question:
+                question = typed_question
+        if question:
+            st.session_state.stop_button_pending = True
+
+        with stop_col:
+            stop_disabled = not st.session_state.get("stop_button_pending", False)
+            if st.button(
+                label="",
+                icon=":material/stop_circle:",
+                key="stop_active_run_button",
+                type="secondary",
+                disabled=stop_disabled,
+                help="Stop current response",
+                use_container_width=True,
+            ):
+                _cancel_active_run("User pressed stop button")
+                st.toast("Stopping current response...", icon=":material/stop_circle:")
+                st.rerun()
+
     if question:
         st.session_state.stop_button_pending = True
-
-    with stop_col:
-        stop_disabled = not st.session_state.get("stop_button_pending", False)
-        if st.button(
-            label="",
-            icon=":material/stop_circle:",
-            key="stop_active_run_button",
-            type="secondary",
-            disabled=stop_disabled,
-            help="Stop current response",
-            use_container_width=True,
-        ):
-            _cancel_active_run("User pressed stop button")
-            st.toast("Stopping current response...", icon=":material/stop_circle:")
-            st.rerun()
 
     if question:
         user_message = HumanMessage(content=question, additional_kwargs={"type": "query"})
