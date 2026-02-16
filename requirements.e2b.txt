@@ -1,6 +1,6 @@
 # Dedicated dependency set for E2B sandbox template builds.
 langchain_community>=0.4,<0.5
-langchain-google-vertexai>=2
+langchain-google-genai>=4
 langchain-openai>=1.1.7
 sqlalchemy==2.0.30
 langchain-core>=1.0,<2

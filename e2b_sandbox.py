@@ -506,7 +506,7 @@ import b2sdk.v1 as b2
 import psycopg2
 from geoalchemy2 import Geometry
 from langchain_community.utilities import SQLDatabase
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event
 
 PAYLOAD_PREFIX = "__E2B_PAYLOAD__:"
@@ -983,13 +983,16 @@ async def _run():
         global_hierarchy_access = gha_env.lower() not in {"0", "false", "no"}
         thread_id = os.environ.get("SANDBOX_THREAD_ID", "e2b-thread")
 
-        vertex_location = os.environ.get("VERTEX_LOCATION", "global")
-        vertex_endpoint = os.environ.get("VERTEX_ENDPOINT")
-        llm = ChatVertexAI(
+        google_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        google_location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.5,
-            location=vertex_location,
-            api_endpoint=vertex_endpoint,
+            api_key=api_key,
+            project=google_project,
+            location=google_location,
+            vertexai=bool(google_project),
         )
 
         general_sql_query_tool = GeneralSQLQueryTool(
@@ -1251,8 +1254,11 @@ def _build_sandbox_envs(
         "ARTEFACT_BLOB_B2_KEY",
         "ARTEFACT_BLOB_B2_BUCKET",
         "PROJECT_DATA_JSON",
-        "VERTEX_LOCATION",
-        "VERTEX_ENDPOINT",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_GENAI_USE_VERTEXAI",
     ):
         value = os.environ.get(key)
         if value:
@@ -1317,8 +1323,9 @@ def prewarm_sandbox(
         thread_id=thread_id,
         selected_project_key=selected_project_key,
     )
-    envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
     google_creds_text = _load_google_credentials_text()
+    if google_creds_text:
+        envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
 
     run_input = {
         "table_info": table_info,
@@ -1468,9 +1475,9 @@ def execute_remote_sandbox(
         thread_id=thread_id,
         selected_project_key=selected_project_key,
     )
-    envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
-
     google_creds_text = _load_google_credentials_text()
+    if google_creds_text:
+        envs["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/user/google_credentials.json"
     run_input = {
         "table_info": table_info,
         "table_relationship_graph": table_relationship_graph,

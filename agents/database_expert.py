@@ -133,6 +133,26 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         ("human", human_template),
     ])
 
+    # Human instruction used both for structured calls and raw fallback calls.
+    prompt_text = (
+        "Query: {query}\n\n"
+        "Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names "
+        "that are relevant to the specific query context based on field metadata analysis. "
+        "Additionally, identify other relevant keys from query semantics, and select their relevant fields.\n\n"
+        "Return JSON with instrument keys and their relevant fields only."
+    ).format(query=query, verified_str=verified_str)
+
+    # Fallback prompt when explicit cache retrieval is unavailable. This reconstructs
+    # the prompt from the same content that would have been cached + the runtime query text.
+    reconstructed_cached_context = setup.build_instrument_selection_cached_context(context)
+    cached_missing_prompt = ChatPromptTemplate.from_messages([
+        ("system", reconstructed_cached_context),
+        ("human", "{prompt_text}"),
+    ])
+    cached_missing_inputs = {
+        "prompt_text": prompt_text,
+    }
+
     def _race_llm_calls(
         fn: Callable[[], T],
         parallel_calls: int,
@@ -174,7 +194,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
 
     result: list[dict[str, Any]] | None = None
     try:
-        cached_context = setup.build_instrument_selection_cached_context(context)
+        cached_context = reconstructed_cached_context
         cached_content_id = setup.get_or_refresh_cached_content(
             cache_key="instrument_selection",
             content_text=cached_context,
@@ -187,14 +207,8 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             method="json_mode",
         )
 
-        # Prompt to use if injecting cached content in `cached_llm_content/instrument_selection_prompt_static.md`
-        prompt_text = (
-            "Query: {query}\n\n"
-            "Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names "
-            "that are relevant to the specific query context based on field metadata analysis. "
-            "Additionally, identify other relevant keys from query semantics, and select their relevant fields.\n\n"
-            "Return JSON with instrument keys and their relevant fields only."
-        ).format(query=query, verified_str=verified_str)
+        # Prompt to use when injecting cached content from
+        # `cached_llm_content/instrument_selection_prompt_static.md`.
         message = HumanMessage(content=prompt_text)
         if cached_content_id:
             structured_response = _race_llm_calls(
@@ -217,9 +231,16 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         logger.warning("Structured output failed; falling back to raw parsing: %s", structured_error)
 
     if result is None:
-        chain = prompt_text | llm
+        # Prefer reconstructed cached prompt when explicit cache lookup fails,
+        # but retain the original prompt path as a safety fallback.
+        try:
+            chain = cached_missing_prompt | llm
+            invoke_inputs = cached_missing_inputs
+        except Exception:
+            chain = prompt | llm
+            invoke_inputs = call_inputs
         response = _race_llm_calls(
-            lambda: chain.invoke(call_inputs),
+            lambda: chain.invoke(invoke_inputs),
             parallel_calls=2,
             label="instrument_selection_raw",
         )

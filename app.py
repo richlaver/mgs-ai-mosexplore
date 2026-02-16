@@ -35,9 +35,8 @@ def perform_setup():
     setup_logging()
     import setup
     setup.set_e2b_api_key()
-    setup.set_google_credentials()
+    setup.set_google_genai_env()
     setup.set_project_data_env()
-    setup.set_vertex_env()
     setup.set_e2b_template_env()
     setup.set_parallel_executions_env()
     setup.enable_tracing()

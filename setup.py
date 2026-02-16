@@ -20,10 +20,10 @@ import requests
 import streamlit as st
 from google.auth import default as google_auth_default
 from google.auth.transport.requests import AuthorizedSession, Request
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase as BaseSQLDatabase
-from utils.cancelable_llm import InterruptibleChatVertexAI, clone_llm as clone_interruptible_llm
+from utils.cancelable_llm import InterruptibleChatGoogleGenerativeAI, clone_llm as clone_interruptible_llm
 from utils.cancelable_sql import CancelableSQLDatabase
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from geoalchemy2 import Geometry
@@ -55,15 +55,19 @@ def _normalize_api_endpoint(raw: str) -> str:
     return raw.replace("https://", "").replace("http://", "").rstrip("/")
 
 
-VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global")
-VERTEX_ENDPOINT = _normalize_api_endpoint(
+GOOGLE_CLOUD_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("VERTEX_LOCATION", "global")
+GOOGLE_CLOUD_ENDPOINT = _normalize_api_endpoint(
     os.environ.get(
-        "VERTEX_ENDPOINT",
-        "aiplatform.googleapis.com"
-        if VERTEX_LOCATION == "global"
-        else f"{VERTEX_LOCATION}-aiplatform.googleapis.com",
+        "GOOGLE_CLOUD_ENDPOINT",
+        os.environ.get(
+            "VERTEX_ENDPOINT",
+            "aiplatform.googleapis.com"
+            if GOOGLE_CLOUD_LOCATION == "global"
+            else f"{GOOGLE_CLOUD_LOCATION}-aiplatform.googleapis.com",
+        ),
     )
 )
+os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
 PARALLEL_EXECUTIONS = 3
 
@@ -73,7 +77,7 @@ _GOOGLE_CREDENTIALS_SET = False
 
 
 @dataclass
-class VertexConfig:
+class GoogleGenAIConfig:
     project_id: str
     location: str
     model_id: str
@@ -91,10 +95,26 @@ class VertexConfig:
         return f"https://{self.api_endpoint}/v1"
 
 
-def _get_authed_session() -> AuthorizedSession:
+def _get_google_api_key() -> str:
+    key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if key:
+        os.environ.setdefault("GOOGLE_API_KEY", str(key))
+        return str(key)
+    try:
+        key = st.secrets.get("GOOGLE_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        key = None
+    if not key:
+        raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY missing in environment or secrets")
+    os.environ["GOOGLE_API_KEY"] = str(key)
+    return str(key)
+
+
+def _get_api_session() -> AuthorizedSession:
+    # Vertex context-cache endpoints require OAuth2 credentials (API keys are not accepted).
+    set_google_credentials()
     credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     if not credentials.valid:
-        logger.info("Refreshing Google credentials for Vertex cache")
         credentials.refresh(Request())
     return AuthorizedSession(credentials)
 
@@ -114,13 +134,12 @@ def _get_llm_model_id(llm: Any, fallback: str) -> str:
     return fallback
 
 
-def _get_vertex_config_for_cache(llm: Any) -> VertexConfig:
-    set_google_credentials()
+def _get_google_config_for_cache(llm: Any) -> GoogleGenAIConfig:
     project_id = get_project_id()
-    location = os.environ.get("VERTEX_LOCATION", VERTEX_LOCATION)
-    api_endpoint = _normalize_api_endpoint(os.environ.get("VERTEX_ENDPOINT", VERTEX_ENDPOINT))
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION)
+    api_endpoint = _normalize_api_endpoint(os.environ.get("GOOGLE_CLOUD_ENDPOINT", GOOGLE_CLOUD_ENDPOINT))
     model_id = _get_llm_model_id(llm, "gemini-2.5-flash")
-    return VertexConfig(
+    return GoogleGenAIConfig(
         project_id=project_id,
         location=location,
         model_id=model_id,
@@ -220,7 +239,7 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
     instrument_data = normalize_instrument_context(instrument_payload)
     context_text = build_instrument_search_context(instrument_data)
     cached_context = build_instrument_selection_cached_context(context_text)
-    if not isinstance(llm, ChatVertexAI):
+    if not isinstance(llm, ChatGoogleGenerativeAI):
         return None
     return ensure_cached_content(
         cache_key="instrument_selection",
@@ -232,8 +251,8 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
 
 
 def _create_cached_content(
-    session: AuthorizedSession,
-    config: VertexConfig,
+    session: requests.Session,
+    config: GoogleGenAIConfig,
     context: str,
     display_prefix: str = "codeact-coder-cache",
 ) -> str:
@@ -302,8 +321,8 @@ def ensure_cached_content(
     ):
         return _CACHED_CONTENT_IDS[cache_key]
 
-    config = _get_vertex_config_for_cache(llm)
-    session = _get_authed_session()
+    config = _get_google_config_for_cache(llm)
+    session = _get_api_session()
     cached_name = _create_cached_content(session, config, content_text, display_prefix=display_prefix)
     cached_id = cached_name.split("/")[-1]
 
@@ -336,8 +355,8 @@ def get_cached_content_id(cache_key: str) -> Optional[str]:
 def is_cached_content_active(cached_id: str, llm: Any) -> bool:
     if not cached_id:
         return False
-    config = _get_vertex_config_for_cache(llm)
-    session = _get_authed_session()
+    config = _get_google_config_for_cache(llm)
+    session = _get_api_session()
     url = f"{config.base_url}/projects/{config.project_id}/locations/{config.location}/cachedContents/{cached_id}"
     resp = session.get(url, timeout=10)
     if resp.status_code == 200:
@@ -410,13 +429,18 @@ def set_project_data_env() -> None:
     logging.info("Set PROJECT_DATA_JSON from secrets")
 
 
-def set_vertex_env() -> None:
-    if not os.environ.get("VERTEX_LOCATION"):
-        os.environ["VERTEX_LOCATION"] = VERTEX_LOCATION
-        logging.info("Set VERTEX_LOCATION from default")
-    if not os.environ.get("VERTEX_ENDPOINT"):
-        os.environ["VERTEX_ENDPOINT"] = _normalize_api_endpoint(VERTEX_ENDPOINT)
-        logging.info("Set VERTEX_ENDPOINT from default")
+def set_google_genai_env() -> None:
+    os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    if not os.environ.get("GOOGLE_CLOUD_LOCATION"):
+        os.environ["GOOGLE_CLOUD_LOCATION"] = GOOGLE_CLOUD_LOCATION
+        logging.info("Set GOOGLE_CLOUD_LOCATION from default")
+    if not os.environ.get("GOOGLE_CLOUD_ENDPOINT"):
+        os.environ["GOOGLE_CLOUD_ENDPOINT"] = _normalize_api_endpoint(GOOGLE_CLOUD_ENDPOINT)
+        logging.info("Set GOOGLE_CLOUD_ENDPOINT from default")
+    if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = get_project_id()
+        logging.info("Set GOOGLE_CLOUD_PROJECT from project_id")
+    _get_google_api_key()
 
 
 def set_e2b_template_env() -> None:
@@ -643,14 +667,16 @@ def build_llm(
 ) -> Any:
     provider_cfg = _get_provider_config(provider)
     lc_type = provider_cfg.get("lc_type")
-    if lc_type is ChatVertexAI:
-        set_vertex_env()
-        return InterruptibleChatVertexAI(
+    if lc_type is ChatGoogleGenerativeAI:
+        set_google_genai_env()
+        return InterruptibleChatGoogleGenerativeAI(
             model=model_name,
             temperature=temperature,
+            api_key=_get_google_api_key(),
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
+            vertexai=True,
             max_output_tokens=max_tokens,
-            location=VERTEX_LOCATION,
-            api_endpoint=VERTEX_ENDPOINT,
         )
     if lc_type is ChatOpenAI:
         api_key = _ensure_provider_api_key(provider)
@@ -694,7 +720,7 @@ def build_llm_from_library(
 
 def _normalize_llm_overrides(overrides: Dict[str, Any], target: str) -> Dict[str, Any]:
     normalized = dict(overrides)
-    if target == "vertex":
+    if target == "google":
         if "max_output_tokens" not in normalized and "max_tokens" in normalized:
             normalized["max_output_tokens"] = normalized.get("max_tokens")
         normalized.pop("max_tokens", None)
@@ -785,11 +811,21 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
         #     max_tokens=4096,
         #     thinking_mode=False,
         # ),
-        "CODING": build_llm_from_library(
-            "KIMI_K2_5_TOGETHER",
+        # "CODING": build_llm_from_library(
+        #     "KIMI_K2_5_TOGETHER",
+        #     temperature=0.1,
+        #     max_tokens=4096,
+        #     thinking_mode=False,
+        # ),
+        "CODING": InterruptibleChatGoogleGenerativeAI(
+            model="gemini-3-flash-preview",
             temperature=0.1,
-            max_tokens=4096,
-            thinking_mode=False,
+            api_key=_get_google_api_key(),
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT") or get_project_id(),
+            location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
+            vertexai=True,
+            max_output_tokens=4096,
+            thinking_budget=1000,
         ),
     }
 
@@ -804,8 +840,8 @@ def get_llm(model: str = "FAST") -> Any:
 
 def clone_llm_with_overrides(llm: Any, **overrides) -> Any:
     """Clone an LLM while preserving cancellation awareness where possible."""
-    if isinstance(llm, ChatVertexAI):
-        normalized_overrides = _normalize_llm_overrides(overrides, "vertex")
+    if isinstance(llm, ChatGoogleGenerativeAI):
+        normalized_overrides = _normalize_llm_overrides(overrides, "google")
         return clone_interruptible_llm(llm, **normalized_overrides)
     if isinstance(llm, ChatOpenAI):
         normalized_overrides = _normalize_llm_overrides(overrides, "openai")
@@ -1028,11 +1064,22 @@ def get_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
 
 
 def get_project_id() -> str:
-    """Parse and return the Google project_id from GOOGLE_CREDENTIALS_JSON."""
-    credentials_json = st.secrets["GOOGLE_CREDENTIALS_JSON"]
-    project_id = json.loads(credentials_json).get("project_id")
+    """Return Google project_id from env/secrets, with credentials JSON as fallback."""
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not project_id:
-        raise ValueError("project_id not found in GOOGLE_CREDENTIALS_JSON")
+        try:
+            project_id = st.secrets.get("GOOGLE_CLOUD_PROJECT")
+        except Exception:
+            project_id = None
+    if not project_id:
+        try:
+            credentials_json = st.secrets["GOOGLE_CREDENTIALS_JSON"]
+        except Exception:
+            credentials_json = None
+        if credentials_json:
+            project_id = json.loads(credentials_json).get("project_id")
+    if not project_id:
+        raise ValueError("project_id not found in GOOGLE_CLOUD_PROJECT or GOOGLE_CREDENTIALS_JSON")
     logging.info("Parsed project_id: %s", project_id)
     return project_id
 

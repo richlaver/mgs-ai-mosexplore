@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 PROVIDERS: Dict[str, Dict[str, Any]] = {
-    "vertex": {
-        "provider": "vertex",
+    "google": {
+        "provider": "google",
         "base_url": None,
-        "lc_type": ChatVertexAI,
-        "api_key_env": None,
+        "lc_type": ChatGoogleGenerativeAI,
+        "api_key_env": "GOOGLE_API_KEY",
     },
     "together": {
         "provider": "together",
@@ -35,11 +35,11 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 LLM_MODELS: Dict[str, Dict[str, str]] = {
     "GEMINI_2_5_FLASH_LITE": {
         "name": "gemini-2.5-flash-lite",
-        "provider": "vertex",
+        "provider": "google",
     },
     "GEMINI_2_5_FLASH": {
         "name": "gemini-2.5-flash",
-        "provider": "vertex",
+        "provider": "google",
     },
     "KIMI_K2_5_TOGETHER": {
         "name": "moonshotai/Kimi-K2.5",

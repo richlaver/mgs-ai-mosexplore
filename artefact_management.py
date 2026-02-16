@@ -6,7 +6,7 @@ import logging
 
 import psycopg2
 from b2sdk.v1 import DownloadDestBytes, AbstractProgressListener
-from langchain_google_vertexai import VertexAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from utils.run_cancellation import get_active_run_controller, RunCancelledError
 
 TABLE_NAME = "mgs-explore-specificquery-artefacts"
@@ -18,10 +18,9 @@ logger = logging.getLogger(__name__)
 
 def _get_embeddings():
     """
-    Initialize VertexAI embeddings. Assumes Google credentials are set via os.environ["GOOGLE_APPLICATION_CREDENTIALS"].
-    Project ID should be set appropriately; here assuming it's configured externally.
+    Initialize Google embeddings using API key authentication.
     """
-    return VertexAIEmbeddings(model="text-embedding-004")  # Dimension: 768
+    return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")  # Dimension: 768
 
 def _vector_to_str(vec):
     """Convert vector list to PostgreSQL-compatible string for insertion/query."""

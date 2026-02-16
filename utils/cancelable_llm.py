@@ -4,15 +4,15 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from utils.run_cancellation import RunCancelledError, RunCancellationController, get_active_run_controller
 
 logger = logging.getLogger(__name__)
 
 
-class InterruptibleChatVertexAI(ChatVertexAI):
-    """ChatVertexAI subclass that checks the active cancellation controller."""
+class InterruptibleChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+    """ChatGoogleGenerativeAI subclass that checks the active cancellation controller."""
 
     def __init__(
         self,
@@ -109,22 +109,29 @@ class InterruptibleChatVertexAI(ChatVertexAI):
             self._stop_cancel_watch(controller, handle)
 
 
-def clone_llm(llm: ChatVertexAI, **overrides: Any) -> ChatVertexAI:
-    """Clone a ChatVertexAI preserving interruptible behavior."""
+def clone_llm(llm: ChatGoogleGenerativeAI, **overrides: Any) -> ChatGoogleGenerativeAI:
+    """Clone a ChatGoogleGenerativeAI preserving interruptible behavior."""
 
     base_params = {
         "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
         "temperature": getattr(llm, "temperature", None),
+        "max_tokens": getattr(llm, "max_tokens", None),
         "max_output_tokens": getattr(llm, "max_output_tokens", None),
         "top_p": getattr(llm, "top_p", None),
         "top_k": getattr(llm, "top_k", None),
         "safety_settings": getattr(llm, "safety_settings", None),
         "location": getattr(llm, "location", None),
         "project": getattr(llm, "project", None),
+        "vertexai": getattr(llm, "vertexai", None),
+        "api_key": getattr(llm, "google_api_key", None) or getattr(llm, "api_key", None),
+        "thinking_budget": getattr(llm, "thinking_budget", None),
     }
     base_params.update({k: v for k, v in overrides.items() if v is not None})
+    if "max_output_tokens" not in base_params and base_params.get("max_tokens") is not None:
+        base_params["max_output_tokens"] = base_params["max_tokens"]
+    base_params.pop("max_tokens", None)
     filtered = {k: v for k, v in base_params.items() if v is not None}
     if "model" not in filtered:
-        raise ValueError("Cannot clone ChatVertexAI without a model name")
-    target_cls = llm.__class__ if isinstance(llm, ChatVertexAI) else ChatVertexAI
+        raise ValueError("Cannot clone ChatGoogleGenerativeAI without a model name")
+    target_cls = llm.__class__ if isinstance(llm, ChatGoogleGenerativeAI) else ChatGoogleGenerativeAI
     return target_cls(**filtered)
