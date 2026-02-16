@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,7 +65,7 @@ VERTEX_ENDPOINT = _normalize_api_endpoint(
     )
 )
 E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
-PARALLEL_EXECUTIONS = 2
+PARALLEL_EXECUTIONS = 3
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
@@ -457,29 +458,18 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
     template_name = template_name or os.getenv("E2B_TEMPLATE_NAME", E2B_TEMPLATE_NAME)
     os.environ["E2B_TEMPLATE_NAME"] = template_name
 
-    packages = [
-        "langchain_community",
-        "langchain-google-vertexai",
-        "langchain-openai",
-        "sqlalchemy",
-        "langchain-core",
-        "langgraph",
-        "sqlparse",
-        "pydantic",
-        "typing_extensions",
-        "mysql-connector-python",
-        "geoalchemy2",
-        "numpy",
-        "pandas",
-        "plotly",
-        "pyproj",
-        "b2sdk",
-        "psycopg2-binary",
-        "requests",
-        "sqlglot",
-        "streamlit",
-        "tabulate",
+    requirements_file = "requirements.e2b.txt"
+    requirements_path = repo_root / requirements_file
+    if not requirements_path.exists():
+        raise FileNotFoundError(f"E2B requirements file not found: {requirements_path}")
+    requirement_specs = [
+        line.strip()
+        for line in requirements_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
     ]
+    if not requirement_specs:
+        raise ValueError(f"E2B requirements file is empty: {requirements_path}")
+    quoted_requirement_specs = [shlex.quote(spec) for spec in requirement_specs]
 
     logger.info("Building E2B sandbox template: %s", template_name)
 
@@ -488,6 +478,8 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
         "parameters.py",
         "table_info.py",
         "artefact_management.py",
+        "setup.py",
+        "llm_library.py",
     ]
     source_dirs = ["agents", "tools", "utils"]
 
@@ -501,9 +493,6 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
         template = (
             Template()
             .from_template("code-interpreter-v1")
-            .set_user("root")
-            .apt_install(["bash"])
-            .run_cmd("chmod 755 /bin/bash")
             .set_user("user")
             .set_envs({
                 "PYTHONPATH": "/root",
@@ -511,7 +500,7 @@ def build_e2b_sandbox_template(template_name: Optional[str] = None) -> Any:
                 "MGS_REPO_ROOT": "/root",
             })
             .set_workdir("/root")
-            .pip_install(packages)
+            .pip_install(quoted_requirement_specs)
             .copy(source_files, "/root/")
             .copy("agents/", "/root/agents/")
             .copy("tools/", "/root/tools/")

@@ -57,6 +57,36 @@ def _resample_new_chat_suggestions() -> list[str]:
     return sampled
 
 
+def _is_suggestion_generator_message(metadata: dict) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    origin = metadata.get("origin")
+    return isinstance(origin, dict) and origin.get("process") == "suggestion_generator"
+
+
+def _render_latest_response_suggestion_buttons(placeholder, suggestions: list[str], disabled: bool = False) -> str | None:
+    clean = [s.strip() for s in suggestions if isinstance(s, str) and s.strip()]
+    if not clean:
+        placeholder.empty()
+        return None
+
+    selected = None
+    with placeholder.container():
+        st.markdown('<div style="height: 56px;"></div>', unsafe_allow_html=True)
+        _, right_col = st.columns([1, 4])
+        with right_col:
+            for i, suggestion in enumerate(clean):
+                if st.button(
+                    suggestion,
+                    key=f"latest_response_suggestion_button_{i}",
+                    use_container_width=True,
+                    disabled=disabled,
+                ):
+                    selected = suggestion
+
+    return selected
+
+
 def _get_new_chat_suggestions() -> list[str]:
     suggestions = st.session_state.get("new_chat_suggestions")
     if isinstance(suggestions, list) and len(suggestions) >= 3:
@@ -335,6 +365,7 @@ def new_chat() -> None:
     _cancel_active_run("User pressed new chat button")
     st.session_state.clear_chat = True
     _resample_new_chat_suggestions()
+    st.session_state.latest_response_suggestions = []
     try:
         clear_stream_message_queue()
     except Exception:
@@ -496,11 +527,11 @@ def render_initial_ui() -> None:
         parallel_count = _get_parallel_executions_from_env()
 
         min_successful = min(
-            st.session_state.get("min_successful_responses", 3),
+            st.session_state.get("min_successful_responses", 1),
             parallel_count,
         )
         st.session_state.min_successful_responses = min_successful
-        st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.7))
+        st.session_state.min_explained_variance = float(st.session_state.get("min_explained_variance", 0.5))
 
         st.session_state.graph = build_graph(
             llms=st.session_state.llms,
@@ -642,26 +673,26 @@ def render_initial_ui() -> None:
                 )
         parallel_count = _get_parallel_executions_from_env()
         st.session_state.min_successful_responses = min(parallel_count, st.session_state.min_successful_responses)
-        if parallel_count > 1:
-            st.slider(
-                label="Minimum No. of Successful Responses to Await",
-                min_value=1,
-                max_value=parallel_count,
-                step=1,
-                key="min_successful_responses",
-                help="Stop early when consistency is stable after at least this many successful responses.",
-                on_change=_rebuild_graph,
-            )
-        else:
-            st.session_state.min_successful_responses = 1
-        st.slider(
-            label="Minimum Explained Variance",
-            min_value=0.5,
-            max_value=1.0,
-            key="min_explained_variance",
-            help="Regularised Explained Variance threshold for Intelligent mode termination.",
-            on_change=_rebuild_graph,
-        )
+        # if parallel_count > 1:
+        #     st.slider(
+        #         label="Minimum No. of Successful Responses to Await",
+        #         min_value=1,
+        #         max_value=parallel_count,
+        #         step=1,
+        #         key="min_successful_responses",
+        #         help="Stop early when consistency is stable after at least this many successful responses.",
+        #         on_change=_rebuild_graph,
+        #     )
+        # else:
+        #     st.session_state.min_successful_responses = 1
+        # st.slider(
+        #     label="Minimum Explained Variance",
+        #     min_value=0.5,
+        #     max_value=1.0,
+        #     key="min_explained_variance",
+        #     help="Regularised Explained Variance threshold for Intelligent mode termination.",
+        #     on_change=_rebuild_graph,
+        # )
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown('<div class="app-title">MISSION EXPLORE</div>', unsafe_allow_html=True)
@@ -706,6 +737,8 @@ def render_initial_ui() -> None:
 
     if "new_chat_suggestions" not in st.session_state:
         _resample_new_chat_suggestions()
+    if "latest_response_suggestions" not in st.session_state:
+        st.session_state.latest_response_suggestions = []
 
     pre_setup_new_chat_placeholder = st.empty()
 
@@ -718,6 +751,8 @@ def render_initial_ui() -> None:
 
 def _render_final_message(message: AIMessage) -> None:
     metadata = message.additional_kwargs or {}
+    if _is_suggestion_generator_message(metadata):
+        return
     artefacts = metadata.get("artefacts")
     if not artefacts:
         if message.content:
@@ -744,6 +779,10 @@ def _render_final_message(message: AIMessage) -> None:
                 blob = artefact_entry['blob']
                 try:
                     fig_json = json.loads(blob.decode('utf-8'))
+                    if 'layout' in fig_json and 'template' in fig_json['layout']:
+                        tpl_data = fig_json['layout']['template'].get('data', {})
+                        if 'scattermap' in tpl_data:
+                            del tpl_data['scattermap']
                     fig = pio.from_json(json.dumps(fig_json))
                     with st.container():
                         st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
@@ -854,6 +893,21 @@ def render_chat_content() -> None:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+            latest_response_suggestions_placeholder = st.empty()
+            latest_response_suggestions = [
+                s for s in st.session_state.latest_response_suggestions
+                if isinstance(s, str) and s.strip()
+            ]
+            selected_suggestion = _render_latest_response_suggestion_buttons(
+                latest_response_suggestions_placeholder,
+                latest_response_suggestions,
+                disabled=False,
+            )
+            if selected_suggestion and not question:
+                latest_response_suggestions_placeholder.empty()
+                st.session_state.latest_response_suggestions = []
+                question = selected_suggestion
+
             active_controller = st.session_state.get("active_run_controller")
             controller_busy = bool(active_controller and not getattr(active_controller, "is_cancelled", lambda: False)())
             input_disabled = controller_busy
@@ -868,6 +922,9 @@ def render_chat_content() -> None:
                 key="active_chat_input",
                 disabled=input_disabled,
             )
+            if typed_question:
+                latest_response_suggestions_placeholder.empty()
+                st.session_state.latest_response_suggestions = []
             if not question:
                 question = typed_question
         if question:
@@ -893,6 +950,7 @@ def render_chat_content() -> None:
 
     if question:
         user_message = HumanMessage(content=question, additional_kwargs={"type": "query"})
+        st.session_state.latest_response_suggestions = []
         st.session_state.messages.append(user_message)
         st.session_state.new_message_added = True
         with chat_col.chat_message("user"):
@@ -929,6 +987,7 @@ def render_chat_content() -> None:
                 with st.chat_message("assistant"):
                     status_container_placeholder = st.empty()
                     status_container = status_container_placeholder.container()
+                    streamed_response_suggestions: list[str] = []
                     status_by_stage: dict[int, Any] = {}
                     status_child_slots: dict[int, Any] = {}
                     parallel_status_child_slots: dict[int, list[Any]] = {}
@@ -1101,7 +1160,12 @@ def render_chat_content() -> None:
                                         if not st.session_state.get("developer_view", False):
                                             _clear_status_container()
                                         st.session_state.messages.append(message)
-                                        _render_final_message(message)
+                                        if _is_suggestion_generator_message(msg_metadata):
+                                            text = (message.content or "").strip()
+                                            if text:
+                                                streamed_response_suggestions.append(text)
+                                        else:
+                                            _render_final_message(message)
                                     elif msg_metadata.get("is_child") is True:
                                         _render_child_message(message.content, msg_metadata)
                                     else:
@@ -1129,8 +1193,13 @@ def render_chat_content() -> None:
                                     _complete_all_statuses()
                                     if not st.session_state.get("developer_view", False):
                                         _clear_status_container()
-                                    final_message = AIMessage(content=queued.get("content") or "", additional_kwargs=queued_metadata)
-                                    _render_final_message(final_message)
+                                    if _is_suggestion_generator_message(queued_metadata):
+                                        queued_text = (queued.get("content") or "").strip()
+                                        if queued_text:
+                                            streamed_response_suggestions.append(queued_text)
+                                    else:
+                                        final_message = AIMessage(content=queued.get("content") or "", additional_kwargs=queued_metadata)
+                                        _render_final_message(final_message)
                                     pending_payload = None
                                     pending_emit_at = None
                                 elif queued_metadata.get("origin", {}).get("branch_id") is not None:
@@ -1157,6 +1226,21 @@ def render_chat_content() -> None:
                     if pending_payload:
                         pending_metadata = pending_payload.get("additional_kwargs") or {}
                         _render_child_message(pending_payload.get("content") or "", pending_metadata)
+
+                    st.session_state.latest_response_suggestions = [
+                        s for s in streamed_response_suggestions if isinstance(s, str) and s.strip()
+                    ]
+                    latest_response_suggestions_placeholder = st.empty()
+                    selected_suggestion = _render_latest_response_suggestion_buttons(
+                        latest_response_suggestions_placeholder,
+                        st.session_state.latest_response_suggestions,
+                        disabled=False,
+                    )
+                    if selected_suggestion:
+                        latest_response_suggestions_placeholder.empty()
+                        st.session_state.latest_response_suggestions = []
+                        st.session_state.pending_user_question = selected_suggestion
+                        st.rerun()
                     
         except GeneratorExit:
             logger.info("Stream generator closed by Streamlit runtime; treating as cancelled.")

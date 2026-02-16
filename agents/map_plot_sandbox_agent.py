@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from tools.create_output_toolkit import MapPlotTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from tools.artefact_toolkit import WriteArtefactTool
+from setup import get_map_spatial_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,6 @@ def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQ
     center_default = None
     radius_default = None
     try:
-        from setup import get_map_spatial_defaults  # Local import to avoid circulars during non-app runs
         defaults = get_map_spatial_defaults(sql_tool.db) if hasattr(sql_tool, "db") else None
         if defaults:
             center_default = (

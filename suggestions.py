@@ -58,7 +58,7 @@ suggested_queries = [
 	"Plot a map showing the change in inclinometer deflection over the past week",
 	"Plot a map showing current inclinometer deflections",
 	"Plot a map showing the change in settlement between last Friday and this Friday",
-	"Plot a map showing changes in groundwater level over the past weekend",
+	"Plot a map showing changes in groundwater level from last Friday to the Monday after",
 	"Plot the change in settlement with time at the marker settling most rapidly",
 	"Plot a map showing changes in groundwater level over the past three months",
 ]

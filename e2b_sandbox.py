@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional
 
 from e2b_code_interpreter import AsyncSandbox
-from utils.run_cancellation import get_active_run_controller
+from utils.run_cancellation import RunCancellationController, RunCancelledError, get_active_run_controller
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +380,37 @@ def _run_async_with_retry(coro_factory: Callable[[], Any], *, timeout: Optional[
             raise
     if last_exc is not None:
         raise last_exc
+
+
+async def _create_sandbox_with_cancellation(
+    *,
+    template_name: str,
+    timeout: int,
+    envs: Dict[str, str],
+    request_timeout: float,
+    metadata: Dict[str, str],
+    controller: Optional[RunCancellationController],
+    poll_interval: float = 0.2,
+) -> AsyncSandbox:
+    create_task = asyncio.create_task(
+        AsyncSandbox.create(
+            template=template_name,
+            timeout=timeout,
+            envs=envs,
+            request_timeout=request_timeout,
+            metadata=metadata,
+        )
+    )
+
+    while True:
+        done, _ = await asyncio.wait({create_task}, timeout=max(0.05, poll_interval))
+        if create_task in done:
+            return await create_task
+        if controller is not None and controller.is_cancelled():
+            create_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await create_task
+            raise RunCancelledError("Run cancelled during sandbox creation")
 
 
 def _make_step_payload(content: str, typ: str, *, origin: str = "sandbox") -> Dict[str, Any]:
@@ -1255,6 +1287,7 @@ def prewarm_sandbox(
     global_hierarchy_access: bool,
     selected_project_key: Optional[str] = None,
     log_callback: Optional[Callable[[str, str], None]] = None,
+    controller: Optional[RunCancellationController] = None,
 ) -> SandboxSlot:
     def _log(message: str, level: str = "debug") -> None:
         if log_callback:
@@ -1297,14 +1330,23 @@ def prewarm_sandbox(
     _log(f"Sandbox slot {slot_id} creating (template={template_name})", "debug")
 
     async def _run_async() -> None:
-        controller = get_active_run_controller()
+        active_controller = controller or get_active_run_controller()
         try:
-            sandbox = await AsyncSandbox.create(
-                template=template_name,
+            if active_controller is not None and active_controller.is_cancelled():
+                slot.cancelled = True
+                with _SANDBOX_POOL_CONDITION:
+                    slot.status = "cancelled"
+                    _SANDBOX_POOL_CONDITION.notify_all()
+                _remove_pool_slot(slot_id)
+                return
+
+            sandbox = await _create_sandbox_with_cancellation(
+                template_name=template_name,
                 timeout=500,
                 envs=envs,
                 request_timeout=500,
                 metadata=slot.metadata,
+                controller=active_controller,
             )
             slot.sandbox = sandbox
             with _SANDBOX_POOL_CONDITION:
@@ -1321,8 +1363,8 @@ def prewarm_sandbox(
                 _remove_pool_slot(slot_id)
                 return
 
-            if controller is not None:
-                slot.cancel_handle = controller.register_e2b_sandbox(
+            if active_controller is not None:
+                slot.cancel_handle = active_controller.register_e2b_sandbox(
                     sandbox,
                     label=f"e2b_sandbox_prewarm_{slot_id}",
                     kill_callback=lambda: _kill_sandbox_sync(sandbox),
@@ -1366,6 +1408,18 @@ def prewarm_sandbox(
                 slot.status = "ready"
                 _SANDBOX_POOL_CONDITION.notify_all()
             _log(f"Sandbox slot {slot_id} preinit complete", "debug")
+        except RunCancelledError:
+            slot.cancelled = True
+            with _SANDBOX_POOL_CONDITION:
+                slot.status = "cancelled"
+                _SANDBOX_POOL_CONDITION.notify_all()
+            if slot.sandbox is not None:
+                try:
+                    await slot.sandbox.kill()
+                except Exception:
+                    pass
+            _remove_pool_slot(slot_id)
+            _log(f"Sandbox slot {slot_id} prewarm cancelled", "debug")
         except Exception as exc:
             slot.last_error = str(exc)
             if slot.sandbox is not None:
@@ -1404,6 +1458,7 @@ def execute_remote_sandbox(
     stream_sandbox_logs: bool = True,
 ) -> Generator[dict, None, None]:
     logger.info("[E2B Sandbox] execute_remote_sandbox start thread_id=%s user_id=%s", thread_id, user_id)
+    controller = get_active_run_controller()
 
     template_name = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
     _assert_template_ready(template_name)
@@ -1469,7 +1524,6 @@ def execute_remote_sandbox(
                 _queue_payload(payload)
 
     async def _run_async() -> None:
-        controller = get_active_run_controller()
         active_count = _increment_active_executions()
         parallel_count = _get_parallel_executions()
         if active_count >= parallel_count:
@@ -1497,12 +1551,13 @@ def execute_remote_sandbox(
                 "purpose": "mgs_on_demand",
             }
             if sandbox is None:
-                sandbox = await AsyncSandbox.create(
-                    template=template_name,
+                sandbox = await _create_sandbox_with_cancellation(
+                    template_name=template_name,
                     timeout=500,
                     envs=envs,
                     request_timeout=500,
                     metadata=metadata,
+                    controller=controller,
                 )
                 if controller is not None:
                     cancel_handle = controller.register_e2b_sandbox(
@@ -1588,6 +1643,10 @@ def execute_remote_sandbox(
         try:
             item = output_queue.get(timeout=timeout)
         except queue.Empty:
+            if controller is not None and controller.is_cancelled():
+                with contextlib.suppress(Exception):
+                    future.cancel()
+                raise RunCancelledError("Run cancelled while waiting for sandbox output")
             if not got_first and first_deadline is not None and time.monotonic() >= first_deadline:
                 raise TimeoutError(f"No sandbox output within {first_payload_timeout}s (likely not started)")
             continue

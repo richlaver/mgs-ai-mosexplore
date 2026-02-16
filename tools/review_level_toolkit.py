@@ -375,7 +375,7 @@ class GetReviewStatusByValueTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_status_from_value/batch] SQL=%s", sql)
                 result = self.sql_tool._run(sql)
-                logger.info("[get_review_status_from_value/batch] Raw result=%s", result)
+                logger.info("[get_review_status_from_value/batch] Raw result=%s", result[:100])
             except Exception as e:
                 return f"ERROR: batch query failed: {e}"
 
@@ -557,7 +557,7 @@ class GetReviewStatusByTimeTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_status_from_time/batch] SQL=%s", sql)
                 result = self.sql_tool._run(sql)
-                logger.info("[get_review_status_from_time/batch] Raw result=%s", result)
+                logger.info("[get_review_status_from_time/batch] Raw result=%s", result[:100])
             except Exception as e:
                 return f"ERROR: batch query failed: {e}"
             if _is_no_data(result):
@@ -679,7 +679,7 @@ class GetReviewSchemaTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_schema/batch] SQL=%s", sql)
                 result = self.sql_tool._run(sql)
-                logger.info("[get_review_schema/batch] Raw result=%s", result)
+                logger.info("[get_review_schema/batch] Raw result=%s", result[:100])
             except Exception as e:
                 return f"ERROR: schema batch query failed: {e}"
             if _is_no_data(result):
@@ -804,7 +804,7 @@ class GetReviewValueTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_value/batch] SQL=%s", sql)
                 result = self.sql_tool._run(sql)
-                logger.info("[get_review_value/batch] Raw result=%s", result)
+                logger.info("[get_review_value/batch] Raw result=%s", result[:100])
             except Exception as e:
                 return f"ERROR: value batch query failed: {e}"
             if _is_no_data(result):
@@ -1014,7 +1014,7 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_breached_instruments] SQL=%s", rendered)
                 result = self.sql_tool._run(rendered)
-                logger.info("[get_breached_instruments] Raw result=%s", result)
+                logger.info("[get_breached_instruments] Raw result=%s", result[:100])
             except Exception as e:
                 return f"ERROR: unified query failed: {e}"
             if _is_no_data(result):
@@ -1063,7 +1063,7 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
         try:
             logger.info("[get_breached_instruments/discover] SQL=%s", rendered_discover)
             discover_result = self.sql_tool._run(rendered_discover)
-            logger.info("[get_breached_instruments/discover] Raw result=%s", discover_result)
+            logger.info("[get_breached_instruments/discover] Raw result=%s", discover_result[:100])
         except Exception as e:
             return f"ERROR: discover query failed: {e}"
 
@@ -1214,7 +1214,7 @@ class GetBreachedInstrumentsTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_breached_instruments/field] SQL(%s)=%s", valid_col, rendered)
                 result = self.sql_tool._run(rendered)
-                logger.info("[get_breached_instruments/field] Raw result=%s", result)
+                logger.info("[get_breached_instruments/field] Raw result=%s", result[:100])
             except Exception as e:
                 logger.warning("[get_breached_instruments/field] Query failed for %s: %s", valid_col, e)
                 continue
@@ -1368,7 +1368,7 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_changes/discover] SQL=%s", rendered_discover)
                 discover_result = self.sql_tool._run(rendered_discover)
-                logger.info("[get_review_changes/discover] Raw result=%s", discover_result)
+                logger.info("[get_review_changes/discover] Raw result=%s", discover_result[:100])
             except Exception as e:
                 return f"ERROR: discover query failed: {e}"
             if _is_no_data(discover_result):
@@ -1568,7 +1568,7 @@ class GetReviewChangesAcrossPeriodTool(BaseTool, _BaseQueryTool):
             try:
                 logger.info("[get_review_changes/%s] SQL=%s", valid_col, rendered)
                 result = self.sql_tool._run(rendered)
-                logger.info("[get_review_changes/%s] Raw result=%s", valid_col, result)
+                logger.info("[get_review_changes/%s] Raw result=%s", valid_col, result[:100])
             except Exception as e:
                 logger.warning("[get_review_changes/%s] Query failed: %s", valid_col, e)
                 continue
@@ -1852,7 +1852,7 @@ class GetMapSeriesReviewSnapshotTool(BaseTool, _BaseQueryTool):
         try:
             logger.info("[get_map_series_review_status] SQL=%s", rendered)
             result = self.sql_tool._run(rendered)
-            logger.info("[get_map_series_review_status] Raw result=%s", result)
+            logger.info("[get_map_series_review_status] Raw result=%s", result[:100])
         except Exception as e:
             return f"ERROR: unified query failed: {e}"
 
@@ -2160,7 +2160,7 @@ class GetMapSeriesReviewChangeTool(BaseTool, _BaseQueryTool):
         try:
             logger.info("[get_map_series_review_change] SQL=%s", rendered)
             result = self.sql_tool._run(rendered)
-            logger.info("[get_map_series_review_change] Raw result=%s", result)
+            logger.info("[get_map_series_review_change] Raw result=%s", result[:100])
         except Exception as e:
             return f"ERROR: unified query failed: {e}"
 

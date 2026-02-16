@@ -5,6 +5,7 @@ import threading
 from typing import Callable, Dict, List, Optional
 
 from e2b_sandbox import prewarm_sandbox
+from utils.run_cancellation import RunCancellationController, get_active_run_controller
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ def _prewarm_worker(
     global_hierarchy_access: bool,
     selected_project_key: Optional[str],
     log_callback: Optional[PrewarmLogCallback],
+    controller: Optional[RunCancellationController],
 ) -> None:
     def _log(message: str, level: str = "debug") -> None:
         if log_callback:
@@ -43,6 +45,7 @@ def _prewarm_worker(
             global_hierarchy_access=global_hierarchy_access,
             selected_project_key=selected_project_key,
             log_callback=lambda msg, lvl="debug": _log(msg, lvl),
+            controller=controller,
         )
     except Exception as exc:
         _log(f"Sandbox prewarm failed: {exc}", "error")
@@ -62,6 +65,7 @@ def start_sandbox_prewarm_threads(
     log_callback: Optional[PrewarmLogCallback] = None,
 ) -> List[threading.Thread]:
     threads: List[threading.Thread] = []
+    controller = get_active_run_controller()
     for slot_id in range(max(0, num_slots)):
         thread = threading.Thread(
             target=_prewarm_worker,
@@ -75,6 +79,7 @@ def start_sandbox_prewarm_threads(
                 "global_hierarchy_access": global_hierarchy_access,
                 "selected_project_key": selected_project_key,
                 "log_callback": log_callback,
+                "controller": controller,
             },
             daemon=True,
         )

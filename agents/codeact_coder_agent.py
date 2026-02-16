@@ -167,6 +167,10 @@ def strip_trailing_asyncio_run_notice(code: str) -> str:
   return "\n".join(lines).strip()
 
 
+def has_execute_strategy(code: str) -> bool:
+  return "def execute_strategy():" in code
+
+
 def _make_codeact_message(content: str) -> AIMessage:
   return AIMessage(
     name="CodeActCoder",
@@ -254,29 +258,39 @@ def codeact_coder_agent(
     static_prompt = static_prompt.replace("<<TOOLS_STR>>", tools_payload)
 
   max_format_retries = 4
+  required_entrypoint = "def execute_strategy():"
 
   try:
     response = None
     last_err: Exception | None = None
-
-    prompt_payload = {
-      "current_date": current_date,
-      "retrospective_query": retrospective_query,
-      "validated_type_info_json": validated_type_info_json,
-      "verified_instrument_info_json": verified_instrument_info_json,
-      "word_context_json": word_context_json,
-      "relevant_date_ranges_json": relevant_date_ranges_json,
-      "timezone_context_json": timezone_context_json,
-      "platform_context": platform_context,
-      "project_specific_context": project_specific_context,
-      "previous_attempts_summary": previous_attempts_summary,
-    }
-    prompt_text = codeact_coder_prompt.format(**prompt_payload)
-    if static_prompt:
-      prompt_text = f"{static_prompt}\n\n{prompt_text}"
+    runtime_retry_errors: List[str] = []
 
     for attempt in range(max_format_retries + 1):
       try:
+        attempt_previous_attempts_summary = previous_attempts_summary
+        if runtime_retry_errors:
+          attempt_previous_attempts_summary = (
+            f"{previous_attempts_summary}\n"
+            "Runtime errors from immediate regeneration attempts:\n"
+            + "\n".join(runtime_retry_errors)
+          )
+
+        prompt_payload = {
+          "current_date": current_date,
+          "retrospective_query": retrospective_query,
+          "validated_type_info_json": validated_type_info_json,
+          "verified_instrument_info_json": verified_instrument_info_json,
+          "word_context_json": word_context_json,
+          "relevant_date_ranges_json": relevant_date_ranges_json,
+          "timezone_context_json": timezone_context_json,
+          "platform_context": platform_context,
+          "project_specific_context": project_specific_context,
+          "previous_attempts_summary": attempt_previous_attempts_summary,
+        }
+        prompt_text = codeact_coder_prompt.format(**prompt_payload)
+        if static_prompt:
+          prompt_text = f"{static_prompt}\n\n{prompt_text}"
+
         message = HumanMessage(content=prompt_text)
         candidate = structured_llm.invoke([message])
 
@@ -288,11 +302,17 @@ def codeact_coder_agent(
         )
         if not cleaned_code:
           raise ValueError("Structured output contained no code.")
+        if not has_execute_strategy(cleaned_code):
+          raise RuntimeError(
+            f"Structured output missing required entrypoint: {required_entrypoint}"
+          )
 
         response = candidate
         break
       except Exception as exc:
         last_err = exc
+        if isinstance(exc, RuntimeError):
+          runtime_retry_errors.append(str(exc))
         msg = str(exc).lower()
         is_format_issue = isinstance(exc, ValidationError) or any(
           hint in msg for hint in [
@@ -305,6 +325,7 @@ def codeact_coder_agent(
             "code",
             "no generations",
             "no code",
+            "entrypoint",
           ]
         )
         if is_format_issue and attempt < max_format_retries:
@@ -318,7 +339,7 @@ def codeact_coder_agent(
               cleaned_code = strip_trailing_asyncio_run_notice(
                 strip_code_tags(candidate.code)
               )
-              if cleaned_code:
+              if cleaned_code and has_execute_strategy(cleaned_code):
                 response = candidate
                 break
           except Exception as raw_exc:
@@ -343,6 +364,10 @@ def codeact_coder_agent(
     cleaned_code = strip_trailing_asyncio_run_notice(
       strip_code_tags(response.code)
     )
+    if not has_execute_strategy(cleaned_code):
+      raise RuntimeError(
+        f"Generated code missing required entrypoint: {required_entrypoint}"
+      )
 
     logger.debug("Generated objective: %s", objective)
     logger.debug("Generated plan: %s", plan_steps)

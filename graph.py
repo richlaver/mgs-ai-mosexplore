@@ -28,6 +28,7 @@ from agents.map_plot_sandbox_agent import map_plot_sandbox_agent
 from agents.query_clarifier import query_clarifier_agent
 from agents.reporter_agent import reporter_agent
 from agents.response_selector import response_selector
+from agents.suggestion_generator import suggestion_generator
 from agents.review_level_agents import (
     breach_instr_agent,
     review_by_time_agent,
@@ -856,6 +857,15 @@ def build_graph(
         )
         return {"executions": updated_executions}
 
+    def enter_parallel_reporting_node(state: AgentState):
+        _ensure_run_not_cancelled("enter_parallel_reporting")
+        return Command(
+            goto=[
+                Send("reporter_node", state),
+                Send("suggestion_generator_node", state),
+            ]
+        )
+
     def reporter_node(state: AgentState) -> Dict[str, List]:
         _ensure_run_not_cancelled("reporter")
         base_len = len(state.messages)
@@ -880,6 +890,25 @@ def build_graph(
             additional_kwargs["origin"] = origin
             msg.additional_kwargs = additional_kwargs
         return {"messages": new_messages}
+
+    def suggestion_generator_node(state: AgentState) -> Dict[str, List]:
+        _ensure_run_not_cancelled("suggestion_generator")
+        base_len = len(state.messages)
+        updated_messages_full, suggestions = suggestion_generator(
+            llm=llms["FAST"],
+            context=state.context,
+            messages=state.messages,
+            executions=state.executions,
+        )
+        new_messages = updated_messages_full[base_len:]
+        return {
+            "messages": new_messages,
+            "suggestions": suggestions,
+        }
+
+    def post_reporting_merge_node(state: AgentState) -> dict:
+        _ensure_run_not_cancelled("post_reporting_merge")
+        return {}
 
     graph = StateGraph(AgentState)
 
@@ -1633,7 +1662,10 @@ def build_graph(
     graph.add_node("enter_parallel_execution_node", enter_parallel_execution_node)
     graph.add_node("exit_parallel_execution_node", exit_parallel_execution_node)
     graph.add_node("response_selector_node", response_selector_node)
+    graph.add_node("enter_parallel_reporting_node", enter_parallel_reporting_node)
     graph.add_node("reporter_node", reporter_node)
+    graph.add_node("suggestion_generator_node", suggestion_generator_node)
+    graph.add_node("post_reporting_merge_node", post_reporting_merge_node)
 
     graph.add_edge(START, "history_summariser_node")
     graph.add_edge("history_summariser_node", "context_orchestrator_node")
@@ -1650,7 +1682,9 @@ def build_graph(
         graph.add_edge(f"run_branch_{i}", "exit_parallel_execution_node")
 
     graph.add_edge("exit_parallel_execution_node", "response_selector_node")
-    graph.add_edge("response_selector_node", "reporter_node")
-    graph.add_edge("reporter_node", END)
+    graph.add_edge("response_selector_node", "enter_parallel_reporting_node")
+    graph.add_edge("reporter_node", "post_reporting_merge_node")
+    graph.add_edge("suggestion_generator_node", "post_reporting_merge_node")
+    graph.add_edge("post_reporting_merge_node", END)
 
     return graph.compile()

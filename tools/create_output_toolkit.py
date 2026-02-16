@@ -375,7 +375,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 
                 logger.info(f"Executing SQL query for {column_name}:\n{query}")
                 results = self.sql_tool._run(query)
-                logger.info(f"Query results: {results}")
+                logger.info(f"Query results: {results[:10]}{'...' if len(results) > 10 else ''}")
                 
                 if results == "No data was found in the database matching the specified search criteria.":
                     continue
@@ -551,7 +551,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                             """
                             logger.info(f"Executing instrument metadata query: {meta_query}")
                             meta_result = self.sql_tool._run(meta_query)
-                            logger.info(f"Instrument metadata query result: {meta_result}")
+                            logger.info(f"Instrument metadata query result: {meta_result[:10]}{'...' if len(meta_result) > 10 else ''}")
                             def _safe_parse(raw: Any) -> List[Dict[str, Any]]:
                                 if raw is None:
                                     return []
@@ -993,7 +993,7 @@ def get_projection_from_db(sql_tool):
             LIMIT 1;
         """
         result = sql_tool._run(query)
-        logger.debug(f"Raw SQL result for CRS configuration: {result}")
+        logger.debug(f"Raw SQL result for CRS configuration: {result[:100]}")
 
         if result == "No data was found in the database matching the specified search criteria.":
             logger.warning("No CRS configuration found in database")
@@ -2057,7 +2057,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 points = self._get_readings(inputs, s, min_e, max_e, min_n, max_n, exclude_clause, start_time_str, end_time_str, buffer_start, buffer_end)
                 if points:
                     vals = [v for _, _, _, v in points]
-                    logger.info(f"Values for outlier detection: {vals}")
+                    logger.info(f"Values for outlier detection: {vals[:10]}{'...' if len(vals) > 10 else ''}")
                     mean = np.mean(vals)
                     std = np.std(vals)
                     outliers = [id for id, _, _, v in points if abs(v - mean) > 3 * std]
@@ -2257,32 +2257,28 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             """
             logger.info(f"Executing readings query for value_at_time: {query}")
             raw_result = self.sql_tool._run(query)
-            logger.info(f"Raw SQL result: {raw_result!r}")
+            logger.info(f"Raw SQL result: {raw_result[:100]!r}")
             raw_data = safe_eval(raw_result)
-            logger.info(f"Parsed eval result: {raw_data}")
+            logger.info(f"Parsed eval result: {raw_data[:10]}{'...' if len(raw_data) > 10 else ''}")
             if not raw_data:
                 logger.warning(f"No data returned for series {s.instrument_type}_{s.instrument_subtype}_{s.database_field_name}")
                 return []
             data = []
             for row in raw_data:
-                logger.info(f"Processing row: {row}")
                 norm = self._extract_row_reading(row)
                 if not norm:
                     logger.warning(f"Skipping unrecognized row format: {row}")
                     continue
                 id_, e, n, v = norm
-                logger.info(f"Raw extracted values: id={id_!r}, easting={e!r}, northing={n!r}, value={v!r}")
                 e_clean = self._extract_numeric(e)
                 n_clean = self._extract_numeric(n)
                 v_clean = self._extract_numeric(v)
-                logger.info(f"Cleaned values: easting={e_clean!r}, northing={n_clean!r}, value={v_clean!r}")
                 if None in (e_clean, n_clean, v_clean):
                     logger.warning(f"Invalid cleaned values after normalization: easting={e!r}, northing={n!r}, value={v!r}")
                     continue
                 try:
                     fe = float(e_clean); fn = float(n_clean); fv = float(v_clean)
                     data.append((id_, fe, fn, fv))
-                    logger.info(f"Appended valid data point: {id_}, {fe}, {fn}, {fv}")
                 except ValueError as conv_err:
                     logger.warning(f"ValueError converting numeric strings: {conv_err}, row: {row}")
                     continue
