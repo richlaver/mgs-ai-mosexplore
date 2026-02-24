@@ -124,6 +124,7 @@ def clone_llm(llm: ChatGoogleGenerativeAI, **overrides: Any) -> ChatGoogleGenera
         "project": getattr(llm, "project", None),
         "vertexai": getattr(llm, "vertexai", None),
         "api_key": getattr(llm, "google_api_key", None) or getattr(llm, "api_key", None),
+        "thinking_level": getattr(llm, "thinking_level", None),
         "thinking_budget": getattr(llm, "thinking_budget", None),
     }
     base_params.update({k: v for k, v in overrides.items() if v is not None})

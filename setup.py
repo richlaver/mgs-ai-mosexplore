@@ -69,7 +69,7 @@ GOOGLE_CLOUD_ENDPOINT = _normalize_api_endpoint(
 )
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
-PARALLEL_EXECUTIONS = 3
+PARALLEL_EXECUTIONS = 1
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
@@ -658,17 +658,35 @@ def _infer_provider_from_llm(llm: ChatOpenAI) -> Optional[str]:
     return None
 
 
+def _build_google_thinking_kwargs(
+    thinking_level: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {}
+    if thinking_level is not None:
+        kwargs["thinking_level"] = thinking_level
+    if thinking_budget is not None:
+        kwargs["thinking_budget"] = thinking_budget
+    return kwargs
+
+
 def build_llm(
     model_name: str,
     provider: str,
     temperature: float = 0.1,
     max_tokens: int = 4096,
     thinking_mode: bool = False,
+    thinking_level: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
 ) -> Any:
     provider_cfg = _get_provider_config(provider)
     lc_type = provider_cfg.get("lc_type")
     if lc_type is ChatGoogleGenerativeAI:
         set_google_genai_env()
+        thinking_kwargs = _build_google_thinking_kwargs(
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+        )
         return InterruptibleChatGoogleGenerativeAI(
             model=model_name,
             temperature=temperature,
@@ -677,6 +695,7 @@ def build_llm(
             location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
             vertexai=True,
             max_output_tokens=max_tokens,
+            **thinking_kwargs,
         )
     if lc_type is ChatOpenAI:
         api_key = _ensure_provider_api_key(provider)
@@ -705,6 +724,8 @@ def build_llm_from_library(
     temperature: float = 0.1,
     max_tokens: int = 4096,
     thinking_mode: bool = False,
+    thinking_level: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
 ) -> Any:
     entry = LLM_MODELS.get(model_key)
     if not entry:
@@ -715,6 +736,8 @@ def build_llm_from_library(
         temperature=temperature,
         max_tokens=max_tokens,
         thinking_mode=thinking_mode,
+        thinking_level=thinking_level,
+        thinking_budget=thinking_budget,
     )
 
 
@@ -741,17 +764,6 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
     """
     st.toast("Setting up LLMs...", icon=":material/build:")
     return {
-        # "FAST": build_llm_from_library(
-        #     "GEMINI_2_5_FLASH_LITE",
-        #     temperature=0.3,
-        #     max_tokens=4096,
-        # ),
-        # "LONG": build_llm_from_library(
-        #     "QWEN3_NEXT_80B_A3B_DEEPINFRA",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=False,
-        # ),
         "LONG": build_llm_from_library(
             "GEMINI_2_5_FLASH",
             temperature=0.1,
@@ -764,68 +776,17 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
             max_tokens=4096,
             thinking_mode=False,
         ),
-        # "BALANCED": build_llm_from_library(
-        #     "GEMINI_2_5_FLASH",
-        #     temperature=0.5,
-        #     max_tokens=4096,
-        # ),
         "BALANCED": build_llm_from_library(
             "GEMINI_2_5_FLASH",
             temperature=0.1,
             max_tokens=4096,
-            thinking_mode=False,
+            thinking_mode=True,
         ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_TURBO_PREVIEW",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=False,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_5",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=False,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_THINKING_TURBO",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=True,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "QWEN3_CODER_480B_A35B_DEEPINFRA",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=True,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_INSTRUCT_0905_DEEPINFRA",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=True,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_INSTRUCT_0905_TOGETHER",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=False,
-        # ),
-        # "CODING": build_llm_from_library(
-        #     "KIMI_K2_5_TOGETHER",
-        #     temperature=0.1,
-        #     max_tokens=4096,
-        #     thinking_mode=False,
-        # ),
-        "CODING": InterruptibleChatGoogleGenerativeAI(
-            model="gemini-3-flash-preview",
-            temperature=0.1,
-            api_key=_get_google_api_key(),
-            project=os.environ.get("GOOGLE_CLOUD_PROJECT") or get_project_id(),
-            location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
-            vertexai=True,
-            max_output_tokens=4096,
-            thinking_budget=1000,
+        "CODING": build_llm_from_library(
+            "GEMINI_3_1_PRO",
+            temperature=0.5,
+            max_tokens=8192,
+            thinking_level="low",
         ),
     }
 

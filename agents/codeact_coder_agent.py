@@ -38,31 +38,27 @@ codeact_coder_prompt = PromptTemplate(
         "previous_attempts_summary",
     ],
     template="""
-# Role
-
-# Task
-Generate code to answer the following user query, using plots wherever possible to visualise data:
-        # Runtime Context Values
-        - User query:
-        {retrospective_query}
-        - Current date (project timezone):
-        {current_date}
-        - Validated instrument types and subtypes referenced in the query (complete list from the database; do not infer additional types or subtypes):
-        {validated_type_info_json}
-        - Validated instrument IDs with their type and subtype mappings (only rely on these confirmed ID-type pairs from the database):
-        {verified_instrument_info_json}
-        - Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data):
-        {word_context_json}
-        - Date ranges relevant to query and how to apply:
-        {relevant_date_ranges_json}
-        - Timezones (project vs user vs sandbox):
-        {timezone_context_json}
-        - Platform-specific terminology and semantics:
-        {platform_context}
-        - Additional context on database:
-        {project_specific_context}
-        - Summary of previous failed coding attempts:
-        {previous_attempts_summary}
+# Runtime Context Values
+- User query:
+{retrospective_query}
+- Current date (project timezone):
+{current_date}
+- Validated instrument types and subtypes referenced in the query (complete list from the database; do not infer additional types or subtypes):
+{validated_type_info_json}
+- Validated instrument IDs with their type and subtype mappings (only rely on these confirmed ID-type pairs from the database):
+{verified_instrument_info_json}
+- Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data):
+{word_context_json}
+- Date ranges relevant to query and how to apply:
+{relevant_date_ranges_json}
+- Timezones (project vs user vs sandbox):
+{timezone_context_json}
+- Platform-specific terminology and semantics:
+{platform_context}
+- Additional context on database:
+{project_specific_context}
+- Summary of previous failed coding attempts:
+{previous_attempts_summary}
 
 # Output Schema
 - Return EXACTLY one JSON object with the following fields and no additional prose, Markdown, or prefixes:

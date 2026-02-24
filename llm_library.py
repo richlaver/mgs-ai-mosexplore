@@ -41,12 +41,24 @@ LLM_MODELS: Dict[str, Dict[str, str]] = {
         "name": "gemini-2.5-flash",
         "provider": "google",
     },
+    "GEMINI_3_FLASH": {
+        "name": "gemini-3-flash-preview",
+        "provider": "google",
+    },
+    "GEMINI_3_1_PRO": {
+        "name": "gemini-3.1-pro-preview",
+        "provider": "google",
+    },
     "KIMI_K2_5_TOGETHER": {
         "name": "moonshotai/Kimi-K2.5",
         "provider": "together",
     },
     "KIMI_K2_INSTRUCT_0905_TOGETHER": {
         "name": "moonshotai/Kimi-K2-Instruct-0905",
+        "provider": "together",
+    },
+    "QWEN3_5_397B_A17B_TOGETHER": {
+        "name": "Qwen/Qwen3.5-397B-A17B",
         "provider": "together",
     },
     "KIMI_K2_INSTRUCT_0905_DEEPINFRA": {
