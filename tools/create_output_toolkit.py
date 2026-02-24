@@ -284,7 +284,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
         major_step = 1
         for step in steps:
             n_grids = y_range / step
-            if 4 <= n_grids <= 7:
+            if n_grids <= 7:
                 major_step = step
                 break
         logger.info(f"Determined major_step: {major_step}")
@@ -415,7 +415,7 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 raise ValueError("No valid data found for any instruments in the specified time range. Check instrument IDs, column names, or expand the time range.")
             
             logger.info(f"Processed data for instruments: {list(time_series_data.keys())}")
-            logger.info(f"Parsed data into time series data: {time_series_data}")
+            logger.info(f"Parsed data into time series data: {list(time_series_data.items())[:10]}{'...' if len(time_series_data) > 10 else ''}")
 
             # Create Plotly figure
             fig = go.Figure()

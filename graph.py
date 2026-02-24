@@ -1452,6 +1452,7 @@ def build_graph(
                     "SyntaxError",
                     "AttributeError",
                     "IndentationError",
+                    "NameError",
                 ]
                 logger.info("Syntax error detected in branch %d: %s", branch_id, has_syntax_error)
                 deterministic_error = bool(error_logs_actionable)
