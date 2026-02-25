@@ -108,6 +108,75 @@ class RunCancellationController:
 
         return self._register_callback(callback, label=label)
 
+    def register_asyncio_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        label: str = "asyncio_task",
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> str:
+        """Register an asyncio task for cancellation on controller cancel.
+
+        This supports thread-safe task cancellation when cancel() is called from a
+        different thread than the task's event loop.
+        """
+
+        task_loop = loop
+        if task_loop is None:
+            with contextlib.suppress(Exception):
+                task_loop = task.get_loop()
+
+        logger.info(
+            "[RunCancel %s] Registering asyncio task label=%s task_id=%s loop_id=%s done=%s",
+            self.run_id,
+            label,
+            id(task),
+            id(task_loop) if task_loop else None,
+            task.done(),
+        )
+
+        def _cancel() -> None:
+            if task.done():
+                logger.info(
+                    "[RunCancel %s] Asyncio task already done label=%s task_id=%s",
+                    self.run_id,
+                    label,
+                    id(task),
+                )
+                return
+
+            if task_loop and task_loop.is_running():
+                try:
+                    logger.info(
+                        "[RunCancel %s] Scheduling asyncio task cancel label=%s task_id=%s loop_id=%s",
+                        self.run_id,
+                        label,
+                        id(task),
+                        id(task_loop),
+                    )
+                    task_loop.call_soon_threadsafe(task.cancel)
+                    return
+                except Exception:
+                    logger.warning(
+                        "[RunCancel %s] Failed thread-safe task cancel scheduling label=%s task_id=%s",
+                        self.run_id,
+                        label,
+                        id(task),
+                        exc_info=True,
+                    )
+                    pass
+
+            logger.info(
+                "[RunCancel %s] Direct asyncio task cancel fallback label=%s task_id=%s",
+                self.run_id,
+                label,
+                id(task),
+            )
+            with contextlib.suppress(Exception):
+                task.cancel()
+
+        return self._register_callback(_cancel, label=f"{label}:asyncio")
+
     def _register_callback(self, callback: CancelCallback, *, label: str) -> str:
         handle = uuid.uuid4().hex
         with self._lock:
@@ -276,6 +345,70 @@ class ScopedRunCancellationController:
         if trigger_now:
             self._invoke_callback(handle, callback, label)
         return handle
+
+    def register_asyncio_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        label: str = "asyncio_task",
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> str:
+        """Register an asyncio task for cancellation within this scope."""
+
+        task_loop = loop
+        if task_loop is None:
+            with contextlib.suppress(Exception):
+                task_loop = task.get_loop()
+
+        logger.info(
+            "[RunCancelScope %s] Registering asyncio task label=%s task_id=%s loop_id=%s done=%s",
+            self._label,
+            label,
+            id(task),
+            id(task_loop) if task_loop else None,
+            task.done(),
+        )
+
+        def _cancel() -> None:
+            if task.done():
+                logger.info(
+                    "[RunCancelScope %s] Asyncio task already done label=%s task_id=%s",
+                    self._label,
+                    label,
+                    id(task),
+                )
+                return
+
+            if task_loop and task_loop.is_running():
+                try:
+                    logger.info(
+                        "[RunCancelScope %s] Scheduling asyncio task cancel label=%s task_id=%s loop_id=%s",
+                        self._label,
+                        label,
+                        id(task),
+                        id(task_loop),
+                    )
+                    task_loop.call_soon_threadsafe(task.cancel)
+                    return
+                except Exception:
+                    logger.warning(
+                        "[RunCancelScope %s] Failed thread-safe task cancel scheduling label=%s task_id=%s",
+                        self._label,
+                        label,
+                        id(task),
+                        exc_info=True,
+                    )
+
+            logger.info(
+                "[RunCancelScope %s] Direct asyncio task cancel fallback label=%s task_id=%s",
+                self._label,
+                label,
+                id(task),
+            )
+            with contextlib.suppress(Exception):
+                task.cancel()
+
+        return self.register_generic(_cancel, label=f"{label}:asyncio")
 
     def unregister(self, handle: str) -> None:
         with self._lock:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import threading
 from typing import Any, Callable, Optional
@@ -91,21 +93,65 @@ class InterruptibleChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
 
     async def _agenerate(self, *args: Any, **kwargs: Any):  # type: ignore[override]
         controller, cancel_event, handle = self._start_cancel_watch("llm:agenerate")
+        task_handle: Optional[str] = None
+        if controller:
+            with contextlib.suppress(RuntimeError):
+                task = asyncio.current_task()
+                if task is not None:
+                    task_handle = controller.register_asyncio_task(
+                        task,
+                        label=f"llm:{getattr(self, 'model', 'unknown')}:agenerate",
+                    )
+                    logger.info(
+                        "[LLMCancel] Registered asyncio task cancellation | handle=%s stage=llm:agenerate task_id=%s",
+                        task_handle,
+                        id(task),
+                    )
         try:
             self._raise_if_cancelled(controller, cancel_event, "llm:agenerate:pre")
             result = await super()._agenerate(*args, **kwargs)
             self._raise_if_cancelled(controller, cancel_event, "llm:agenerate:post")
             return result
+        except asyncio.CancelledError as exc:
+            logger.warning(
+                "[LLMCancel] Async task cancelled during llm:agenerate model=%s",
+                getattr(self, "model", "unknown"),
+            )
+            raise RunCancelledError("LLM call cancelled (llm:agenerate:task)") from exc
         finally:
+            if controller and task_handle:
+                controller.unregister(task_handle)
             self._stop_cancel_watch(controller, handle)
 
     async def _astream(self, *args: Any, **kwargs: Any):  # type: ignore[override]
         controller, cancel_event, handle = self._start_cancel_watch("llm:astream")
+        task_handle: Optional[str] = None
+        if controller:
+            with contextlib.suppress(RuntimeError):
+                task = asyncio.current_task()
+                if task is not None:
+                    task_handle = controller.register_asyncio_task(
+                        task,
+                        label=f"llm:{getattr(self, 'model', 'unknown')}:astream",
+                    )
+                    logger.info(
+                        "[LLMCancel] Registered asyncio task cancellation | handle=%s stage=llm:astream task_id=%s",
+                        task_handle,
+                        id(task),
+                    )
         try:
             async for chunk in super()._astream(*args, **kwargs):
                 self._raise_if_cancelled(controller, cancel_event, "llm:astream")
                 yield chunk
+        except asyncio.CancelledError as exc:
+            logger.warning(
+                "[LLMCancel] Async task cancelled during llm:astream model=%s",
+                getattr(self, "model", "unknown"),
+            )
+            raise RunCancelledError("LLM call cancelled (llm:astream:task)") from exc
         finally:
+            if controller and task_handle:
+                controller.unregister(task_handle)
             self._stop_cancel_watch(controller, handle)
 
 

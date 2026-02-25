@@ -2,6 +2,7 @@ from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, BaseMessage
 from typing import List
+from utils.async_utils import run_async_syncsafe
 
 def query_clarifier_agent(llm: BaseLanguageModel, clarification_requests: List[str], chat_history: List[BaseMessage]) -> AIMessage:
     if not clarification_requests:
@@ -29,7 +30,7 @@ Craft a polite, helpful and concise response that:
 
     prompt = ChatPromptTemplate.from_template(system_prompt)
     chain = prompt | llm
-    response = chain.invoke({"requests": requests_str, "history": history_str})
+    response = run_async_syncsafe(chain.ainvoke({"requests": requests_str, "history": history_str}))
     content = response.content if hasattr(response, 'content') else str(response)
 
     return AIMessage(

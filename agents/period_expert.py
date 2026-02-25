@@ -2,7 +2,7 @@ import datetime
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, List, Optional, TypeVar
+from typing import Awaitable, Callable, List, Optional, TypeVar
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseLanguageModel
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from classes import RelevantDateRange, ContextState
 from utils.json_utils import strip_to_json_payload
+from utils.async_utils import run_async_syncsafe
 from utils.run_cancellation import (
     ScopedRunCancellationController,
     activate_controller,
@@ -107,12 +108,12 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
     current_datetime = datetime.datetime.now().isoformat() + "Z"
 
     def _race_llm_calls(
-        fn: Callable[[], T],
+        fn: Callable[[], Awaitable[T]],
         parallel_calls: int,
         label: str,
     ) -> T:
         if parallel_calls <= 1:
-            return fn()
+            return run_async_syncsafe(fn())
 
         scope = ScopedRunCancellationController(
             parent=get_active_run_controller(),
@@ -122,7 +123,7 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
         def _worker() -> T:
             token = activate_controller(scope)
             try:
-                return fn()
+                return run_async_syncsafe(fn())
             finally:
                 reset_controller(token)
 
@@ -150,7 +151,7 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
         chain = prompt | llm.with_structured_output(PeriodExpertOutput)
         logger.info("Period expert invoking structured output")
         result = _race_llm_calls(
-            lambda: chain.invoke({
+            lambda: chain.ainvoke({
                 "query": query,
                 "current_datetime": current_datetime,
             }),
@@ -164,7 +165,7 @@ def period_expert(state: ContextState, llm: BaseLanguageModel, db: any) -> dict:
     if result is None:
         logger.info("Period expert invoking fallback LLM")
         response = _race_llm_calls(
-            lambda: llm.invoke(
+            lambda: llm.ainvoke(
                 prompt.format_prompt(query=query, current_datetime=current_datetime).to_messages()
             ),
             parallel_calls=2,

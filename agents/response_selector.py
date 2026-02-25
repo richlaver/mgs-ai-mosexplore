@@ -6,6 +6,7 @@ from classes import Execution, Context
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage
 from langchain_classic import hub
+from utils.async_utils import run_async_syncsafe
 from utils.json_utils import strip_to_json_payload
 
 logger = logging.getLogger(__name__)
@@ -160,13 +161,14 @@ def response_selector(
     for challenger in candidates[1:]:
         challenger_text = _build_candidate_text(challenger)
         chain = prompt | llm
+        result = None
         try:
             question = context.retrospective_query if context else ""
-            result = chain.invoke({
+            result = run_async_syncsafe(chain.ainvoke({
                 "question": question,
                 "answer_a": incumbent_text,
                 "answer_b": challenger_text,
-            })
+            }))
             output_text = getattr(result, "content", "") or str(result)
         except Exception as e:
             logger.error(f"Pairwise evaluation failed: {e}; keeping incumbent.")

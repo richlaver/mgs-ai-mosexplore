@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from classes import Context, Execution, Suggestion
 from suggestions import suggested_queries
+from utils.async_utils import run_async_syncsafe
 from utils.json_utils import strip_to_json_payload
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ Output **only JSON** exactly in the following format with no other text or thoug
     try:
         structured_llm = llm.with_structured_output(SuggestionPayload, method="json_mode")
         chain = prompt | structured_llm
-        structured_response = chain.invoke(call_inputs)
+        structured_response = run_async_syncsafe(chain.ainvoke(call_inputs))
         if structured_response is None:
             raise ValueError("Structured suggestion output returned no result.")
         parsed_payload = structured_response.to_dict()
@@ -164,7 +165,7 @@ Output **only JSON** exactly in the following format with no other text or thoug
 
     if parsed_payload is None:
         chain = prompt | llm
-        response = chain.invoke(call_inputs)
+        response = run_async_syncsafe(chain.ainvoke(call_inputs))
         try:
             response_text_clean = strip_to_json_payload(
                 _flatten_message_content(getattr(response, "content", "")),

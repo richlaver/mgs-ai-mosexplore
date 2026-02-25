@@ -4,6 +4,7 @@ from typing import List
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
+from utils.async_utils import run_async_syncsafe
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ Current query:
     chain = prompt | llm
 
     try:
-        response = chain.invoke({})
+        response = run_async_syncsafe(chain.ainvoke({}))
         retrospective_query = response.content
     except Exception as e:
         logger.error(f"Error generating retrospective query: {e}")

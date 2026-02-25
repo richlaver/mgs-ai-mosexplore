@@ -5,6 +5,7 @@ from classes import AgentState, Context, Execution
 from typing import List
 import json
 import logging
+from utils.async_utils import run_async_syncsafe
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +110,12 @@ Successfully generated CSV files:
     final_response = None
     try:
         response_chain = reporter_prompt | llm
-        final_response = response_chain.invoke({
+        final_response = run_async_syncsafe(response_chain.ainvoke({
             "retrospective_query": retrospective_query,
             "best_response": best_response,
             "plots_info": plots_info_str,
             "csvs_info": csvs_info_str
-        }).content
+        })).content
     except Exception as e:
         logger.error("Failed to generate LLM response: %s", str(e))
         final_response = best_response or "I'm unable to provide a response at this time."

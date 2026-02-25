@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from classes import Execution, Context
+from utils.async_utils import run_async_syncsafe
 from utils.timezone_utils import tzinfo_from_offset
 
 logger = logging.getLogger(__name__)
@@ -288,7 +289,7 @@ def codeact_coder_agent(
           prompt_text = f"{static_prompt}\n\n{prompt_text}"
 
         message = HumanMessage(content=prompt_text)
-        candidate = structured_llm.invoke([message])
+        candidate = run_async_syncsafe(structured_llm.ainvoke([message]))
 
         if candidate is None:
           raise ValueError("Structured output returned no result.")
@@ -326,7 +327,7 @@ def codeact_coder_agent(
         )
         if is_format_issue and attempt < max_format_retries:
           try:
-            raw_message = generating_llm.invoke([message])
+            raw_message = run_async_syncsafe(generating_llm.ainvoke([message]))
             raw_content = getattr(raw_message, "content", str(raw_message))
             raw_content = strip_think_blocks(raw_content)
             json_blob = extract_json_object(raw_content)

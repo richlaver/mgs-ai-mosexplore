@@ -2,12 +2,13 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 import setup
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from utils.async_utils import run_async_syncsafe
 
 from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
 from langgraph.types import Command
@@ -154,12 +155,12 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
     }
 
     def _race_llm_calls(
-        fn: Callable[[], T],
+        fn: Callable[[], Awaitable[T]],
         parallel_calls: int,
         label: str,
     ) -> T:
         if parallel_calls <= 1:
-            return fn()
+            return run_async_syncsafe(fn())
 
         scope = ScopedRunCancellationController(
             parent=get_active_run_controller(),
@@ -169,7 +170,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         def _worker() -> T:
             token = activate_controller(scope)
             try:
-                return fn()
+                return run_async_syncsafe(fn())
             finally:
                 reset_controller(token)
 
@@ -212,13 +213,13 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         message = HumanMessage(content=prompt_text)
         if cached_content_id:
             structured_response = _race_llm_calls(
-                lambda: structured_llm.invoke([message], cached_content=cached_content_id),
+                lambda: structured_llm.ainvoke([message], cached_content=cached_content_id),
                 parallel_calls=2,
                 label="instrument_selection_structured_cached",
             )
         else:
             structured_response = _race_llm_calls(
-                lambda: structured_llm.invoke([message]),
+                lambda: structured_llm.ainvoke([message]),
                 parallel_calls=2,
                 label="instrument_selection_structured",
             )
@@ -240,7 +241,7 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             chain = prompt | llm
             invoke_inputs = call_inputs
         response = _race_llm_calls(
-            lambda: chain.invoke(invoke_inputs),
+            lambda: chain.ainvoke(invoke_inputs),
             parallel_calls=2,
             label="instrument_selection_raw",
         )
@@ -406,7 +407,7 @@ If no fields are relevant, return: []"""
         ])
         
         chain = prompt | llm
-        response = chain.invoke({})
+        response = run_async_syncsafe(chain.ainvoke({}))
         
         # Parse LLM response
         try:

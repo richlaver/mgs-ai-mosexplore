@@ -69,7 +69,7 @@ GOOGLE_CLOUD_ENDPOINT = _normalize_api_endpoint(
 )
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
-PARALLEL_EXECUTIONS = 1
+PARALLEL_EXECUTIONS = 2
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}

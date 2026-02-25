@@ -47,6 +47,7 @@ from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
 from tools.sql_security_toolkit import GeneralSQLQueryTool
 from utils.chat_history import filter_messages_only_final
+from utils.async_utils import run_async_syncsafe
 from utils.run_cancellation import get_active_run_controller
 from utils.sandbox_prewarm import start_sandbox_prewarm_threads
 
@@ -1053,7 +1054,7 @@ def build_graph(
             ]
             logger.info("[Sufficiency] Evaluating branch %d response sufficiency with prompt %s", branch_id, llm_input)
             try:
-                llm_result = sufficiency_llm.invoke(llm_input)
+                llm_result = run_async_syncsafe(sufficiency_llm.ainvoke(llm_input))
                 raw_text = _flatten_message_content(llm_result)
                 parsed: dict[str, Any] | None = None
                 try:
@@ -1160,10 +1161,10 @@ def build_graph(
             llm_result: FactsResponse | None = None
             for attempt in range(max_format_retries + 1):
                 try:
-                    candidate = structured_llm.invoke([
+                    candidate = run_async_syncsafe(structured_llm.ainvoke([
                         ("system", system_prompt),
                         ("human", json.dumps(payload)),
-                    ])
+                    ]))
 
                     if not candidate or not getattr(candidate, "facts", None):
                         raise ValueError("Fact decomposition returned no facts.")
@@ -1302,7 +1303,7 @@ def build_graph(
                         f"Syntax error summary:\n{error_summary}\n\nCode to fix:\n{code_to_fix}",
                     ),
                 ]
-                llm_result = llms["FAST"].invoke(llm_input)
+                llm_result = run_async_syncsafe(llms["FAST"].ainvoke(llm_input))
                 raw_text = _flatten_message_content(llm_result)
                 cleaned = _strip_code_fences(raw_text)
                 return cleaned if cleaned else code_to_fix

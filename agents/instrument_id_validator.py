@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.types import Command
 
 from classes import ContextState
+from utils.async_utils import run_async_syncsafe
 from utils.json_utils import strip_to_json_payload
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ Respond in this exact JSON format:
     ]
 }}
         """
-        response = llm.invoke(analysis_prompt)
+        response = run_async_syncsafe(llm.ainvoke(analysis_prompt))
         logger.info(f"instrument validator LLM response: {response}")
         response_text = response.content if hasattr(response, 'content') else str(response)
         response_text = strip_to_json_payload(
