@@ -2,6 +2,9 @@ import json
 import logging
 import ast
 import re
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -10,8 +13,72 @@ from langgraph.types import Command
 from classes import ContextState
 from utils.async_utils import run_async_syncsafe
 from utils.json_utils import strip_to_json_payload
+from utils.run_cancellation import (
+    ScopedRunCancellationController,
+    activate_controller,
+    get_active_run_controller,
+    reset_controller,
+)
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _get_parallel_setting(env_key: str, default: int) -> int:
+    raw = os.environ.get(env_key)
+    try:
+        value = int(raw) if raw is not None else default
+    except Exception:
+        value = default
+    return max(1, value)
+
+
+INSTRUMENT_ID_VALIDATOR_PARALLEL_CALLS = _get_parallel_setting(
+    "MGS_INSTRUMENT_ID_VALIDATOR_PARALLEL_CALLS",
+    2,
+)
+
+
+def _race_llm_calls(
+    fn: Callable[[], Awaitable[T]],
+    parallel_calls: int,
+    label: str,
+) -> T:
+    if parallel_calls <= 1:
+        return run_async_syncsafe(fn())
+
+    scope = ScopedRunCancellationController(
+        parent=get_active_run_controller(),
+        label=label,
+    )
+
+    def _worker() -> T:
+        token = activate_controller(scope)
+        try:
+            return run_async_syncsafe(fn())
+        finally:
+            reset_controller(token)
+
+    with ThreadPoolExecutor(max_workers=parallel_calls) as executor:
+        futures = [executor.submit(_worker) for _ in range(parallel_calls)]
+        last_exc: Optional[Exception] = None
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as exc:  # pragma: no cover - best effort
+                last_exc = exc
+                logger.warning("Instrument ID parallel call failed: %s", exc)
+                continue
+            scope.cancel_active_resources(reason="instrument_id_parallel_race")
+            for pending in futures:
+                if pending is not future:
+                    pending.cancel()
+            return result
+        if last_exc:
+            raise last_exc
+
+    raise ValueError("Instrument ID parallel calls returned no result")
 
 def extract_instruments_with_llm(llm: BaseLanguageModel, query: str) -> dict:
     try:
@@ -45,7 +112,11 @@ Respond in this exact JSON format:
     ]
 }}
         """
-        response = run_async_syncsafe(llm.ainvoke(analysis_prompt))
+        response = _race_llm_calls(
+            lambda: llm.ainvoke(analysis_prompt),
+            parallel_calls=INSTRUMENT_ID_VALIDATOR_PARALLEL_CALLS,
+            label="instrument_id_validator_extract",
+        )
         logger.info(f"instrument validator LLM response: {response}")
         response_text = response.content if hasattr(response, 'content') else str(response)
         response_text = strip_to_json_payload(

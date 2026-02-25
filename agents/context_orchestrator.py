@@ -34,6 +34,7 @@ def _get_parallel_setting(env_key: str, default: int) -> int:
 
 DB_EXPERT_PARALLEL_EXECUTIONS = _get_parallel_setting("MGS_DB_EXPERT_PARALLEL_EXECUTIONS", 1)
 PERIOD_EXPERT_PARALLEL_EXECUTIONS = _get_parallel_setting("MGS_PERIOD_EXPERT_PARALLEL_EXECUTIONS", 1)
+INSTRUMENT_TYPE_VALIDATOR_PARALLEL_EXECUTIONS = _get_parallel_setting("MGS_INSTRUMENT_TYPE_VALIDATOR_PARALLEL_EXECUTIONS", 1)
 
 
 def _has_clarification_requests(state: ContextState) -> bool:
@@ -47,6 +48,11 @@ def _has_clarification_requests(state: ContextState) -> bool:
         return False
 
 def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_project_key: str | None) -> any:
+    instrument_type_scope_lock = threading.Lock()
+    instrument_type_scope: Optional[ScopedRunCancellationController] = None
+    instrument_type_winner_lock = threading.Lock()
+    instrument_type_winner_set = False
+
     db_scope_lock = threading.Lock()
     db_scope: Optional[ScopedRunCancellationController] = None
     db_winner_lock = threading.Lock()
@@ -56,6 +62,16 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
     period_scope: Optional[ScopedRunCancellationController] = None
     period_winner_lock = threading.Lock()
     period_winner_set = False
+
+    def _get_instrument_type_scope() -> ScopedRunCancellationController:
+        nonlocal instrument_type_scope
+        with instrument_type_scope_lock:
+            if instrument_type_scope is None:
+                instrument_type_scope = ScopedRunCancellationController(
+                    parent=get_active_run_controller(),
+                    label="context_instrument_type_validator",
+                )
+        return instrument_type_scope
 
     def _get_db_scope() -> ScopedRunCancellationController:
         nonlocal db_scope
@@ -93,14 +109,39 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
         logger.info("Context node exit: instrument_id_validator")
         return result
 
-    def instrument_type_validator_node(state: ContextState):
-        logger.info("Context node enter: instrument_type_validator")
+    def instrument_type_validator_node(state: ContextState, branch_id: int):
+        nonlocal instrument_type_winner_set
+        logger.info("Context node enter: instrument_type_validator branch=%d", branch_id)
         if _has_clarification_requests(state):
             logger.info("instrument_type_validator skipped due to clarification requests")
             return {}
-        result = instrument_type_validator(state, selected_project_key)
-        logger.info("Context node exit: instrument_type_validator")
-        return result
+
+        with instrument_type_winner_lock:
+            if instrument_type_winner_set:
+                logger.info("instrument_type_validator branch skipped (winner already selected)")
+                return {}
+
+        scope = _get_instrument_type_scope()
+        result = _run_with_scope(
+            scope,
+            lambda: instrument_type_validator(state, selected_project_key),
+        )
+
+        winner = False
+        with instrument_type_winner_lock:
+            if not instrument_type_winner_set:
+                instrument_type_winner_set = True
+                winner = True
+
+        if winner:
+            scope.cancel_active_resources(reason="instrument_type_validator_branch_complete")
+            logger.info("instrument_type_validator branch selected as winner")
+            logger.info("Context node exit: instrument_type_validator branch=%d", branch_id)
+            return result
+
+        logger.info("instrument_type_validator branch completed after winner selected")
+        logger.info("Context node exit: instrument_type_validator branch=%d", branch_id)
+        return {}
 
     def database_expert_node(state: ContextState):
         nonlocal db_winner_set
@@ -195,11 +236,28 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
             return Command(goto=END)
         return Command(goto=[
             Send("instrument_id_validator", state),
-            Send("instrument_type_validator", state),
+            Send("instrument_type_validator_fan_out", state),
         ])
 
     def instrument_db_fan_in(_: ContextState):
         logger.info("Context subgraph fan-in: instrument validators")
+        return {}
+
+    def instrument_type_validator_fan_out(state: ContextState):
+        logger.info(
+            "Context subgraph fan-out: instrument_type_validator (%d branches)",
+            INSTRUMENT_TYPE_VALIDATOR_PARALLEL_EXECUTIONS,
+        )
+        if _has_clarification_requests(state):
+            logger.info("instrument_type_validator fan-out aborted due to clarification requests")
+            return Command(goto="instrument_type_validator_fan_in")
+        return Command(goto=[
+            Send(f"instrument_type_validator_{i}", state)
+            for i in range(INSTRUMENT_TYPE_VALIDATOR_PARALLEL_EXECUTIONS)
+        ])
+
+    def instrument_type_validator_fan_in(_: ContextState):
+        logger.info("Context subgraph fan-in: instrument_type_validator")
         return {}
 
     def database_expert_fan_out(state: ContextState):
@@ -219,7 +277,17 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
     instrument_db_graph = StateGraph(ContextState)
     instrument_db_graph.add_node("instrument_db_fan_out", instrument_db_fan_out)
     instrument_db_graph.add_node("instrument_id_validator", instrument_id_validator_node)
-    instrument_db_graph.add_node("instrument_type_validator", instrument_type_validator_node)
+    instrument_db_graph.add_node("instrument_type_validator_fan_out", instrument_type_validator_fan_out)
+    instrument_db_graph.add_node("instrument_type_validator_fan_in", instrument_type_validator_fan_in)
+    for i in range(INSTRUMENT_TYPE_VALIDATOR_PARALLEL_EXECUTIONS):
+        instrument_db_graph.add_node(
+            f"instrument_type_validator_{i}",
+            lambda state, branch_id=i: instrument_type_validator_node(state, branch_id),
+        )
+        instrument_db_graph.add_edge(
+            f"instrument_type_validator_{i}",
+            "instrument_type_validator_fan_in",
+        )
     instrument_db_graph.add_node("instrument_db_fan_in", instrument_db_fan_in)
     instrument_db_graph.add_node("database_expert_fan_out", database_expert_fan_out)
     instrument_db_graph.add_node("database_expert_fan_in", database_expert_fan_in)
@@ -229,7 +297,8 @@ def get_context_graph(llms: Dict[str, BaseLanguageModel], db: any, selected_proj
 
     instrument_db_graph.add_edge(START, "instrument_db_fan_out")
     instrument_db_graph.add_edge("instrument_id_validator", "instrument_db_fan_in")
-    instrument_db_graph.add_edge("instrument_type_validator", "instrument_db_fan_in")
+    instrument_db_graph.add_edge("instrument_type_validator_fan_out", "instrument_type_validator_fan_in")
+    instrument_db_graph.add_edge("instrument_type_validator_fan_in", "instrument_db_fan_in")
     instrument_db_graph.add_edge("instrument_db_fan_in", "database_expert_fan_out")
     instrument_db_graph.add_edge("database_expert_fan_out", "database_expert_fan_in")
     instrument_db_graph.add_edge("database_expert_fan_in", END)

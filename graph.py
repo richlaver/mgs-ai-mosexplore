@@ -1449,12 +1449,15 @@ def build_graph(
                 )
 
                 error_text = updated_attempt.error_summary or ""
-                has_syntax_error = error_text in [
-                    "SyntaxError",
-                    "AttributeError",
-                    "IndentationError",
-                    "NameError",
-                ]
+                has_syntax_error = any(
+                    test_string in error_text
+                    for test_string in [
+                        "SyntaxError",
+                        "AttributeError",
+                        "IndentationError",
+                        "NameError",
+                    ]
+                )
                 logger.info("Syntax error detected in branch %d: %s", branch_id, has_syntax_error)
                 deterministic_error = bool(error_logs_actionable)
                 message_errors = any(

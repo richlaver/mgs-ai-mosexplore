@@ -92,7 +92,7 @@ for task in done:
 - When to yield different types:
   * "progress": at start of each step
   * "error": on exceptions, with error message. **Never** yield error output relating to failure to generate *supporting* plots, only for plots that are directly requested in the query.
-  * "final": after all steps with result summary for query and optional extension, self-explanatory and comprehensive for downstream interpretation
+  * "final": after all steps with result summary for query, self-explanatory and comprehensive for downstream interpretation
   * "plot": when calling a plotting tool
   * "csv": when calling `csv_saver_tool`
 - ALWAYS yield a "final" output.

@@ -766,13 +766,13 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
     return {
         "LONG": build_llm_from_library(
             "GEMINI_2_5_FLASH",
-            temperature=0.1,
-            max_tokens=4096,
-            thinking_mode=False,
+            temperature=0.3,
+            max_tokens=8192,
+            thinking_mode=True,
         ),
         "FAST": build_llm_from_library(
             "GEMINI_2_5_FLASH",
-            temperature=0.1,
+            temperature=0.3,
             max_tokens=4096,
             thinking_mode=False,
         ),
