@@ -499,7 +499,7 @@ import os
 import sys
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime as datetime_class, timezone
 from typing import Any, Dict, List, Optional
 
 import b2sdk.v1 as b2
@@ -558,7 +558,7 @@ def _make_step_payload(content: str, typ: str, *, origin: str = "sandbox") -> Di
         "additional_kwargs": {
             "level": level,
             "is_final": False,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime_class.now(timezone.utc).isoformat(),
             "origin": {
                 "process": "sandbox_log",
                 "thinking_stage": None,
@@ -788,7 +788,7 @@ def _decorate_code_yield_output(output: Any) -> Any:
         {
             "level": level,
             "is_final": False,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime_class.now(timezone.utc).isoformat(),
             "is_child": True,
             "artefacts": [artefact_entry] if artefact_entry else [],
         }

@@ -164,8 +164,25 @@ def strip_trailing_asyncio_run_notice(code: str) -> str:
   return "\n".join(lines).strip()
 
 
+_EXECUTE_STRATEGY_PATTERN = re.compile(
+  r"(^|\n)\s*(?:async\s+)?def\s+execute_strategy\s*\(.*?\)\s*(?:->\s*[^:\n]+)?\s*:",
+  flags=re.DOTALL,
+)
+
+
 def has_execute_strategy(code: str) -> bool:
-  return "def execute_strategy():" in code
+  if not code:
+    logger.debug("[CodeAct] Entrypoint check: no code supplied")
+    return False
+  match = _EXECUTE_STRATEGY_PATTERN.search(code)
+  if match is None:
+    logger.debug("[CodeAct] Entrypoint check: execute_strategy signature not found")
+    return False
+  signature_preview = match.group(0).strip().replace("\n", " ")
+  if len(signature_preview) > 160:
+    signature_preview = signature_preview[:157] + "..."
+  logger.debug("[CodeAct] Entrypoint check: matched signature='%s'", signature_preview)
+  return True
 
 
 def _make_codeact_message(content: str) -> AIMessage:
@@ -255,7 +272,7 @@ def codeact_coder_agent(
     static_prompt = static_prompt.replace("<<TOOLS_STR>>", tools_payload)
 
   max_format_retries = 4
-  required_entrypoint = "def execute_strategy():"
+  required_entrypoint = "def/async def execute_strategy(...):"
 
   try:
     response = None

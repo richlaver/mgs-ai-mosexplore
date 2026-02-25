@@ -39,23 +39,79 @@ def apply_general_layout(fig: go.Figure) -> None:
     )
 
 def parse_datetime(dt_str: str) -> datetime:
-    """Parse datetime string in format 'D Month YYYY H:MM:SS AM/PM'."""
-    # Fix incorrect midnight format 00:00:00 AM -> 12:00:00 AM
-    if "00:00:00 AM" in dt_str:
-        dt_str = dt_str.replace("00:00:00 AM", "12:00:00 AM")
+    """Parse datetime string from a set of unambiguous supported formats.
 
-    # Try Windows format (no leading zeros)
+    Accepted examples include:
+    - 2 August 2025 2:30:00 PM
+    - 23 February 2026 23:59:59
+    - 2026-02-23 23:59:59
+    - 2026-02-23T23:59:59Z
+    """
+    if not isinstance(dt_str, str):
+        raise ValueError(f"Invalid datetime value type: {type(dt_str).__name__}")
+
+    raw = dt_str.strip()
+    if not raw:
+        raise ValueError("Invalid datetime format: empty string")
+
+    normalized = re.sub(r"\s+", " ", raw.replace(",", "")).strip()
+
+    # Avoid ambiguous day/month numeric inputs such as 3/4/2026 or 4-3-2026.
+    if re.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:\s+.*)?$", normalized):
+        raise ValueError(
+            f"Invalid datetime format: {dt_str}. "
+            "Ambiguous numeric day/month formats are not supported; "
+            "use a month name (e.g., '23 February 2026 23:59:59') or ISO format (e.g., '2026-02-23 23:59:59')."
+        )
+
+    # Normalize invalid 12-hour midnight inputs like "00:00:00 AM" / "00:00 AM".
+    def _fix_midnight(match: re.Match) -> str:
+        minutes = match.group(1)
+        seconds = match.group(2)
+        if seconds is None:
+            return f"12:{minutes} AM"
+        return f"12:{minutes}:{seconds} AM"
+
+    normalized = re.sub(
+        r"\b00:(\d{2})(?::(\d{2}))?\s*AM\b",
+        _fix_midnight,
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    candidate_formats = [
+        "%d %B %Y %I:%M:%S %p",
+        "%d %B %Y %I:%M %p",
+        "%d %B %Y %H:%M:%S",
+        "%d %B %Y %H:%M",
+        "%d %b %Y %I:%M:%S %p",
+        "%d %b %Y %I:%M %p",
+        "%d %b %Y %H:%M:%S",
+        "%d %b %Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ]
+
+    for fmt in candidate_formats:
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+
+    # ISO parsing with optional timezone / trailing Z
+    iso_candidate = normalized.replace("Z", "+00:00")
     try:
-        return datetime.strptime(dt_str, "%#d %B %Y %#I:%M:%S %p")
+        parsed_iso = datetime.fromisoformat(iso_candidate)
+        if parsed_iso.tzinfo is not None:
+            parsed_iso = parsed_iso.astimezone(datetime_module.timezone.utc).replace(tzinfo=None)
+        return parsed_iso
     except ValueError:
         pass
-        
-    # Try padded format
-    try:
-        return datetime.strptime(dt_str, "%d %B %Y %I:%M:%S %p")
-    except ValueError:
-        pass
-            
+
     raise ValueError(
         f"Invalid datetime format: {dt_str}. "
         "Expected format: 'D Month YYYY H:MM:SS AM/PM' "
