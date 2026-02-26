@@ -29,11 +29,6 @@ class DbSource(BaseModel):
     instr_info: InstrInfo = Field(description="Background info on instrument type/subtype")
     db_fields: Optional[List[DbField]] = Field(description="Database fields to get data relevant to query")
 
-class QueryWords(BaseModel):
-    """Words in query and data sources relevant to them."""
-    query_words: str = Field(description="Words extracted from query")
-    data_sources: List[DbSource] = Field(description="Data sources and background info relevant to words extracted from query")
-
 class RelevantDateRange(BaseModel):
     """Date range relevant to user query."""
     explanation: str = Field(description="Explanation of what the date range refers to in the query, why the date range was chosen thus and how to apply the date range to answer the query")
@@ -64,7 +59,7 @@ class Context(BaseModel):
     verif_ID_info: Optional[Dict[str, Dict[str, str]]] = Field(description="Mapping of verified instrument IDs to type/subtype info, e.g. {'0003-L-2': {'type': 'LP', 'subtype': 'MOVEMENT'}}", default=None)
     verif_type_info: Optional[List[Dict[str, Any]]] = Field(description="List of identified instrument types and their matched subtypes from the query", default=None)
     unverif_IDs: Optional[List[str]] = Field(description="Instrument IDs in query not found in database", default=None)
-    word_context: Optional[List[QueryWords]] = Field(description="How query words relate to where to get data and background info to answer", default=None)
+    db_sources: Optional[List[DbSource]] = Field(description="Database sources selected to answer the query, including instrument type/subtype, background info, and relevant fields", default=None)
     edge_case: Optional[bool] = Field(description="Indicates whether the user query is an edge case", default=None)
     platform_context: Optional[str] = Field(description="Terminology and semantics specific to the platform served by the database", default=None)
     project_specific_context: Optional[str] = Field(description="Project-specific context", default=None)

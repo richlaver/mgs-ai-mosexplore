@@ -1258,6 +1258,7 @@ def build_graph(
                     "codeact_code": code,
                     "objective": getattr(new_execution, "objective", "") or "",
                     "plan": list(getattr(new_execution, "plan", []) or []),
+                    "error_summary": getattr(new_execution, "error_summary", "") or "",
                 }
             )
 

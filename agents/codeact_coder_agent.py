@@ -1,29 +1,20 @@
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Dict, Any, List
 from datetime import datetime
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
+import setup
 from classes import Execution, Context
 from utils.async_utils import run_async_syncsafe
 from utils.timezone_utils import tzinfo_from_offset
 
 logger = logging.getLogger(__name__)
-
-_CODEACT_STATIC_PROMPT_PATH = Path(__file__).resolve().parents[1] / "cached_llm_content" / "codeact_coder_prompt_static.md"
-
-
-def _load_codeact_static_prompt() -> str:
-  try:
-    return _CODEACT_STATIC_PROMPT_PATH.read_text(encoding="utf-8")
-  except Exception as exc:
-    logger.warning("Failed to load codeact static prompt: %s", exc)
-    return ""
 
 codeact_coder_prompt = PromptTemplate(
     input_variables=[
@@ -31,7 +22,7 @@ codeact_coder_prompt = PromptTemplate(
         "retrospective_query",
         "validated_type_info_json",
         "verified_instrument_info_json",
-        "word_context_json",
+      "db_sources_json",
         "relevant_date_ranges_json",
         "timezone_context_json",
         "platform_context",
@@ -48,8 +39,8 @@ codeact_coder_prompt = PromptTemplate(
 {validated_type_info_json}
 - Validated instrument IDs with their type and subtype mappings (only rely on these confirmed ID-type pairs from the database):
 {verified_instrument_info_json}
-- Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data):
-{word_context_json}
+- Database sources selected to answer the query (instrument types, subtypes, database fields, labels, units, and interpretation context):
+{db_sources_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
 - Timezones (project vs user vs sandbox):
@@ -157,6 +148,61 @@ def extract_json_object(text: str) -> str | None:
   return text[start:end + 1]
 
 
+def _parse_codeact_candidate(raw_message: Any) -> CodeactCoderResponse:
+  raw_content = getattr(raw_message, "content", raw_message)
+  if isinstance(raw_content, str):
+    raw_text = raw_content
+  elif isinstance(raw_content, list):
+    parts: List[str] = []
+    for item in raw_content:
+      if isinstance(item, str):
+        parts.append(item)
+      elif isinstance(item, dict):
+        if isinstance(item.get("text"), str):
+          parts.append(item["text"])
+        elif isinstance(item.get("type"), str) and item.get("type") == "text" and isinstance(item.get("text"), str):
+          parts.append(item["text"])
+        else:
+          parts.append(str(item))
+      else:
+        parts.append(str(item))
+    raw_text = "\n".join(parts)
+  elif isinstance(raw_content, dict):
+    text_part = raw_content.get("text")
+    raw_text = text_part if isinstance(text_part, str) else str(raw_content)
+  else:
+    raw_text = str(raw_content)
+
+  raw_text = strip_think_blocks(raw_text)
+  json_blob = extract_json_object(raw_text)
+  if not json_blob:
+    raise ValueError("Could not extract JSON object from model response")
+  return CodeactCoderResponse.model_validate_json(json_blob)
+
+
+def is_retryable_generation_error(exc: Exception) -> bool:
+  msg = str(exc).lower()
+  retry_hints = [
+    "clientresponse",
+    "not subscriptable",
+    "timeout",
+    "timed out",
+    "deadline",
+    "connection",
+    "network",
+    "temporarily unavailable",
+    "service unavailable",
+    "rate limit",
+    "too many requests",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+  ]
+  return any(hint in msg for hint in retry_hints)
+
+
 def strip_trailing_asyncio_run_notice(code: str) -> str:
   lines = code.rstrip().splitlines()
   while lines and "asyncio.run(execute_strategy())" in lines[-1]:
@@ -222,9 +268,9 @@ def codeact_coder_agent(
   """
 
   retrospective_query = context.retrospective_query if context else ""
-  word_context_json = json.dumps([
-    qw.model_dump() for qw in context.word_context
-  ] if context and context.word_context else [], indent=2)
+  db_sources_json = json.dumps([
+    dbs.model_dump() for dbs in context.db_sources
+  ] if context and context.db_sources else [], indent=2)
   verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2) if context else "{}"
   validated_type_info_json = json.dumps(context.verif_type_info or [], indent=2) if context else "[]"
   relevant_date_ranges_json = json.dumps([
@@ -256,10 +302,6 @@ def codeact_coder_agent(
         previous_attempts_summary += f"Attempt {i+1} failed.\n"
         previous_attempts_summary += f"Error summary: {attempt.error_summary}\n\n"
 
-  structured_llm = generating_llm.with_structured_output(
-    CodeactCoderResponse,
-    method="json_mode",
-  )
   tools_payload = json.dumps(
     [
       {"name": getattr(t, "name", ""), "description": getattr(t, "description", "")}
@@ -267,9 +309,36 @@ def codeact_coder_agent(
     ],
     indent=2,
   )
-  static_prompt = _load_codeact_static_prompt()
-  if static_prompt:
-    static_prompt = static_prompt.replace("<<TOOLS_STR>>", tools_payload)
+  static_prompt = ""
+  try:
+    static_prompt = setup.build_codeact_coder_cached_context(tools_payload)
+  except Exception as exc:
+    logger.warning("Failed to build codeact cached context from static prompt: %s", exc)
+
+  cached_invoke_kwargs: Dict[str, Any] = {}
+  if static_prompt and isinstance(generating_llm, ChatGoogleGenerativeAI):
+    try:
+      cached_content_name = setup.get_or_refresh_cached_content(
+        cache_key="codeact_coder",
+        content_text=static_prompt,
+        llm=generating_llm,
+        display_prefix="codeact-coder-cache",
+        legacy_hash_keys=["codeact_coder_cached_context_hash"],
+      )
+      if cached_content_name:
+        cached_invoke_kwargs = {"cached_content": cached_content_name}
+        logger.info("CodeAct cache attached: %s", cached_content_name)
+      else:
+        logger.info("CodeAct cache unavailable; embedding static prompt directly")
+    except Exception as cache_exc:
+      logger.warning("CodeAct cache setup failed; embedding static prompt directly: %s", cache_exc)
+
+  structured_llm = generating_llm.bind(
+    response_mime_type="application/json",
+    response_json_schema=CodeactCoderResponse.model_json_schema(),
+    **cached_invoke_kwargs,
+  )
+  raw_llm = generating_llm.bind(**cached_invoke_kwargs) if cached_invoke_kwargs else generating_llm
 
   max_format_retries = 4
   required_entrypoint = "def/async def execute_strategy(...):"
@@ -294,7 +363,7 @@ def codeact_coder_agent(
           "retrospective_query": retrospective_query,
           "validated_type_info_json": validated_type_info_json,
           "verified_instrument_info_json": verified_instrument_info_json,
-          "word_context_json": word_context_json,
+          "db_sources_json": db_sources_json,
           "relevant_date_ranges_json": relevant_date_ranges_json,
           "timezone_context_json": timezone_context_json,
           "platform_context": platform_context,
@@ -302,11 +371,15 @@ def codeact_coder_agent(
           "previous_attempts_summary": attempt_previous_attempts_summary,
         }
         prompt_text = codeact_coder_prompt.format(**prompt_payload)
-        if static_prompt:
+        if static_prompt and not cached_invoke_kwargs:
           prompt_text = f"{static_prompt}\n\n{prompt_text}"
 
         message = HumanMessage(content=prompt_text)
-        candidate = run_async_syncsafe(structured_llm.ainvoke([message]))
+        structured_response = run_async_syncsafe(structured_llm.ainvoke([message]))
+        usage_metadata = getattr(structured_response, "usage_metadata", None)
+        if usage_metadata:
+          logger.info("CodeAct structured usage metadata: %s", usage_metadata)
+        candidate = _parse_codeact_candidate(structured_response)
 
         if candidate is None:
           raise ValueError("Structured output returned no result.")
@@ -342,20 +415,29 @@ def codeact_coder_agent(
             "entrypoint",
           ]
         )
+        is_transient_issue = is_retryable_generation_error(exc)
+        if is_transient_issue and attempt < max_format_retries:
+          runtime_retry_errors.append(str(exc))
+          logger.warning(
+            "Structured code generation transient error (attempt %d/%d); retrying: %s",
+            attempt + 1,
+            max_format_retries + 1,
+            exc,
+          )
+          continue
         if is_format_issue and attempt < max_format_retries:
           try:
-            raw_message = run_async_syncsafe(generating_llm.ainvoke([message]))
-            raw_content = getattr(raw_message, "content", str(raw_message))
-            raw_content = strip_think_blocks(raw_content)
-            json_blob = extract_json_object(raw_content)
-            if json_blob:
-              candidate = CodeactCoderResponse.model_validate_json(json_blob)
-              cleaned_code = strip_trailing_asyncio_run_notice(
-                strip_code_tags(candidate.code)
-              )
-              if cleaned_code and has_execute_strategy(cleaned_code):
-                response = candidate
-                break
+            raw_message = run_async_syncsafe(raw_llm.ainvoke([message]))
+            raw_usage = getattr(raw_message, "usage_metadata", None)
+            if raw_usage:
+              logger.info("CodeAct raw fallback usage metadata: %s", raw_usage)
+            candidate = _parse_codeact_candidate(raw_message)
+            cleaned_code = strip_trailing_asyncio_run_notice(
+              strip_code_tags(candidate.code)
+            )
+            if cleaned_code and has_execute_strategy(cleaned_code):
+              response = candidate
+              break
           except Exception as raw_exc:
             logger.warning(
               "Raw-response parsing failed after structured output error: %s",

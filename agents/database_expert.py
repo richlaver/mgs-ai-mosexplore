@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from utils.async_utils import run_async_syncsafe
 
-from classes import InstrInfo, DbField, DbSource, QueryWords, ContextState
+from classes import InstrInfo, DbField, DbSource, ContextState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 from utils.context_data import get_instrument_context
@@ -25,6 +25,72 @@ from utils.run_cancellation import (
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+ALL_KEYS_SENTINEL = "ALL KEYS"
+
+
+def _content_to_text(content: Any) -> str:
+    """Convert LLM message content (str/list/dict) into plain text for scanning."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text_part = item.get("text")
+                if isinstance(text_part, str):
+                    parts.append(text_part)
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text_part = content.get("text")
+        return text_part if isinstance(text_part, str) else str(content)
+    return str(content)
+
+
+def _message_to_text(message: Any) -> str:
+    """Extract text from a LangChain message-like object."""
+    if message is None:
+        return ""
+    if hasattr(message, "content"):
+        return _content_to_text(getattr(message, "content", ""))
+    return _content_to_text(message)
+
+
+def _contains_all_keys_sentinel(text: str) -> bool:
+    """Detect explicit ALL KEYS sentinel (case-sensitive, allows surrounding text)."""
+    if not text:
+        return False
+    return re.search(r"(?<![A-Za-z])ALL KEYS(?![A-Za-z])", text) is not None
+
+
+def _build_all_keys_selection(instrument_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expand to all instrument keys with all available database field names."""
+    all_items: list[dict[str, Any]] = []
+    for key, entry in instrument_data.items():
+        if not isinstance(entry, dict):
+            continue
+        fields = entry.get("fields") or []
+        if isinstance(fields, list):
+            field_names = [
+                field.get("database_field_name", "")
+                for field in fields
+                if isinstance(field, dict) and field.get("database_field_name")
+            ]
+        else:
+            field_names = []
+        all_items.append({
+            "key": key,
+            "database_field_names": field_names,
+        })
+    logger.info("Expanded ALL KEYS sentinel into %d instrument selections", len(all_items))
+    return all_items
 
 def _log_instrument_cache_summary(instrument_data: dict[str, Any]) -> None:
     """Log a concise summary of the instrument context cache contents."""
@@ -110,7 +176,10 @@ Field Selection Guidelines:
 
 IMPORTANT: Match query semantics with field semantics using the rich metadata provided in the instrument context.
 
-Output MUST be valid JSON list format: [[{{"key": "LP_MOVEMENT", "database_field_names": ["calculation1"]}}, ...]
+**Do not** make-up any keys, types, subtypes, or field names that are not explicitly present in the provided instrument context.
+
+If all instrument keys/types/subtypes are relevant to answer the query, output the exact phrase "ALL KEYS" (case-sensitive).
+Otherwise output MUST be in valid JSON list format: [{"key": "LP_MOVEMENT", "database_field_names": ["calculation1"]}, ...]
 If no relevant fields for a key, use empty list (will skip). If no additional semantics, only explicit.
 If no matches at all, return empty list []."""
 
@@ -140,7 +209,9 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         "Always include these explicit keys if any: {verified_str}, and for each, select ONLY the field names "
         "that are relevant to the specific query context based on field metadata analysis. "
         "Additionally, identify other relevant keys from query semantics, and select their relevant fields.\n\n"
-        "Return JSON with instrument keys and their relevant fields only."
+        "**Do not** make-up any keys, types, subtypes, or field names that are not explicitly present in the provided instrument context.\n\n"
+        "If all instrument keys/types/subtypes are relevant, return the precise phrase \"ALL KEYS\" (case-sensitive) instead of JSON.\n\n"
+        "Otherwise return JSON with instrument keys and their relevant fields only."
     ).format(query=query, verified_str=verified_str)
 
     # Fallback prompt when explicit cache retrieval is unavailable. This reconstructs
@@ -194,39 +265,67 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         raise ValueError("Instrument selection parallel calls returned no result")
 
     result: list[dict[str, Any]] | None = None
+    cached_invoke_kwargs: Dict[str, Any] = {}
     try:
         cached_context = reconstructed_cached_context
-        cached_content_id = setup.get_or_refresh_cached_content(
+        cached_content_name = setup.get_or_refresh_cached_content(
             cache_key="instrument_selection",
             content_text=cached_context,
             llm=llm,
             display_prefix="instrument-selection-cache",
             legacy_hash_keys=["instrument_selection_cached_context_hash"],
         )
-        structured_llm = llm.with_structured_output(
-            InstrumentSelectionList,
-            method="json_mode",
+        if cached_content_name:
+            cached_invoke_kwargs = {"cached_content": cached_content_name}
+            logger.info("Instrument selection cache attached: %s", cached_content_name)
+        else:
+            logger.info("Instrument selection cache unavailable; proceeding without cached content")
+
+        structured_llm = llm.bind(
+            response_mime_type="application/json",
+            response_json_schema=InstrumentSelectionList.model_json_schema(),
+            **cached_invoke_kwargs,
         )
 
         # Prompt to use when injecting cached content from
         # `cached_llm_content/instrument_selection_prompt_static.md`.
         message = HumanMessage(content=prompt_text)
-        if cached_content_id:
-            structured_response = _race_llm_calls(
-                lambda: structured_llm.ainvoke([message], cached_content=cached_content_id),
-                parallel_calls=2,
-                label="instrument_selection_structured_cached",
-            )
-        else:
-            structured_response = _race_llm_calls(
-                lambda: structured_llm.ainvoke([message]),
-                parallel_calls=2,
-                label="instrument_selection_structured",
-            )
+        structured_response_payload = _race_llm_calls(
+            lambda: structured_llm.ainvoke([message]),
+            parallel_calls=2,
+            label="instrument_selection_structured_cached" if cached_invoke_kwargs else "instrument_selection_structured",
+        )
+        logger.info(f"Instrument selection structured response payload: {structured_response_payload}")
 
-        if structured_response is None:
-            raise ValueError("Structured output returned no result.")
-        result = structured_response.to_dict_list()
+        usage_metadata = getattr(structured_response_payload, "usage_metadata", None)
+        if usage_metadata:
+            logger.info("Instrument selection structured usage metadata: %s", usage_metadata)
+
+        raw_structured_text = _message_to_text(structured_response_payload)
+        if _contains_all_keys_sentinel(raw_structured_text):
+            logger.info("Detected ALL KEYS sentinel in structured response")
+            return _build_all_keys_selection(instrument_data)
+
+        structured_text = strip_to_json_payload(
+            raw_structured_text,
+            [
+                '"items"',
+                '"key"',
+            ],
+        )
+        structured_json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', structured_text, re.DOTALL | re.IGNORECASE)
+        structured_json_text = structured_json_match.group(1) if structured_json_match else structured_text
+        parsed_structured = json.loads(structured_json_text)
+
+        if isinstance(parsed_structured, InstrumentSelectionList):
+            result = parsed_structured.to_dict_list()
+        elif isinstance(parsed_structured, dict):
+            validated_structured = InstrumentSelectionList.model_validate(parsed_structured)
+            result = validated_structured.to_dict_list()
+        elif isinstance(parsed_structured, list):
+            result = parsed_structured
+        else:
+            raise ValueError(f"Unexpected structured payload type: {type(parsed_structured)}")
         logger.info("Structured instrument selection succeeded with %d items", len(result))
     except Exception as structured_error:
         logger.warning("Structured output failed; falling back to raw parsing: %s", structured_error)
@@ -235,20 +334,23 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         # Prefer reconstructed cached prompt when explicit cache lookup fails,
         # but retain the original prompt path as a safety fallback.
         try:
-            chain = cached_missing_prompt | llm
-            invoke_inputs = cached_missing_inputs
+            invoke_messages = cached_missing_prompt.format_messages(**cached_missing_inputs)
         except Exception:
-            chain = prompt | llm
-            invoke_inputs = call_inputs
+            invoke_messages = prompt.format_messages(**call_inputs)
+        raw_llm = llm.bind(**cached_invoke_kwargs) if cached_invoke_kwargs else llm
         response = _race_llm_calls(
-            lambda: chain.ainvoke(invoke_inputs),
+            lambda: raw_llm.ainvoke(invoke_messages),
             parallel_calls=2,
-            label="instrument_selection_raw",
+            label="instrument_selection_raw_cached" if cached_invoke_kwargs else "instrument_selection_raw",
         )
         try:
-            logger.debug(f"Raw LLM response: {response.content}")
+            raw_response_text = _message_to_text(response)
+            usage_metadata = getattr(response, "usage_metadata", None)
+            if usage_metadata:
+                logger.info("Instrument selection raw usage metadata: %s", usage_metadata)
+            logger.debug(f"Raw LLM response: {raw_response_text}")
             response_text = strip_to_json_payload(
-                response.content,
+                raw_response_text,
                 [
                     '"key"',
                 ],
@@ -261,7 +363,11 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
                 result = json.loads(response_text)
         except json.JSONDecodeError as e:
             logger.error("JSON decode error: %s", e)
-            logger.error("Raw response content: %r", response.content)
+            raw_response_text = _message_to_text(response)
+            logger.error("Raw response content: %r", raw_response_text)
+            if _contains_all_keys_sentinel(raw_response_text):
+                logger.info("Detected ALL KEYS sentinel in raw fallback response")
+                return _build_all_keys_selection(instrument_data)
             if verified_type_subtype:
                 logger.info("JSON parsing failed but verified instruments exist, using intelligent field selection fallback")
                 default_items = []
@@ -276,6 +382,10 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             return []
         except Exception as e:
             logger.error("Unexpected error parsing identified instruments: %s", e)
+            raw_response_text = _message_to_text(response)
+            if _contains_all_keys_sentinel(raw_response_text):
+                logger.info("Detected ALL KEYS sentinel after unexpected raw parsing error")
+                return _build_all_keys_selection(instrument_data)
             if verified_type_subtype:
                 logger.info("Error occurred but verified instruments exist, using intelligent field selection")
                 fallback_items = []
@@ -345,12 +455,6 @@ def get_fields_from_json(instrument_data: dict[str, any], instr_type: str, instr
                 units=field.get('unit', field.get('units', ''))
             ))
     return db_fields
-
-def extract_matching_words(query: str, target_text: str) -> str:
-    query_words = set(query.lower().split())
-    target_words = set(target_text.lower().split())
-    matching = query_words.intersection(target_words)
-    return ' '.join(sorted(matching)) if matching else ' '.join(query.split()[:3])
 
 def _select_relevant_fields_with_llm(llm: BaseLanguageModel, query: str, type_subtype: str, instrument_data: Dict[str, Any]) -> List[str]:
     """
@@ -599,7 +703,7 @@ def _metadata_based_selection(query: str, fields: List[Dict[str, Any]]) -> List[
     return selected_fields[:2]
 
 def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, selected_project_key: str | None = None) -> dict:
-    """Database expert agent: Retrieves and updates word_context if no clarification needed.
+    """Database expert agent: Retrieves and updates db_sources if no clarification needed.
     Returns a Command to update state in the graph.
     """
     logger.info("Database expert invoked")
@@ -634,8 +738,7 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, select
         verif_id_info = getattr(state.context, "verif_ID_info", {}) or {}
         verif_type_info = getattr(state.context, "verif_type_info", []) or []
     logger.debug("Query extracted: %s", query)
-    query_words_list: list[QueryWords] = []
-    type_subtype_groups: dict[tuple, list[str]] = {}
+    db_sources_list: list[DbSource] = []
     verified_type_subtype: list[str] = []
     verified_type_subtype_keys: set[str] = set()
 
@@ -651,12 +754,8 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, select
         for instr_id, info in verif_id_info.items():
             db_type = info["type"]
             db_subtype = info["subtype"]
-            key_tuple = (db_type, db_subtype)
-            if key_tuple not in type_subtype_groups:
-                type_subtype_groups[key_tuple] = []
-            type_subtype_groups[key_tuple].append(instr_id)
             _add_verified_type(db_type, db_subtype)
-    logger.info("Verified IDs processed: %d groups", len(type_subtype_groups))
+    logger.info("Verified IDs processed: %d", len(verif_id_info))
 
     if verif_type_info:
         for type_entry in verif_type_info:
@@ -668,7 +767,6 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, select
                 _add_verified_type(instr_type, subtype)
     logger.info("Verified type/subtype pairs collected: %d", len(verified_type_subtype))
     semantic_filtered = identify_and_filter_instruments(llm, query, instrument_data, verified_type_subtype)
-    verified_type_subtype_set = verified_type_subtype_keys
     for item in semantic_filtered:
         key = item.get('key')
         selected_fields = item.get('database_field_names', [])
@@ -691,30 +789,21 @@ def database_expert(state: ContextState, llm: BaseLanguageModel, db: any, select
                 db_fields_full = get_fields_from_json(instrument_data, instr_type, instr_subtype)
                 db_fields = [f for f in db_fields_full if f.db_name in selected_fields] if selected_fields else []
                 if db_fields:
-                    db_sources = DbSource(
+                    db_source = DbSource(
                         instr_type=instr_type,
                         instr_subtype=instr_subtype,
                         instr_info=instr_info,
                         db_fields=db_fields
                     )
-                    ids = type_subtype_groups.get((instr_type, instr_subtype), [])
-                    query_words_str = f"Instruments: {', '.join(ids)}" if key in verified_type_subtype_set else extract_matching_words(query,f"""
-{entry.get('name', '')} 
-{entry.get('raw_instrument_output', '')} 
-{entry.get('derived_measurands', '')} 
-{entry.get('purpose', '')}""")
-                    query_words_list.append(QueryWords(
-                        query_words=query_words_str,
-                        data_sources=[db_sources]
-                    ))
+                    db_sources_list.append(db_source)
                 else:
-                    logger.info("No db_fields selected for %s; skipping QueryWords", key)
+                    logger.info("No db_fields selected for %s; skipping DbSource", key)
             else:
                 logger.info("No instrument metadata found for key %s", key)
     context_update = {
-        "word_context": query_words_list
+        "db_sources": db_sources_list
     }
-    logger.info("Database expert completed with %d word_context entries", len(query_words_list))
+    logger.info("Database expert completed with %d db_sources entries", len(db_sources_list))
 
     return Command(
         goto="supervisor",

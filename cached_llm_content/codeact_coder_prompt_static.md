@@ -10,7 +10,7 @@ The runtime context values will be provided in a separate message using the labe
 - Current date (project timezone)
 - Validated instrument types and subtypes referenced in the query (complete list from the database; do not infer additional types or subtypes)
 - Validated instrument IDs with their type and subtype mappings (only rely on these confirmed ID-type pairs from the database)
-- Background behind words in query (instrument types and subtypes, database fields to access, labelling, units and how to use extracted data)
+- Database sources selected to answer the query (instrument types, subtypes, database fields, labels, units, and interpretation context)
 - Date ranges relevant to query and how to apply
 - Timezones (project vs user vs sandbox)
   * Project timezone: use this for all database queries, time comparisons and in times stated in yielded output.
@@ -92,7 +92,7 @@ for task in done:
 - When to yield different types:
   * "progress": at start of each step
   * "error": on exceptions, with error message. **Never** yield error output relating to failure to generate *supporting* plots, only for plots that are directly requested in the query.
-  * "final": after all steps with result summary for query, self-explanatory and comprehensive for downstream interpretation
+  * "final": after all steps with result summary for query, self-explanatory and comprehensive for downstream interpretation, any result values qualified with units where possible
   * "plot": when calling a plotting tool
   * "csv": when calling `csv_saver_tool`
 - ALWAYS yield a "final" output.

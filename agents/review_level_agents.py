@@ -67,6 +67,7 @@ class _GenericReviewAgentState(TypedDict, total=False):
     tool_inputs: Dict[str, Any]
     tool_result: Any
     next_path: Optional[str]
+    skip_consistency_check: bool
 
     
 def _listify_str(val: Any) -> List[str]:
@@ -294,6 +295,7 @@ class BaseGenericReviewAgentTool(BaseTool):
     instructions: ClassVar[str] = ""
     param_map: ClassVar[Dict[str, str]] = {}
     max_attempts: ClassVar[int] = 5
+    waive_consistency_on_post_process_change: ClassVar[bool] = False
 
     def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
         return tool_inputs
@@ -337,6 +339,7 @@ class BaseGenericReviewAgentTool(BaseTool):
                     logger.info("Inputs after post_process [non-JSON-serializable]: %s", str(tool_inputs))
 
                 try:
+                    skip_consistency_check = False
                     if isinstance(_pre_pp_inputs, dict) and isinstance(tool_inputs, dict) and _pre_pp_inputs != tool_inputs:
                         before_keys = set(_pre_pp_inputs.keys())
                         after_keys = set(tool_inputs.keys())
@@ -344,10 +347,13 @@ class BaseGenericReviewAgentTool(BaseTool):
                         removed = sorted(list(before_keys - after_keys))
                         changed = sorted([k for k in (before_keys & after_keys) if _pre_pp_inputs.get(k) != tool_inputs.get(k)])
                         logger.info("post_process_inputs changes -> added: %s, removed: %s, changed: %s", added, removed, changed)
+                        if self.waive_consistency_on_post_process_change:
+                            skip_consistency_check = True
+                            logger.info("Waiving consistency check due to intentional post_process normalization")
                 except Exception:
-                    pass
+                    skip_consistency_check = False
                 messages.append(AIMessage(name=agent_label, content=f"Generated inputs: {tool_inputs}", additional_kwargs={"stage": "intermediate", "process": "observation"}))
-                return {"tool_inputs": tool_inputs, "messages": messages}
+                return {"tool_inputs": tool_inputs, "skip_consistency_check": skip_consistency_check, "messages": messages}
             except Exception as e:
                 err = f"Generation failed: {e}"; previous_errors.append(err)
                 messages.append(AIMessage(name=agent_label, content=err, additional_kwargs={"stage": "intermediate", "process": "observation"}))
@@ -385,6 +391,10 @@ class BaseGenericReviewAgentTool(BaseTool):
                 if tool_inputs:
                     previous_failed_inputs.append(tool_inputs)
                 messages.append(AIMessage(name=agent_label, content=err, additional_kwargs={"stage": "intermediate", "process": "observation"}))
+                if len(previous_errors) >= self.max_attempts:
+                    terminal_err = f"ERROR: exceeded max attempts ({self.max_attempts}) while generating required inputs"
+                    messages.append(AIMessage(name=agent_label, content=terminal_err, additional_kwargs={"stage": "final", "process": "observation"}))
+                    return {"tool_result": terminal_err, "next_path": "parse_result", "previous_errors": previous_errors, "previous_failed_inputs": previous_failed_inputs, "messages": messages}
                 return {"previous_errors": previous_errors, "previous_failed_inputs": previous_failed_inputs, "next_path": "generate_inputs", "messages": messages}
             messages.append(AIMessage(name=agent_label, content="All required fields present.", additional_kwargs={"stage": "intermediate", "process": "observation"}))
             return {"next_path": "check_consistent_inputs", "messages": messages}
@@ -392,6 +402,9 @@ class BaseGenericReviewAgentTool(BaseTool):
         def check_consistent_inputs(state: _GenericReviewAgentState) -> _GenericReviewAgentState:
             messages = state.get("messages", [])
             tool_inputs = state.get("tool_inputs", {})
+            if state.get("skip_consistency_check", False):
+                messages.append(AIMessage(name=agent_label, content="Skipping consistency check after post_process normalization.", additional_kwargs={"stage": "intermediate", "process": "observation"}))
+                return {"next_path": "call_tool", "messages": messages}
             messages.append(AIMessage(name=agent_label, content="Validating factual consistency...", additional_kwargs={"stage": "intermediate", "process": "action"}))
             previous_errors = state.get("previous_errors", [])
             previous_failed_inputs = state.get("previous_failed_inputs", [])
@@ -413,6 +426,10 @@ class BaseGenericReviewAgentTool(BaseTool):
                 previous_errors.append(parsed["message"])
                 previous_failed_inputs.append(tool_inputs)
                 messages.append(AIMessage(name=agent_label, content=f"Consistency parsed as error -> {parsed['message']}", additional_kwargs={"stage": "intermediate", "process": "observation"}))
+                if len(previous_errors) >= self.max_attempts:
+                    terminal_err = f"ERROR: exceeded max attempts ({self.max_attempts}) during consistency validation"
+                    messages.append(AIMessage(name=agent_label, content=terminal_err, additional_kwargs={"stage": "final", "process": "observation"}))
+                    return {"tool_result": terminal_err, "next_path": "parse_result", "previous_errors": previous_errors, "previous_failed_inputs": previous_failed_inputs, "messages": messages}
                 return {"previous_errors": previous_errors, "previous_failed_inputs": previous_failed_inputs, "next_path": "generate_inputs", "messages": messages}
             messages.append(AIMessage(name=agent_label, content="Consistency OK.", additional_kwargs={"stage": "intermediate", "process": "observation"}))
             return {"next_path": "call_tool", "messages": messages}
@@ -791,6 +808,7 @@ class ReviewChangesAcrossPeriodAgentTool(BaseGenericReviewAgentTool):
         "end_buffer": "end_buffer",
         "change_direction": "change_direction",
     }
+    waive_consistency_on_post_process_change: ClassVar[bool] = True
 
     def post_process_inputs(self, tool_inputs: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(tool_inputs)

@@ -64,6 +64,13 @@ def perform_setup():
         )
     except Exception as exc:
         logger.warning("Failed to refresh instrument selection cache at startup: %s", exc)
+    try:
+        setup.refresh_codeact_coder_cache(
+            st.session_state.llms.get("CODING", st.session_state.llms["LONG"]),
+            tools_payload="[]",
+        )
+    except Exception as exc:
+        logger.warning("Failed to refresh CodeAct coder cache at startup: %s", exc)
 
     raw_parallel = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
     try:

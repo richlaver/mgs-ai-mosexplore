@@ -109,7 +109,7 @@ class InterruptibleChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                     )
         try:
             self._raise_if_cancelled(controller, cancel_event, "llm:agenerate:pre")
-            result = await super()._agenerate(*args, **kwargs)
+            result = await asyncio.to_thread(super()._generate, *args, **kwargs)
             self._raise_if_cancelled(controller, cancel_event, "llm:agenerate:post")
             return result
         except asyncio.CancelledError as exc:

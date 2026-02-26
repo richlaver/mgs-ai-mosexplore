@@ -73,6 +73,8 @@ PARALLEL_EXECUTIONS = 2
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
+_CACHED_CONTENT_NAMES: Dict[str, str] = {}
+_CACHED_CONTENT_MODELS: Dict[str, str] = {}
 _GOOGLE_CREDENTIALS_SET = False
 
 
@@ -149,6 +151,11 @@ def _get_google_config_for_cache(llm: Any) -> GoogleGenAIConfig:
 
 def _load_instrument_selection_template() -> str:
     prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "instrument_selection_prompt_static.md"
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def _load_codeact_coder_template() -> str:
+    prompt_path = Path(__file__).resolve().parent / "cached_llm_content" / "codeact_coder_prompt_static.md"
     return prompt_path.read_text(encoding="utf-8")
 
 
@@ -233,6 +240,11 @@ def build_instrument_selection_cached_context(context_text: str) -> str:
     return template.replace("<<INSTRUMENT_CONTEXT>>", context_text)
 
 
+def build_codeact_coder_cached_context(tools_payload: str) -> str:
+    template = _load_codeact_coder_template()
+    return template.replace("<<TOOLS_STR>>", tools_payload or "[]")
+
+
 def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm: Any) -> Optional[str]:
     """Refresh instrument selection cached content for the selected project."""
     instrument_payload = get_instrument_context(selected_project_key)
@@ -247,6 +259,20 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
         llm=llm,
         display_prefix="instrument-selection-cache",
         legacy_hash_keys=["instrument_selection_cached_context_hash"],
+    )
+
+
+def refresh_codeact_coder_cache(llm: Any, tools_payload: Optional[str] = None) -> Optional[str]:
+    """Refresh CodeAct coder cached content for the selected model."""
+    if not isinstance(llm, ChatGoogleGenerativeAI):
+        return None
+    cached_context = build_codeact_coder_cached_context(tools_payload or "[]")
+    return ensure_cached_content(
+        cache_key="codeact_coder",
+        content_text=cached_context,
+        llm=llm,
+        display_prefix="codeact-coder-cache",
+        legacy_hash_keys=["codeact_coder_cached_context_hash"],
     )
 
 
@@ -289,18 +315,25 @@ def ensure_cached_content(
     force_refresh: bool = False,
 ) -> Optional[str]:
     """Create or reuse cached content for a given cache key and content."""
-    global _CACHED_CONTENT_IDS, _CACHED_CONTENT_HASHES
+    global _CACHED_CONTENT_IDS, _CACHED_CONTENT_HASHES, _CACHED_CONTENT_NAMES, _CACHED_CONTENT_MODELS
 
     content_hash = hashlib.sha256((content_text or "").encode("utf-8")).hexdigest()
     id_key = f"{cache_key}_cached_content_id"
+    name_key = f"{cache_key}_cached_content_name"
     hash_key = f"{cache_key}_cached_content_hash"
+    model_key = f"{cache_key}_cached_content_model"
     legacy_keys = list(legacy_hash_keys or [])
+    model_id = _get_llm_model_id(llm, "")
 
     cached_id = None
+    cached_name = None
     cached_hash = None
+    cached_model = None
     try:
         cached_id = st.session_state.get(id_key)
+        cached_name = st.session_state.get(name_key)
         cached_hash = st.session_state.get(hash_key)
+        cached_model = st.session_state.get(model_key)
         if cached_hash is None:
             for legacy_key in legacy_keys:
                 cached_hash = st.session_state.get(legacy_key)
@@ -309,17 +342,32 @@ def ensure_cached_content(
     except Exception:
         pass
 
-    if not force_refresh and cached_id and cached_hash == content_hash:
-        _CACHED_CONTENT_IDS[cache_key] = cached_id
-        _CACHED_CONTENT_HASHES[cache_key] = cached_hash
-        return cached_id
+    if not cached_name and cached_id:
+        try:
+            cached_name = get_cached_content_name_from_id(cached_id, llm)
+        except Exception:
+            cached_name = None
 
     if (
         not force_refresh
-        and _CACHED_CONTENT_IDS.get(cache_key)
-        and _CACHED_CONTENT_HASHES.get(cache_key) == content_hash
+        and cached_name
+        and cached_hash == content_hash
+        and (not model_id or cached_model == model_id)
     ):
-        return _CACHED_CONTENT_IDS[cache_key]
+        _CACHED_CONTENT_IDS[cache_key] = cached_id
+        _CACHED_CONTENT_NAMES[cache_key] = cached_name
+        _CACHED_CONTENT_HASHES[cache_key] = cached_hash
+        if model_id:
+            _CACHED_CONTENT_MODELS[cache_key] = model_id
+        return cached_name
+
+    if (
+        not force_refresh
+        and _CACHED_CONTENT_NAMES.get(cache_key)
+        and _CACHED_CONTENT_HASHES.get(cache_key) == content_hash
+        and (not model_id or _CACHED_CONTENT_MODELS.get(cache_key) == model_id)
+    ):
+        return _CACHED_CONTENT_NAMES[cache_key]
 
     config = _get_google_config_for_cache(llm)
     session = _get_api_session()
@@ -327,13 +375,19 @@ def ensure_cached_content(
     cached_id = cached_name.split("/")[-1]
 
     _CACHED_CONTENT_IDS[cache_key] = cached_id
+    _CACHED_CONTENT_NAMES[cache_key] = cached_name
     _CACHED_CONTENT_HASHES[cache_key] = content_hash
+    if model_id:
+        _CACHED_CONTENT_MODELS[cache_key] = model_id
     try:
         st.session_state[id_key] = cached_id
+        st.session_state[name_key] = cached_name
         st.session_state[hash_key] = content_hash
+        if model_id:
+            st.session_state[model_key] = model_id
     except Exception:
         pass
-    return cached_id
+    return cached_name
 
 
 def get_cached_content_id(cache_key: str) -> Optional[str]:
@@ -352,16 +406,57 @@ def get_cached_content_id(cache_key: str) -> Optional[str]:
     return None
 
 
-def is_cached_content_active(cached_id: str, llm: Any) -> bool:
+def get_cached_content_name(cache_key: str, llm: Any) -> Optional[str]:
+    global _CACHED_CONTENT_NAMES
+    cached_name = _CACHED_CONTENT_NAMES.get(cache_key)
+    if cached_name:
+        return cached_name
+
+    name_key = f"{cache_key}_cached_content_name"
+    try:
+        cached_name = st.session_state.get(name_key)
+        if cached_name:
+            _CACHED_CONTENT_NAMES[cache_key] = cached_name
+            return cached_name
+    except Exception:
+        pass
+
+    cached_id = get_cached_content_id(cache_key)
     if not cached_id:
+        return None
+    try:
+        cached_name = get_cached_content_name_from_id(cached_id, llm)
+    except Exception:
+        cached_name = None
+    if cached_name:
+        _CACHED_CONTENT_NAMES[cache_key] = cached_name
+        try:
+            st.session_state[name_key] = cached_name
+        except Exception:
+            pass
+    return cached_name
+
+
+def get_cached_content_name_from_id(cached_id: str, llm: Any) -> str:
+    if not cached_id:
+        raise ValueError("cached_id is required")
+    if cached_id.startswith("projects/"):
+        return cached_id
+    config = _get_google_config_for_cache(llm)
+    return f"projects/{config.project_id}/locations/{config.location}/cachedContents/{cached_id}"
+
+
+def is_cached_content_active(cached_ref: str, llm: Any) -> bool:
+    if not cached_ref:
         return False
+    cached_name = get_cached_content_name_from_id(cached_ref, llm)
     config = _get_google_config_for_cache(llm)
     session = _get_api_session()
-    url = f"{config.base_url}/projects/{config.project_id}/locations/{config.location}/cachedContents/{cached_id}"
+    url = f"{config.base_url}/{cached_name}"
     resp = session.get(url, timeout=10)
     if resp.status_code == 200:
         return True
-    logger.info("Cached content %s check failed (status=%s)", cached_id, resp.status_code)
+    logger.info("Cached content %s check failed (status=%s)", cached_name, resp.status_code)
     return False
 
 
@@ -372,9 +467,35 @@ def get_or_refresh_cached_content(
     display_prefix: str,
     legacy_hash_keys: Optional[List[str]] = None,
 ) -> Optional[str]:
-    cached_id = get_cached_content_id(cache_key)
-    if cached_id and is_cached_content_active(cached_id, llm):
-        return cached_id
+    model_key = f"{cache_key}_cached_content_model"
+    model_id = _get_llm_model_id(llm, "")
+    cached_model = _CACHED_CONTENT_MODELS.get(cache_key)
+    try:
+        cached_model = st.session_state.get(model_key) or cached_model
+    except Exception:
+        pass
+
+    cached_name = get_cached_content_name(cache_key, llm)
+    model_matches = (not model_id) or (cached_model == model_id)
+    if (
+        cached_name
+        and model_matches
+        and is_cached_content_active(cached_name, llm)
+    ):
+        return cached_name
+    if cached_name and model_id and cached_model and cached_model != model_id:
+        logger.info(
+            "Refreshing cached content for %s due to model change (%s -> %s)",
+            cache_key,
+            cached_model,
+            model_id,
+        )
+    elif cached_name and model_id and not cached_model:
+        logger.info(
+            "Refreshing cached content for %s because cached model metadata is missing (target=%s)",
+            cache_key,
+            model_id,
+        )
     return ensure_cached_content(
         cache_key=cache_key,
         content_text=content_text,
@@ -764,11 +885,17 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
     """
     st.toast("Setting up LLMs...", icon=":material/build:")
     return {
+        # "LONG": build_llm_from_library(
+        #     "GEMINI_2_5_FLASH",
+        #     temperature=0.3,
+        #     max_tokens=8192,
+        #     thinking_mode=True,
+        # ),
         "LONG": build_llm_from_library(
-            "GEMINI_2_5_FLASH",
-            temperature=0.3,
+            "GEMINI_3_1_PRO",
+            temperature=1.0,
             max_tokens=8192,
-            thinking_mode=True,
+            thinking_level="low",
         ),
         "FAST": build_llm_from_library(
             "GEMINI_2_5_FLASH",
@@ -784,7 +911,7 @@ def get_llms(model_series: Optional[str] = None) -> Dict[str, Any]:
         ),
         "CODING": build_llm_from_library(
             "GEMINI_3_1_PRO",
-            temperature=0.5,
+            temperature=1.0,
             max_tokens=8192,
             thinking_level="low",
         ),
