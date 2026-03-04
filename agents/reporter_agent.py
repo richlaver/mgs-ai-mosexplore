@@ -45,20 +45,20 @@ def reporter_agent(
         for art in ex.artefacts:
             if not isinstance(art, dict):
                 continue
-            process = art.get("type")
+            process = str(art.get("type") or "").lower()
             desc = art.get("description")
             artefact_id = art.get("id")
             tool_name = art.get("tool_name")
 
             if process == "plot":
-                if desc not in plot_dict:
+                if artefact_id and desc not in plot_dict:
                     plot_dict[desc] = {
                         "description": desc,
                         "artefact_id": artefact_id,
                         "tool_name": tool_name,
                     }
             elif process == "csv":
-                if desc not in csv_dict:
+                if artefact_id and desc not in csv_dict:
                     csv_dict[desc] = {
                         "description": desc,
                         "artefact_id": artefact_id,

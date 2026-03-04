@@ -43,6 +43,8 @@ STREAM_MESSAGE_EMIT_INTERVAL_SECONDS = 0.1
 CODE_YIELD_STEP_PREFIX_RE = re.compile(r"^\s*Step\s+\d+[^:]*:\s*")
 NEW_CHAT_TITLE = "How can I help you explore your data?"
 NEW_CHAT_QUERY_PLACEHOLDER = "Ask a query about project data:"
+ARTEFACT_READ_MAX_RETRIES = 2
+ARTEFACT_READ_RETRY_DELAY_SECONDS = 0.3
 
 
 def _resample_new_chat_suggestions() -> list[str]:
@@ -761,58 +763,166 @@ def _render_final_message(message: AIMessage) -> None:
         return
 
     artefact_list = artefacts if isinstance(artefacts, list) else [artefacts]
+    current_blob_db = st.session_state.blob_db
+    current_metadata_db = st.session_state.metadata_db
+
+    def _looks_like_connection_error(error_text: str | None) -> bool:
+        if not error_text:
+            return False
+        lower = error_text.lower()
+        markers = (
+            "timeout",
+            "timed out",
+            "connection",
+            "closed",
+            "broken pipe",
+            "ssl",
+            "could not connect",
+            "server closed the connection",
+            "network",
+            "unreachable",
+        )
+        return any(marker in lower for marker in markers)
+
+    def _refresh_artefact_connections(reason: str) -> bool:
+        nonlocal current_blob_db, current_metadata_db
+        refreshed_any = False
+
+        try:
+            current_blob_db = setup.get_blob_db()
+            refreshed_any = True
+            logger.info("Refreshed blob_db for artefact read after: %s", reason)
+        except Exception as exc:
+            logger.warning("Failed to refresh blob_db during artefact read retry: %s", exc)
+
+        try:
+            conn = current_metadata_db
+            is_closed = conn is None or bool(getattr(conn, "closed", 1))
+            if is_closed:
+                raise RuntimeError("metadata_db connection is closed")
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            try:
+                current_metadata_db = setup.get_metadata_db()
+                refreshed_any = True
+                logger.info("Refreshed metadata_db for artefact read after: %s", reason)
+            except Exception as exc:
+                logger.warning("Failed to refresh metadata_db during artefact read retry: %s", exc)
+
+        return refreshed_any
+
+    def _read_artefact_with_retry(artefact_id: str) -> tuple[dict | None, str | None]:
+        last_error: str | None = None
+        for attempt in range(ARTEFACT_READ_MAX_RETRIES + 1):
+            try:
+                read_tool = ReadArtefactsTool(
+                    blob_db=current_blob_db,
+                    metadata_db=current_metadata_db,
+                )
+                result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
+            except Exception as exc:
+                last_error = str(exc)
+                result = None
+                if attempt < ARTEFACT_READ_MAX_RETRIES and _looks_like_connection_error(last_error):
+                    _refresh_artefact_connections(last_error)
+
+            if isinstance(result, dict):
+                was_success = result.get("success") is True
+                artefact_entries = result.get("artefacts") or []
+                if was_success and artefact_entries:
+                    entry = artefact_entries[0]
+                    blob = entry.get("blob") if isinstance(entry, dict) else None
+                    if blob is not None:
+                        return entry, result.get("error")
+                error_text = result.get("error")
+                if error_text:
+                    last_error = str(error_text)
+                    if attempt < ARTEFACT_READ_MAX_RETRIES and _looks_like_connection_error(last_error):
+                        _refresh_artefact_connections(last_error)
+
+            if attempt < ARTEFACT_READ_MAX_RETRIES:
+                time.sleep(ARTEFACT_READ_RETRY_DELAY_SECONDS * (attempt + 1))
+
+        return None, last_error
+
     for artefact in artefact_list:
         if not isinstance(artefact, dict):
             continue
-        artefact_type = artefact.get("type")
+        artefact_type = str(artefact.get("type") or "").lower()
         artefact_id = artefact.get("id")
         if not artefact_id:
             continue
         if artefact_type == "plot":
-            read_tool = ReadArtefactsTool(
-                blob_db=st.session_state.blob_db,
-                metadata_db=st.session_state.metadata_db,
-            )
-            result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
-            if result['success'] and result['artefacts']:
-                artefact_entry = result['artefacts'][0]
-                blob = artefact_entry['blob']
-                try:
-                    fig_json = json.loads(blob.decode('utf-8'))
-                    if 'layout' in fig_json and 'template' in fig_json['layout']:
-                        tpl_data = fig_json['layout']['template'].get('data', {})
-                        if 'scattermap' in tpl_data:
-                            del tpl_data['scattermap']
-                    fig = pio.from_json(json.dumps(fig_json))
-                    with st.container():
-                        st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
-                except Exception as e:
-                    logger.error(f"Failed to render Plotly figure: {str(e)}")
-                    st.error("Error rendering plot")
-        elif artefact_type == "csv":
-            read_tool = ReadArtefactsTool(
-                blob_db=st.session_state.blob_db,
-                metadata_db=st.session_state.metadata_db,
-            )
-            result = read_tool._run(metadata_only=False, artefact_ids=[artefact_id])
-            if result['success'] and result['artefacts']:
-                artefact_entry = result['artefacts'][0]
-                blob = artefact_entry['blob'].decode('utf-8')
-                desc = artefact_entry['metadata']['description_text']
-                prompt = (
-                    "Generate a short, descriptive filename for this CSV based on the "
-                    f"description: {desc}. Do not include the .csv extension."
+            artefact_entry, read_error = _read_artefact_with_retry(artefact_id)
+            if not artefact_entry:
+                message_text = (
+                    f"Plot was generated but could not be loaded from storage (id={artefact_id})."
+                    + (f" Details: {read_error}" if read_error else "")
                 )
-                filename_response = st.session_state.llms['FAST'].invoke(prompt)
-                filename = filename_response.content.strip() + '.csv'
+                logger.error(message_text)
+                st.warning(message_text)
+                continue
+
+            blob = artefact_entry.get('blob')
+            if blob is None:
+                message_text = (
+                    f"Plot metadata was found but the plot blob is unavailable (id={artefact_id})."
+                    + (f" Details: {read_error}" if read_error else "")
+                )
+                logger.error(message_text)
+                st.warning(message_text)
+                continue
+
+            try:
+                fig_json = json.loads(blob.decode('utf-8'))
+                if 'layout' in fig_json and 'template' in fig_json['layout']:
+                    tpl_data = fig_json['layout']['template'].get('data', {})
+                    if 'scattermap' in tpl_data:
+                        del tpl_data['scattermap']
+                fig = pio.from_json(json.dumps(fig_json))
                 with st.container():
-                    st.download_button(
-                        label=f"Download {filename}",
-                        data=blob,
-                        file_name=filename,
-                        mime='text/csv',
-                        key=f"csv_download_{artefact_id}",
-                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"plot_{artefact_id}")
+            except Exception as e:
+                logger.error(f"Failed to render Plotly figure for artefact {artefact_id}: {str(e)}")
+                st.error(f"Error rendering plot (id={artefact_id}): {str(e)}")
+        elif artefact_type == "csv":
+            artefact_entry, read_error = _read_artefact_with_retry(artefact_id)
+            if not artefact_entry:
+                message_text = (
+                    f"CSV was generated but could not be loaded from storage (id={artefact_id})."
+                    + (f" Details: {read_error}" if read_error else "")
+                )
+                logger.error(message_text)
+                st.warning(message_text)
+                continue
+
+            blob_bytes = artefact_entry.get('blob')
+            if blob_bytes is None:
+                message_text = (
+                    f"CSV metadata was found but the CSV blob is unavailable (id={artefact_id})."
+                    + (f" Details: {read_error}" if read_error else "")
+                )
+                logger.error(message_text)
+                st.warning(message_text)
+                continue
+
+            blob = blob_bytes.decode('utf-8')
+            desc = artefact_entry['metadata']['description_text']
+            prompt = (
+                "Generate a short, descriptive filename for this CSV based on the "
+                f"description: {desc}. Do not include the .csv extension."
+            )
+            filename_response = st.session_state.llms['FAST'].invoke(prompt)
+            filename = filename_response.content.strip() + '.csv'
+            with st.container():
+                st.download_button(
+                    label=f"Download {filename}",
+                    data=blob,
+                    file_name=filename,
+                    mime='text/csv',
+                    key=f"csv_download_{artefact_id}",
+                )
 
 def _run_graph_stream_worker(stream_queue: queue.Queue, graph, initial_state, config, controller) -> None:
     stream = None

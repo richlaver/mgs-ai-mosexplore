@@ -39,8 +39,8 @@ def tool_calling_agent(
     Tool-calling agent using LangGraph for parallel tool execution.
     """
     retrospective_query = context.retrospective_query if context else ""
-    word_context_json = json.dumps(
-        [qw.model_dump() for qw in context.word_context] if context and context.word_context else [],
+    db_sources_json = json.dumps(
+        [dbs.model_dump() for dbs in context.db_sources] if context and context.db_sources else [],
         indent=2
     )
     verified_instrument_info_json = json.dumps(context.verif_ID_info or {}, indent=2)
@@ -71,8 +71,8 @@ You are an expert in answering queries on instrumentation monitoring data via qu
 {validated_type_info_json}
 - Validated instrument IDs with their type and subtype mappings (only rely on these ID-type pairs confirmed in the database):
 {verified_instrument_info_json}
-- Background behind words in query (instrument types, subtypes, DB fields, labels, units):
-{word_context_json}
+- Database sources selected to answer the query (instrument types, subtypes, DB fields, labels, units, interpretation context):
+{db_sources_json}
 - Date ranges relevant to query and how to apply:
 {relevant_date_ranges_json}
 - Platform-specific terminology and semantics:

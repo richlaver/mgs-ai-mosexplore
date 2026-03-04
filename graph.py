@@ -1471,8 +1471,16 @@ def build_graph(
                 )
                 has_any_error = bool(error_text) or deterministic_error or message_errors
                 is_timeout_or_cancel = _is_timeout_or_cancel(error_text)
+                can_attempt_completion = bool(final_msg) and not has_syntax_error and not (deterministic_error or message_errors)
 
-                if not has_syntax_error and not (deterministic_error or message_errors):
+                fast_path = (
+                    min_successful_responses == 1
+                    and min_explained_variance == 0.5
+                )
+
+                if can_attempt_completion and fast_path:
+                    is_sufficient = True
+                elif can_attempt_completion:
                     user_query = state.context.retrospective_query if state.context else ""
                     branch_context: List[str] = []
                     if getattr(updated_attempt, "objective", ""):
@@ -1492,12 +1500,6 @@ def build_graph(
                 else:
                     is_sufficient = False
 
-                fast_path = (
-                    is_sufficient
-                    and min_successful_responses == 1
-                    and min_explained_variance == 0.5
-                )
-
                 if is_sufficient and not fast_path:
                     fact_numbers = _decompose_and_update_facts(final_msg, state)
                     try:
@@ -1510,7 +1512,7 @@ def build_graph(
                 )
                 execution_updates.append(updated_attempt)
 
-                if fast_path:
+                if fast_path and is_sufficient:
                     with termination_lock:
                         if not termination_triggered:
                             termination_triggered = True

@@ -38,7 +38,9 @@ def _keyword_matches(keyword: str, normalized_query: str, tokenized_query: set[s
         return False
     if " " in lowered:
         return lowered in normalized_query
-    return lowered in tokenized_query
+    if lowered in tokenized_query:
+        return True
+    return any(lowered in token for token in tokenized_query)
 
 
 def platform_expert(state: ContextState) -> Command:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional
 
 from e2b_code_interpreter import AsyncSandbox
+from utils.artefact_parsing import identify_plot_or_csv_and_extract_artefact_id
 from utils.run_cancellation import RunCancellationController, RunCancelledError, get_active_run_controller
 
 logger = logging.getLogger(__name__)
@@ -509,6 +510,12 @@ from langchain_community.utilities import SQLDatabase
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event
 
+repo_root = os.environ.get("MGS_REPO_ROOT", "/root")
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from utils.artefact_parsing import identify_plot_or_csv_and_extract_artefact_id
+
 PAYLOAD_PREFIX = "__E2B_PAYLOAD__:"
 RUN_INPUT_PATH = "/home/user/run_input.json"
 
@@ -761,6 +768,10 @@ def _decorate_code_yield_output(output: Any) -> Any:
     metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
     meta_type = str(metadata.get("type") or "").lower()
 
+    inferred_type, inferred_artefact_id = identify_plot_or_csv_and_extract_artefact_id(output)
+    if meta_type not in {"plot", "csv"} and inferred_type in {"plot", "csv"}:
+        meta_type = inferred_type
+
     if meta_type in {"plot", "csv", "final"}:
         level = "debug"
     elif meta_type == "error":
@@ -773,9 +784,10 @@ def _decorate_code_yield_output(output: Any) -> Any:
     artefact_entry: Dict[str, Any] | None = None
     if meta_type in {"plot", "csv"}:
         content_dict = content if isinstance(content, dict) else {}
+        artefact_id = content_dict.get("artefact_id") or inferred_artefact_id
         artefact_entry = {
             "type": meta_type,
-            "id": content_dict.get("artefact_id"),
+            "id": artefact_id,
             "description": content_dict.get("description"),
             "tool_name": content_dict.get("tool_name"),
         }

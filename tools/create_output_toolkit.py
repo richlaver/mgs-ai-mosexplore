@@ -471,7 +471,15 @@ Example: {"primary_y_instruments": [{"instrument_id": "INST001", "column_name": 
                 raise ValueError("No valid data found for any instruments in the specified time range. Check instrument IDs, column names, or expand the time range.")
             
             logger.info(f"Processed data for instruments: {list(time_series_data.keys())}")
-            logger.info(f"Parsed data into time series data: {list(time_series_data.items())[:10]}{'...' if len(time_series_data) > 10 else ''}")
+            series_preview = [
+                (
+                    instr_id,
+                    points[:10],
+                    '...' if len(points) > 10 else ''
+                )
+                for instr_id, points in time_series_data.items()
+            ]
+            logger.info(f"Parsed data into time series data (first 10 points per series): {series_preview}")
 
             # Create Plotly figure
             fig = go.Figure()

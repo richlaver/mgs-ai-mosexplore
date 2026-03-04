@@ -172,6 +172,7 @@ def clone_llm(llm: ChatGoogleGenerativeAI, **overrides: Any) -> ChatGoogleGenera
         "api_key": getattr(llm, "google_api_key", None) or getattr(llm, "api_key", None),
         "thinking_level": getattr(llm, "thinking_level", None),
         "thinking_budget": getattr(llm, "thinking_budget", None),
+        "client": getattr(llm, "client", None),
     }
     base_params.update({k: v for k, v in overrides.items() if v is not None})
     if "max_output_tokens" not in base_params and base_params.get("max_tokens") is not None:

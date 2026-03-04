@@ -18,6 +18,8 @@ import b2sdk.v1 as b2
 import psycopg2
 import requests
 import streamlit as st
+from google import genai
+from google.genai import types as genai_types
 from google.auth import default as google_auth_default
 from google.auth.transport.requests import AuthorizedSession, Request
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -76,6 +78,11 @@ _CACHED_CONTENT_HASHES: Dict[str, str] = {}
 _CACHED_CONTENT_NAMES: Dict[str, str] = {}
 _CACHED_CONTENT_MODELS: Dict[str, str] = {}
 _GOOGLE_CREDENTIALS_SET = False
+
+GEMINI_RETRY_INITIAL_DELAY_SECONDS = 1.0
+GEMINI_RETRY_ATTEMPTS = 5
+GEMINI_RETRY_HTTP_STATUS_CODES = [408, 429, 500, 502, 503, 504]
+GEMINI_REQUEST_TIMEOUT_MS = 120 * 1000
 
 
 @dataclass
@@ -146,6 +153,26 @@ def _get_google_config_for_cache(llm: Any) -> GoogleGenAIConfig:
         location=location,
         model_id=model_id,
         api_endpoint=api_endpoint,
+    )
+
+
+def _is_gemini_model_name(model_name: str) -> bool:
+    return isinstance(model_name, str) and model_name.strip().lower().startswith("gemini")
+
+
+def _build_gemini_retry_client() -> genai.Client:
+    return genai.Client(
+        vertexai=True,
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+        location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
+        http_options=genai_types.HttpOptions(
+            retry_options=genai_types.HttpRetryOptions(
+                initial_delay=GEMINI_RETRY_INITIAL_DELAY_SECONDS,
+                attempts=GEMINI_RETRY_ATTEMPTS,
+                http_status_codes=GEMINI_RETRY_HTTP_STATUS_CODES,
+            ),
+            timeout=GEMINI_REQUEST_TIMEOUT_MS,
+        ),
     )
 
 
@@ -808,6 +835,9 @@ def build_llm(
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
         )
+        gemini_kwargs: Dict[str, Any] = {}
+        if _is_gemini_model_name(model_name):
+            gemini_kwargs["client"] = _build_gemini_retry_client()
         return InterruptibleChatGoogleGenerativeAI(
             model=model_name,
             temperature=temperature,
@@ -817,6 +847,7 @@ def build_llm(
             vertexai=True,
             max_output_tokens=max_tokens,
             **thinking_kwargs,
+            **gemini_kwargs,
         )
     if lc_type is ChatOpenAI:
         api_key = _ensure_provider_api_key(provider)
