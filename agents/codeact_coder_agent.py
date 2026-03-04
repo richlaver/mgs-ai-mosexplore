@@ -318,18 +318,15 @@ def codeact_coder_agent(
   cached_invoke_kwargs: Dict[str, Any] = {}
   if static_prompt and isinstance(generating_llm, ChatGoogleGenerativeAI):
     try:
-      cached_content_name = setup.get_or_refresh_cached_content(
+      cached_content_name = setup.get_cached_content_name(
         cache_key="codeact_coder",
-        content_text=static_prompt,
         llm=generating_llm,
-        display_prefix="codeact-coder-cache",
-        legacy_hash_keys=["codeact_coder_cached_context_hash"],
       )
       if cached_content_name:
         cached_invoke_kwargs = {"cached_content": cached_content_name}
         logger.info("CodeAct cache attached: %s", cached_content_name)
       else:
-        logger.info("CodeAct cache unavailable; embedding static prompt directly")
+        logger.info("CodeAct cache unavailable or not yet refreshed; embedding static prompt directly")
     except Exception as cache_exc:
       logger.warning("CodeAct cache setup failed; embedding static prompt directly: %s", cache_exc)
 
@@ -339,6 +336,11 @@ def codeact_coder_agent(
     **cached_invoke_kwargs,
   )
   raw_llm = generating_llm.bind(**cached_invoke_kwargs) if cached_invoke_kwargs else generating_llm
+
+  if not cached_invoke_kwargs and not static_prompt:
+    raise RuntimeError(
+      "CodeAct prompt unavailable: cached content missing and static prompt could not be built."
+    )
 
   max_format_retries = 4
   required_entrypoint = "def/async def execute_strategy(...):"
@@ -370,12 +372,17 @@ def codeact_coder_agent(
           "project_specific_context": project_specific_context,
           "previous_attempts_summary": attempt_previous_attempts_summary,
         }
-        prompt_text = codeact_coder_prompt.format(**prompt_payload)
-        if static_prompt and not cached_invoke_kwargs:
-          prompt_text = f"{static_prompt}\n\n{prompt_text}"
+        runtime_prompt_text = codeact_coder_prompt.format(**prompt_payload)
+        if cached_invoke_kwargs:
+          invoke_messages = [HumanMessage(content=runtime_prompt_text)]
+        else:
+          logger.info("CodeAct cache unavailable; invoking with reconstructed uncached prompt from cached template content")
+          invoke_messages = [
+            HumanMessage(content=static_prompt),
+            HumanMessage(content=runtime_prompt_text),
+          ]
 
-        message = HumanMessage(content=prompt_text)
-        structured_response = run_async_syncsafe(structured_llm.ainvoke([message]))
+        structured_response = run_async_syncsafe(structured_llm.ainvoke(invoke_messages))
         usage_metadata = getattr(structured_response, "usage_metadata", None)
         if usage_metadata:
           logger.info("CodeAct structured usage metadata: %s", usage_metadata)
@@ -401,6 +408,18 @@ def codeact_coder_agent(
         if isinstance(exc, RuntimeError):
           runtime_retry_errors.append(str(exc))
         msg = str(exc).lower()
+        if cached_invoke_kwargs and any(
+          hint in msg for hint in ["cached content", "cachedcontent", "not found", "404"]
+        ):
+          logger.warning("CodeAct cached content invalid/unavailable at invoke time; retrying without cached content")
+          cached_invoke_kwargs = {}
+          structured_llm = generating_llm.bind(
+            response_mime_type="application/json",
+            response_json_schema=CodeactCoderResponse.model_json_schema(),
+          )
+          raw_llm = generating_llm
+          runtime_retry_errors.append(str(exc))
+          continue
         is_format_issue = isinstance(exc, ValidationError) or any(
           hint in msg for hint in [
             "validation",
@@ -427,7 +446,7 @@ def codeact_coder_agent(
           continue
         if is_format_issue and attempt < max_format_retries:
           try:
-            raw_message = run_async_syncsafe(raw_llm.ainvoke([message]))
+            raw_message = run_async_syncsafe(raw_llm.ainvoke(invoke_messages))
             raw_usage = getattr(raw_message, "usage_metadata", None)
             if raw_usage:
               logger.info("CodeAct raw fallback usage metadata: %s", raw_usage)

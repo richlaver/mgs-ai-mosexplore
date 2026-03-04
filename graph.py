@@ -41,7 +41,7 @@ from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
 from e2b_sandbox import execute_remote_sandbox, reset_sandbox_pool
-from setup import clone_llm_with_overrides
+from setup import clone_llm_with_overrides, refresh_codeact_coder_cache
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
@@ -217,19 +217,27 @@ def build_graph(
         thread_id=thread_id,
         user_id=user_id,
     )
+    codeact_tools = [
+        extraction_tool,
+        timeseries_plot_tool,
+        map_plot_tool,
+        review_by_value_tool,
+        review_by_time_tool,
+        review_schema_tool,
+        breach_instr_tool,
+        review_changes_across_period_tool,
+        csv_saver_tool,
+    ]
+    codeact_tools_payload = json.dumps(
+        [
+            {"name": getattr(tool, "name", ""), "description": getattr(tool, "description", "")}
+            for tool in codeact_tools
+        ],
+        indent=2,
+    )
 
     try:
-        st.session_state.codeact_tools_snapshot = [
-            extraction_tool,
-            timeseries_plot_tool,
-            map_plot_tool,
-            review_by_value_tool,
-            review_by_time_tool,
-            review_schema_tool,
-            breach_instr_tool,
-            review_changes_across_period_tool,
-            csv_saver_tool,
-        ]
+        st.session_state.codeact_tools_snapshot = list(codeact_tools)
     except Exception:
         pass
 
@@ -248,6 +256,8 @@ def build_graph(
     counted_branches: dict[int, int] = {}
     success_order_counter = 0
     fast_path_winner_branch_id: int | None = None
+    codeact_cache_refresh_lock = threading.Lock()
+    codeact_cache_refresh_thread: threading.Thread | None = None
 
     def _stop_child_message_emitter() -> None:
         nonlocal child_emitter_token
@@ -271,6 +281,30 @@ def build_graph(
             reset_sandbox_pool("new_run")
         except Exception:
             pass
+
+    def _start_codeact_cache_refresh() -> None:
+        nonlocal codeact_cache_refresh_thread
+
+        with codeact_cache_refresh_lock:
+            if codeact_cache_refresh_thread and codeact_cache_refresh_thread.is_alive():
+                return
+
+            def _worker() -> None:
+                try:
+                    refresh_codeact_coder_cache(
+                        llm=llms["CODING"],
+                        tools_payload=codeact_tools_payload,
+                    )
+                    logger.info("CodeAct coder cache refresh completed in background")
+                except Exception as exc:
+                    logger.warning("CodeAct coder cache background refresh failed: %s", exc)
+
+            codeact_cache_refresh_thread = threading.Thread(
+                target=_worker,
+                name="codeact-cache-refresh",
+                daemon=True,
+            )
+            codeact_cache_refresh_thread.start()
 
     def _init_child_messages() -> None:
         nonlocal child_messages_pool
@@ -736,6 +770,7 @@ def build_graph(
 
     def history_summariser_node(state: AgentState) -> dict:
         _reset_run_state()
+        _start_codeact_cache_refresh()
         start_sandbox_prewarm_threads(
             num_slots=num_parallel_executions,
             table_info=table_info,
@@ -1239,17 +1274,7 @@ def build_graph(
             _ensure_run_not_cancelled(f"run_branch_{branch_id}:codeact")
             coder_result = codeact_coder_agent(
                 generating_llm=llms["CODING"],
-                tools=[
-                    extraction_tool,
-                    timeseries_plot_tool,
-                    map_plot_tool,
-                    review_by_value_tool,
-                    review_by_time_tool,
-                    review_schema_tool,
-                    breach_instr_tool,
-                    review_changes_across_period_tool,
-                    csv_saver_tool,
-                ],
+                tools=codeact_tools,
                 context=state.context,
                 previous_attempts=[p for p in state.executions if p.parallel_agent_id == branch_id and p.retry_number < ex.retry_number],
             )
@@ -1584,17 +1609,7 @@ def build_graph(
                     ]
                     coder_retry_result = codeact_coder_agent(
                         generating_llm=llms["CODING"],
-                        tools=[
-                            extraction_tool,
-                            timeseries_plot_tool,
-                            map_plot_tool,
-                            review_by_value_tool,
-                            review_by_time_tool,
-                            review_schema_tool,
-                            breach_instr_tool,
-                            review_changes_across_period_tool,
-                            csv_saver_tool,
-                        ],
+                        tools=codeact_tools,
                         context=state.context,
                         previous_attempts=previous_attempts_for_codegen,
                     )

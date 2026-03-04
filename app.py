@@ -1,5 +1,6 @@
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 st.set_page_config(
@@ -43,20 +44,36 @@ def perform_setup():
     setup.set_blob_db_env()
     setup.set_metadata_db_env()
     setup.set_db_env()
-    
-    st.session_state.llms = setup.get_llms()
-    st.session_state.metadata_db = setup.get_metadata_db()
-    st.session_state.blob_db = setup.get_blob_db()
-    st.session_state.table_relationship_graph = setup.build_relationship_graph()
 
-    st.session_state.db = setup.get_db()
-    st.session_state.map_spatial_defaults = setup.get_map_spatial_defaults(st.session_state.db)
-    st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
-    init_timezones(st.session_state.db)
     configure_context_api_from_secrets(st.secrets)
     register_project_configs(st.secrets.get("project_data", {}))
     set_default_project_key(st.session_state.get("selected_project_key"))
     ensure_project_context(st.session_state.get("selected_project_key"), force_refresh=True, strict=True)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            "llms": executor.submit(setup.get_llms),
+            "metadata_db": executor.submit(setup.get_metadata_db),
+            "blob_db": executor.submit(setup.get_blob_db),
+            "table_relationship_graph": executor.submit(setup.build_relationship_graph),
+        }
+        bootstrap_results = {name: future.result() for name, future in futures.items()}
+
+    st.session_state.llms = bootstrap_results["llms"]
+    st.session_state.metadata_db = bootstrap_results["metadata_db"]
+    st.session_state.blob_db = bootstrap_results["blob_db"]
+    st.session_state.table_relationship_graph = bootstrap_results["table_relationship_graph"]
+    st.session_state.db = setup.get_db()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = {
+            "map_spatial_defaults": executor.submit(setup.get_map_spatial_defaults, st.session_state.db),
+        }
+        st.session_state.map_spatial_defaults = futures["map_spatial_defaults"].result()
+    init_timezones(st.session_state.db)
+
+    st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
+
     try:
         setup.refresh_instrument_selection_cache(
             st.session_state.get("selected_project_key"),
@@ -64,13 +81,6 @@ def perform_setup():
         )
     except Exception as exc:
         logger.warning("Failed to refresh instrument selection cache at startup: %s", exc)
-    try:
-        setup.refresh_codeact_coder_cache(
-            st.session_state.llms.get("CODING", st.session_state.llms["LONG"]),
-            tools_payload="[]",
-        )
-    except Exception as exc:
-        logger.warning("Failed to refresh CodeAct coder cache at startup: %s", exc)
 
     raw_parallel = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
     try:

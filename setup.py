@@ -11,6 +11,7 @@ import math
 import os
 import shlex
 import statistics
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,31 @@ GEMINI_RETRY_INITIAL_DELAY_SECONDS = 1.0
 GEMINI_RETRY_ATTEMPTS = 5
 GEMINI_RETRY_HTTP_STATUS_CODES = [408, 429, 500, 502, 503, 504]
 GEMINI_REQUEST_TIMEOUT_MS = 120 * 1000
+
+
+def _can_use_streamlit_session_state() -> bool:
+    try:
+        return threading.current_thread() is threading.main_thread() and hasattr(st, "session_state")
+    except Exception:
+        return False
+
+
+def _session_state_get(key: str, default: Any = None) -> Any:
+    if not _can_use_streamlit_session_state():
+        return default
+    try:
+        return st.session_state.get(key, default)
+    except Exception:
+        return default
+
+
+def _session_state_set(key: str, value: Any) -> None:
+    if not _can_use_streamlit_session_state():
+        return
+    try:
+        st.session_state[key] = value
+    except Exception:
+        pass
 
 
 @dataclass
@@ -356,18 +382,15 @@ def ensure_cached_content(
     cached_name = None
     cached_hash = None
     cached_model = None
-    try:
-        cached_id = st.session_state.get(id_key)
-        cached_name = st.session_state.get(name_key)
-        cached_hash = st.session_state.get(hash_key)
-        cached_model = st.session_state.get(model_key)
-        if cached_hash is None:
-            for legacy_key in legacy_keys:
-                cached_hash = st.session_state.get(legacy_key)
-                if cached_hash is not None:
-                    break
-    except Exception:
-        pass
+    cached_id = _session_state_get(id_key)
+    cached_name = _session_state_get(name_key)
+    cached_hash = _session_state_get(hash_key)
+    cached_model = _session_state_get(model_key)
+    if cached_hash is None:
+        for legacy_key in legacy_keys:
+            cached_hash = _session_state_get(legacy_key)
+            if cached_hash is not None:
+                break
 
     if not cached_name and cached_id:
         try:
@@ -406,14 +429,11 @@ def ensure_cached_content(
     _CACHED_CONTENT_HASHES[cache_key] = content_hash
     if model_id:
         _CACHED_CONTENT_MODELS[cache_key] = model_id
-    try:
-        st.session_state[id_key] = cached_id
-        st.session_state[name_key] = cached_name
-        st.session_state[hash_key] = content_hash
-        if model_id:
-            st.session_state[model_key] = model_id
-    except Exception:
-        pass
+    _session_state_set(id_key, cached_id)
+    _session_state_set(name_key, cached_name)
+    _session_state_set(hash_key, content_hash)
+    if model_id:
+        _session_state_set(model_key, model_id)
     return cached_name
 
 
@@ -423,13 +443,10 @@ def get_cached_content_id(cache_key: str) -> Optional[str]:
     if cached_id:
         return cached_id
     id_key = f"{cache_key}_cached_content_id"
-    try:
-        cached_id = st.session_state.get(id_key)
-        if cached_id:
-            _CACHED_CONTENT_IDS[cache_key] = cached_id
-            return cached_id
-    except Exception:
-        pass
+    cached_id = _session_state_get(id_key)
+    if cached_id:
+        _CACHED_CONTENT_IDS[cache_key] = cached_id
+        return cached_id
     return None
 
 
@@ -440,13 +457,10 @@ def get_cached_content_name(cache_key: str, llm: Any) -> Optional[str]:
         return cached_name
 
     name_key = f"{cache_key}_cached_content_name"
-    try:
-        cached_name = st.session_state.get(name_key)
-        if cached_name:
-            _CACHED_CONTENT_NAMES[cache_key] = cached_name
-            return cached_name
-    except Exception:
-        pass
+    cached_name = _session_state_get(name_key)
+    if cached_name:
+        _CACHED_CONTENT_NAMES[cache_key] = cached_name
+        return cached_name
 
     cached_id = get_cached_content_id(cache_key)
     if not cached_id:
@@ -457,10 +471,7 @@ def get_cached_content_name(cache_key: str, llm: Any) -> Optional[str]:
         cached_name = None
     if cached_name:
         _CACHED_CONTENT_NAMES[cache_key] = cached_name
-        try:
-            st.session_state[name_key] = cached_name
-        except Exception:
-            pass
+        _session_state_set(name_key, cached_name)
     return cached_name
 
 
@@ -497,10 +508,7 @@ def get_or_refresh_cached_content(
     model_key = f"{cache_key}_cached_content_model"
     model_id = _get_llm_model_id(llm, "")
     cached_model = _CACHED_CONTENT_MODELS.get(cache_key)
-    try:
-        cached_model = st.session_state.get(model_key) or cached_model
-    except Exception:
-        pass
+    cached_model = _session_state_get(model_key, cached_model) or cached_model
 
     cached_name = get_cached_content_name(cache_key, llm)
     model_matches = (not model_id) or (cached_model == model_id)
@@ -1173,11 +1181,7 @@ def get_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
 
     defaults = compute_map_spatial_defaults(db)
     _map_spatial_defaults_cache = defaults
-    try:
-        if hasattr(st, "session_state"):
-            st.session_state.map_spatial_defaults = defaults
-    except Exception:
-        pass
+    _session_state_set("map_spatial_defaults", defaults)
     return defaults
 
 
