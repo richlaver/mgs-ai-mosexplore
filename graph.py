@@ -247,6 +247,7 @@ def build_graph(
     response_facts: List[Dict[str, Any]] = []
     counted_branches: dict[int, int] = {}
     success_order_counter = 0
+    fast_path_winner_branch_id: int | None = None
 
     def _stop_child_message_emitter() -> None:
         nonlocal child_emitter_token
@@ -255,13 +256,14 @@ def build_graph(
 
     def _reset_run_state() -> None:
         """Clear termination and fact-tracking state for a fresh run."""
-        nonlocal termination_triggered, thinking_stage, successful_executions, response_facts, counted_branches, success_order_counter
+        nonlocal termination_triggered, thinking_stage, successful_executions, response_facts, counted_branches, success_order_counter, fast_path_winner_branch_id
         with termination_lock:
             termination_triggered = False
             successful_executions = []
             response_facts = []
             counted_branches = {}
             success_order_counter = 0
+            fast_path_winner_branch_id = None
         with thinking_stage_lock:
             thinking_stage = 0
         _stop_child_message_emitter()
@@ -1223,7 +1225,7 @@ def build_graph(
             return current_indices
 
         def run_branch(state: AgentState):
-            nonlocal termination_triggered
+            nonlocal termination_triggered, fast_path_winner_branch_id
             _ensure_run_not_cancelled(f"run_branch_{branch_id}")
             ex = next((e for e in state.executions if e.parallel_agent_id == branch_id), None)
             if not ex or ex.final_response is not None:
@@ -1507,8 +1509,14 @@ def build_graph(
                         logger.info("[Facts] Stored response_facts (count=%d): %s", len(response_facts), response_facts)
                     except Exception as exc:
                         logger.error("[Facts] Logging failed: %s", exc)
+                is_best = updated_attempt.is_best
+                if fast_path and is_sufficient:
+                    with termination_lock:
+                        if fast_path_winner_branch_id is None:
+                            fast_path_winner_branch_id = branch_id
+                        is_best = fast_path_winner_branch_id == branch_id
                 updated_attempt = updated_attempt.model_copy(
-                    update={"is_sufficient": is_sufficient, "is_best": True if fast_path else updated_attempt.is_best}
+                    update={"is_sufficient": is_sufficient, "is_best": is_best}
                 )
                 execution_updates.append(updated_attempt)
 
