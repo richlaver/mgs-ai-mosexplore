@@ -19,8 +19,6 @@ import b2sdk.v1 as b2
 import psycopg2
 import requests
 import streamlit as st
-from google import genai
-from google.genai import types as genai_types
 from google.auth import default as google_auth_default
 from google.auth.transport.requests import AuthorizedSession, Request
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -34,7 +32,7 @@ from parameters import include_tables, table_info
 from llm_library import PROVIDERS, LLM_MODELS
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Any, List, Tuple, Dict, Union, Optional
+from typing import Any, List, Tuple, Dict, Union, Optional, Callable
 import logging
 from utils.project_selection import (
     get_selected_project_key,
@@ -51,6 +49,33 @@ except ModuleNotFoundError:  # pragma: no cover - sandbox/runtime fallback
 
 logger = logging.getLogger(__name__)
 _map_spatial_defaults_cache: Optional[Dict[str, float]] = None
+MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR = "MGS_MAP_SPATIAL_EXTENT_PERCENTILE"
+MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT = 100.0
+
+
+def _get_map_spatial_extent_percentile() -> float:
+    raw = os.environ.get(MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR)
+    if raw is None:
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    try:
+        value = float(str(raw).strip())
+    except Exception:
+        logger.warning(
+            "Invalid %s=%r; using default %.1f",
+            MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR,
+            raw,
+            MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT,
+        )
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    if not math.isfinite(value) or value <= 0 or value > 100:
+        logger.warning(
+            "Out-of-range %s=%r; expected (0,100], using default %.1f",
+            MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR,
+            raw,
+            MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT,
+        )
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    return value
 
 def _normalize_api_endpoint(raw: str) -> str:
     if not raw:
@@ -73,17 +98,42 @@ GOOGLE_CLOUD_ENDPOINT = _normalize_api_endpoint(
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 E2B_TEMPLATE_NAME = os.environ.get("E2B_TEMPLATE_NAME", "mos-explore-sandbox")
 PARALLEL_EXECUTIONS = 2
+PRIORITY_PAYGO_ENV_VAR = "MGS_PRIORITY_PAYGO"
+PRIORITY_PAYGO_REQUEST_TYPE_HEADER_KEY = "X-Vertex-AI-LLM-Request-Type"
+PRIORITY_PAYGO_REQUEST_TYPE_HEADER_VALUE = "shared"
+PRIORITY_PAYGO_HEADER_KEY = "X-Vertex-AI-LLM-Shared-Request-Type"
+PRIORITY_PAYGO_HEADER_VALUE = "priority"
 
 _CACHED_CONTENT_IDS: Dict[str, str] = {}
 _CACHED_CONTENT_HASHES: Dict[str, str] = {}
 _CACHED_CONTENT_NAMES: Dict[str, str] = {}
 _CACHED_CONTENT_MODELS: Dict[str, str] = {}
+_CACHE_REFRESH_THREADS: Dict[str, threading.Thread] = {}
+_CACHE_REFRESH_LOCK = threading.Lock()
 _GOOGLE_CREDENTIALS_SET = False
 
 GEMINI_RETRY_INITIAL_DELAY_SECONDS = 1.0
 GEMINI_RETRY_ATTEMPTS = 5
 GEMINI_RETRY_HTTP_STATUS_CODES = [408, 429, 500, 502, 503, 504]
 GEMINI_REQUEST_TIMEOUT_MS = 120 * 1000
+
+
+def is_priority_paygo_enabled() -> bool:
+    raw = str(os.environ.get(PRIORITY_PAYGO_ENV_VAR, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def set_priority_paygo_enabled(enabled: bool) -> None:
+    os.environ[PRIORITY_PAYGO_ENV_VAR] = "1" if enabled else "0"
+
+
+def _build_priority_paygo_headers() -> Dict[str, str]:
+    if not is_priority_paygo_enabled():
+        return {}
+    return {
+        PRIORITY_PAYGO_REQUEST_TYPE_HEADER_KEY: PRIORITY_PAYGO_REQUEST_TYPE_HEADER_VALUE,
+        PRIORITY_PAYGO_HEADER_KEY: PRIORITY_PAYGO_HEADER_VALUE,
+    }
 
 
 def _can_use_streamlit_session_state() -> bool:
@@ -184,22 +234,6 @@ def _get_google_config_for_cache(llm: Any) -> GoogleGenAIConfig:
 
 def _is_gemini_model_name(model_name: str) -> bool:
     return isinstance(model_name, str) and model_name.strip().lower().startswith("gemini")
-
-
-def _build_gemini_retry_client() -> genai.Client:
-    return genai.Client(
-        vertexai=True,
-        project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
-        location=os.environ.get("GOOGLE_CLOUD_LOCATION", GOOGLE_CLOUD_LOCATION),
-        http_options=genai_types.HttpOptions(
-            retry_options=genai_types.HttpRetryOptions(
-                initial_delay=GEMINI_RETRY_INITIAL_DELAY_SECONDS,
-                attempts=GEMINI_RETRY_ATTEMPTS,
-                http_status_codes=GEMINI_RETRY_HTTP_STATUS_CODES,
-            ),
-            timeout=GEMINI_REQUEST_TIMEOUT_MS,
-        ),
-    )
 
 
 def _load_instrument_selection_template() -> str:
@@ -306,7 +340,7 @@ def refresh_instrument_selection_cache(selected_project_key: Optional[str], llm:
     cached_context = build_instrument_selection_cached_context(context_text)
     if not isinstance(llm, ChatGoogleGenerativeAI):
         return None
-    return ensure_cached_content(
+    return get_or_refresh_cached_content(
         cache_key="instrument_selection",
         content_text=cached_context,
         llm=llm,
@@ -320,12 +354,103 @@ def refresh_codeact_coder_cache(llm: Any, tools_payload: Optional[str] = None) -
     if not isinstance(llm, ChatGoogleGenerativeAI):
         return None
     cached_context = build_codeact_coder_cached_context(tools_payload or "[]")
-    return ensure_cached_content(
+    return get_or_refresh_cached_content(
         cache_key="codeact_coder",
         content_text=cached_context,
         llm=llm,
         display_prefix="codeact-coder-cache",
         legacy_hash_keys=["codeact_coder_cached_context_hash"],
+    )
+
+
+def _start_background_refresh_thread(
+    refresh_key: str,
+    thread_name: str,
+    worker: Callable[[], None],
+) -> bool:
+    with _CACHE_REFRESH_LOCK:
+        existing = _CACHE_REFRESH_THREADS.get(refresh_key)
+        if existing and existing.is_alive():
+            return False
+
+        def _wrapped_worker() -> None:
+            try:
+                worker()
+            finally:
+                with _CACHE_REFRESH_LOCK:
+                    current = _CACHE_REFRESH_THREADS.get(refresh_key)
+                    if current is threading.current_thread():
+                        _CACHE_REFRESH_THREADS.pop(refresh_key, None)
+
+        thread = threading.Thread(
+            target=_wrapped_worker,
+            name=thread_name,
+            daemon=True,
+        )
+        _CACHE_REFRESH_THREADS[refresh_key] = thread
+        thread.start()
+        return True
+
+
+def start_instrument_selection_cache_refresh_background(
+    selected_project_key: Optional[str],
+    llm: Any,
+    reason: str = "",
+) -> bool:
+    """Start background refresh for instrument-selection cache if no refresh is currently running."""
+    if not isinstance(llm, ChatGoogleGenerativeAI):
+        return False
+
+    def _worker() -> None:
+        try:
+            cached_name = refresh_instrument_selection_cache(selected_project_key, llm)
+            logger.info(
+                "Instrument selection cache refresh complete%s%s",
+                f" ({reason})" if reason else "",
+                f": {cached_name}" if cached_name else "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Instrument selection cache background refresh failed%s: %s",
+                f" ({reason})" if reason else "",
+                exc,
+            )
+
+    return _start_background_refresh_thread(
+        refresh_key="instrument_selection",
+        thread_name="instrument-selection-cache-refresh",
+        worker=_worker,
+    )
+
+
+def start_codeact_coder_cache_refresh_background(
+    llm: Any,
+    tools_payload: Optional[str] = None,
+    reason: str = "",
+) -> bool:
+    """Start background refresh for CodeAct cache if no refresh is currently running."""
+    if not isinstance(llm, ChatGoogleGenerativeAI):
+        return False
+
+    def _worker() -> None:
+        try:
+            cached_name = refresh_codeact_coder_cache(llm=llm, tools_payload=tools_payload)
+            logger.info(
+                "CodeAct cache refresh complete%s%s",
+                f" ({reason})" if reason else "",
+                f": {cached_name}" if cached_name else "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "CodeAct cache background refresh failed%s: %s",
+                f" ({reason})" if reason else "",
+                exc,
+            )
+
+    return _start_background_refresh_thread(
+        refresh_key="codeact_coder",
+        thread_name="codeact-coder-cache-refresh",
+        worker=_worker,
     )
 
 
@@ -345,7 +470,7 @@ def _create_cached_content(
     url = f"{config.base_url}/projects/{config.project_id}/locations/{config.location}/cachedContents"
     logger.info("Creating cached content: %s", display_name)
     logger.info("cachedContents.create POST %s", url)
-    resp = session.post(url, json=payload, timeout=20)
+    resp = session.post(url, json=payload, timeout=50)
     data = _safe_json(resp)
     logger.info("cachedContents.create status=%s", resp.status_code)
     if resp.status_code >= 400:
@@ -844,8 +969,17 @@ def build_llm(
             thinking_budget=thinking_budget,
         )
         gemini_kwargs: Dict[str, Any] = {}
-        if _is_gemini_model_name(model_name):
-            gemini_kwargs["client"] = _build_gemini_retry_client()
+        priority_headers = _build_priority_paygo_headers()
+        logger.debug(
+            "Building Gemini LLM model=%s priority_paygo=%s headers=%s",
+            model_name,
+            bool(priority_headers),
+            sorted(priority_headers.keys()) if priority_headers else [],
+        )
+        if priority_headers:
+            gemini_kwargs["additional_headers"] = priority_headers
+        gemini_kwargs["max_retries"] = GEMINI_RETRY_ATTEMPTS
+        gemini_kwargs["timeout"] = GEMINI_REQUEST_TIMEOUT_MS / 1000.0
         return InterruptibleChatGoogleGenerativeAI(
             model=model_name,
             temperature=temperature,
@@ -1100,7 +1234,8 @@ def _percentile(sorted_vals: List[float], q: float) -> float:
 
 
 def compute_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
-    """Compute median instrument center and a radius covering ~90% of instruments."""
+    """Compute median instrument center and a radius covering the configured percentile extent."""
+    logger.info("Computing map spatial defaults at startup")
     query = (
         """
         SELECT l.easting, l.northing
@@ -1113,10 +1248,11 @@ def compute_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
         raw = db.run(query)
     except Exception as exc:
         logger.warning("Failed to query spatial defaults: %s", exc)
+        logger.info("Using fallback map spatial defaults after query failure")
         return {
             "median_easting": 0.0,
             "median_northing": 0.0,
-            "radius_90_extent": 500.0,
+            "radius_extent": 500.0,
         }
 
     parsed = raw
@@ -1148,40 +1284,48 @@ def compute_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
         northings.append(n_clean)
 
     if not eastings or not northings:
+        logger.info("No valid spatial default rows found; using fallback center/radius")
         return {
             "median_easting": 0.0,
             "median_northing": 0.0,
-            "radius_90_extent": 500.0,
+            "radius_extent": 500.0,
         }
 
     eastings_sorted = sorted(eastings)
     northings_sorted = sorted(northings)
     med_e = statistics.median(eastings_sorted)
     med_n = statistics.median(northings_sorted)
-    p5_e = _percentile(eastings_sorted, 0.05)
-    p95_e = _percentile(eastings_sorted, 0.95)
-    p5_n = _percentile(northings_sorted, 0.05)
-    p95_n = _percentile(northings_sorted, 0.95)
-    radius = max(p95_e - p5_e, p95_n - p5_n) / 2.0
+    extent_percentile = _get_map_spatial_extent_percentile()
+    lower_q = ((100.0 - extent_percentile) / 2.0) / 100.0
+    upper_q = 1.0 - lower_q
+    low_e = _percentile(eastings_sorted, lower_q)
+    high_e = _percentile(eastings_sorted, upper_q)
+    low_n = _percentile(northings_sorted, lower_q)
+    high_n = _percentile(northings_sorted, upper_q)
+    radius = max(high_e - low_e, high_n - low_n) / 2.0
     if not math.isfinite(radius) or radius <= 0:
         radius = 500.0
 
-    return {
+    defaults = {
         "median_easting": float(med_e),
         "median_northing": float(med_n),
-        "radius_90_extent": float(radius),
+        "radius_extent": float(radius),
     }
+    logger.info("Computed map spatial defaults: %s", defaults)
+    return defaults
 
 
 def get_map_spatial_defaults(db: BaseSQLDatabase) -> Dict[str, float]:
     """Return cached map spatial defaults, computing and storing if needed."""
     global _map_spatial_defaults_cache
     if _map_spatial_defaults_cache is not None:
+        logger.info("Retrieved cached map spatial defaults: %s", _map_spatial_defaults_cache)
         return _map_spatial_defaults_cache
 
     defaults = compute_map_spatial_defaults(db)
     _map_spatial_defaults_cache = defaults
     _session_state_set("map_spatial_defaults", defaults)
+    logger.info("Stored map spatial defaults in cache/session: %s", defaults)
     return defaults
 
 

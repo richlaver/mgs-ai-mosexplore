@@ -2,7 +2,8 @@ map_plot_*
 run_*
 test_*
 /message_formats/
-/nl_context/
+/response_gen_info/
+/context_gen_info/
 /output/
 /outputs/
 /responses/
@@ -18,3 +19,4 @@ parameters_with_tcn_table.py
 commit_list.csv
 *_0.*
 settings.json
+20260225-get-breached-instr-query.sql

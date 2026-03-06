@@ -41,7 +41,11 @@ from agents.extraction_sandbox_agent import extraction_sandbox_agent
 from utils.json_utils import strip_to_json_payload
 from classes import AgentState, Context, Execution
 from e2b_sandbox import execute_remote_sandbox, reset_sandbox_pool
-from setup import clone_llm_with_overrides, refresh_codeact_coder_cache
+from setup import (
+    clone_llm_with_overrides,
+    start_codeact_coder_cache_refresh_background,
+    start_instrument_selection_cache_refresh_background,
+)
 from thinking_messages import child_messages, parent_messages
 from tools.artefact_toolkit import WriteArtefactTool
 from tools.create_output_toolkit import CSVSaverTool
@@ -256,9 +260,6 @@ def build_graph(
     counted_branches: dict[int, int] = {}
     success_order_counter = 0
     fast_path_winner_branch_id: int | None = None
-    codeact_cache_refresh_lock = threading.Lock()
-    codeact_cache_refresh_thread: threading.Thread | None = None
-
     def _stop_child_message_emitter() -> None:
         nonlocal child_emitter_token
         with child_emitter_lock:
@@ -282,29 +283,24 @@ def build_graph(
         except Exception:
             pass
 
-    def _start_codeact_cache_refresh() -> None:
-        nonlocal codeact_cache_refresh_thread
-
-        with codeact_cache_refresh_lock:
-            if codeact_cache_refresh_thread and codeact_cache_refresh_thread.is_alive():
-                return
-
-            def _worker() -> None:
-                try:
-                    refresh_codeact_coder_cache(
-                        llm=llms["CODING"],
-                        tools_payload=codeact_tools_payload,
-                    )
-                    logger.info("CodeAct coder cache refresh completed in background")
-                except Exception as exc:
-                    logger.warning("CodeAct coder cache background refresh failed: %s", exc)
-
-            codeact_cache_refresh_thread = threading.Thread(
-                target=_worker,
-                name="codeact-cache-refresh",
-                daemon=True,
+    def _start_query_time_cache_refresh() -> None:
+        try:
+            start_codeact_coder_cache_refresh_background(
+                llm=llms["CODING"],
+                tools_payload=codeact_tools_payload,
+                reason="query_submission",
             )
-            codeact_cache_refresh_thread.start()
+        except Exception as exc:
+            logger.warning("CodeAct cache background refresh trigger failed: %s", exc)
+
+        try:
+            start_instrument_selection_cache_refresh_background(
+                selected_project_key=selected_project_key,
+                llm=llms["LONG"],
+                reason="query_submission",
+            )
+        except Exception as exc:
+            logger.warning("Instrument selection cache background refresh trigger failed: %s", exc)
 
     def _init_child_messages() -> None:
         nonlocal child_messages_pool
@@ -770,7 +766,7 @@ def build_graph(
 
     def history_summariser_node(state: AgentState) -> dict:
         _reset_run_state()
-        _start_codeact_cache_refresh()
+        _start_query_time_cache_refresh()
         start_sandbox_prewarm_threads(
             num_slots=num_parallel_executions,
             table_info=table_info,
@@ -1344,6 +1340,16 @@ def build_graph(
                 cancel_signals = ["cancelled", "canceled", "cancel", "aborted", "user abort"]
                 return any(sig in lowered for sig in timeout_signals + cancel_signals)
 
+            def _is_benign_sandbox_warning(message: str, origin_process: Any) -> bool:
+                if origin_process != "sandbox_log":
+                    return False
+                lowered = (message or "").lower()
+                benign_patterns = [
+                    "missing scriptruncontext! this warning can be ignored when running in bare mode",
+                    "session state does not function when running a script without `streamlit run`",
+                ]
+                return any(pattern in lowered for pattern in benign_patterns)
+
             def _execute_code(code_to_run: str) -> tuple[List[AIMessage], AIMessage | None, List[Dict[str, Any]], List[str], List[str], float]:
                 messages: List[AIMessage] = []
                 artefacts: List[Dict[str, Any]] = []
@@ -1429,9 +1435,12 @@ def build_graph(
                                 level = additional_kwargs.get("level")
                                 origin_process = origin.get("process")
                                 if level == "error":
-                                    error_logs_all.append(str(content))
+                                    content_text = str(content)
+                                    if _is_benign_sandbox_warning(content_text, origin_process):
+                                        continue
+                                    error_logs_all.append(content_text)
                                     if origin_process == "code_yield":
-                                        error_logs_actionable.append(str(content))
+                                        error_logs_actionable.append(content_text)
                     except Exception as e:
                         err = f"Sandbox error: {e}"
                         error_logs_all.append(err)

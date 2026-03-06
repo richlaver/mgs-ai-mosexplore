@@ -998,6 +998,20 @@ async def _run():
         google_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
         google_location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
         api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        gemini_max_retries = int(os.environ.get("GEMINI_RETRY_ATTEMPTS", "5"))
+        gemini_timeout_seconds = float(os.environ.get("GEMINI_REQUEST_TIMEOUT_MS", "120000")) / 1000.0
+        priority_enabled = str(os.environ.get("MGS_PRIORITY_PAYGO", "")).strip().lower() in {"1", "true", "yes", "on"}
+        additional_headers = None
+        if priority_enabled:
+            additional_headers = {
+                "X-Vertex-AI-LLM-Request-Type": "shared",
+                "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
+            }
+        logger.debug(
+            "[runner] building Gemini LLM priority_paygo=%s headers=%s",
+            priority_enabled,
+            sorted(additional_headers.keys()) if additional_headers else [],
+        )
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.5,
@@ -1005,6 +1019,9 @@ async def _run():
             project=google_project,
             location=google_location,
             vertexai=bool(google_project),
+            additional_headers=additional_headers,
+            max_retries=gemini_max_retries,
+            timeout=gemini_timeout_seconds,
         )
 
         general_sql_query_tool = GeneralSQLQueryTool(
@@ -1274,6 +1291,10 @@ def _build_sandbox_envs(
         "GOOGLE_CLOUD_PROJECT",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_GENAI_USE_VERTEXAI",
+        "MGS_PRIORITY_PAYGO",
+        "MGS_MAP_SPATIAL_EXTENT_PERCENTILE",
+        "GEMINI_RETRY_ATTEMPTS",
+        "GEMINI_REQUEST_TIMEOUT_MS",
     ):
         value = os.environ.get(key)
         if value:

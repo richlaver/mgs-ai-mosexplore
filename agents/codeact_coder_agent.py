@@ -22,7 +22,7 @@ codeact_coder_prompt = PromptTemplate(
         "retrospective_query",
         "validated_type_info_json",
         "verified_instrument_info_json",
-      "db_sources_json",
+        "db_sources_json",
         "relevant_date_ranges_json",
         "timezone_context_json",
         "platform_context",

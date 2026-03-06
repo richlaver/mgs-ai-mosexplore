@@ -362,6 +362,23 @@ def template_sandbox_modal():
         finally:
             st.rerun()
 
+
+@st.dialog("Priority PayGo")
+def priority_paygo_modal():
+    st.markdown("Tokens will be charged at 3× the cost")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", type="secondary", use_container_width=True, key="priority_paygo_cancel_btn"):
+            st.session_state.show_priority_paygo_modal = False
+            st.session_state.priority_paygo_toggle = bool(st.session_state.get("priority_paygo", False))
+            st.rerun()
+    with col2:
+        if st.button("Proceed", type="primary", use_container_width=True, key="priority_paygo_proceed_btn"):
+            st.session_state.show_priority_paygo_modal = False
+            st.session_state.pending_priority_paygo_state = True
+            st.rerun()
+
 def new_chat() -> None:
     """Clear chat history and start a new chat by resetting session state variables."""
     _cancel_active_run("User pressed new chat button")
@@ -551,6 +568,39 @@ def render_initial_ui() -> None:
             stream_sandbox_logs=st.session_state.get("sandbox_logging", True),
         )
 
+    def _apply_priority_paygo_state(enabled: bool) -> None:
+        st.session_state.priority_paygo = bool(enabled)
+        st.session_state.priority_paygo_toggle = bool(enabled)
+        setup.set_priority_paygo_enabled(bool(enabled))
+        st.session_state.llms = setup.get_llms()
+        _rebuild_graph()
+
+    def _on_priority_paygo_toggle_change() -> None:
+        requested = bool(st.session_state.get("priority_paygo_toggle", False))
+        current = bool(st.session_state.get("priority_paygo", False))
+        if requested == current:
+            return
+        if requested:
+            st.session_state.priority_paygo_toggle = current
+            st.session_state.show_priority_paygo_modal = True
+            return
+        st.session_state.pending_priority_paygo_state = False
+
+    pending_priority_paygo_state = st.session_state.pop("pending_priority_paygo_state", None)
+    if isinstance(pending_priority_paygo_state, bool):
+        previous_priority_paygo = bool(st.session_state.get("priority_paygo", False))
+        try:
+            _apply_priority_paygo_state(pending_priority_paygo_state)
+            if pending_priority_paygo_state:
+                st.toast("Priority PayGo enabled", icon=":material/bolt:")
+            else:
+                st.toast("Priority PayGo disabled", icon=":material/toggle_off:")
+        except Exception as exc:
+            st.error(f"Failed to apply Priority PayGo setting: {exc}")
+            st.session_state.priority_paygo = previous_priority_paygo
+            st.session_state.priority_paygo_toggle = previous_priority_paygo
+            setup.set_priority_paygo_enabled(previous_priority_paygo)
+
     with st.sidebar:
         st.divider()
         projects = list_projects()
@@ -586,12 +636,13 @@ def render_initial_ui() -> None:
                     except Exception as e:
                         logger.error("Failed to refresh project contexts for %s: %s", selected_key, e)
                     try:
-                        setup.refresh_instrument_selection_cache(
-                            selected_key,
-                            st.session_state.llms["LONG"],
+                        setup.start_instrument_selection_cache_refresh_background(
+                            selected_project_key=selected_key,
+                            llm=st.session_state.llms["LONG"],
+                            reason="project_change",
                         )
                     except Exception as e:
-                        logger.warning("Failed to refresh instrument selection cache for %s: %s", selected_key, e)
+                        logger.warning("Failed to start instrument selection cache refresh for %s: %s", selected_key, e)
                     if all(k in st.session_state for k in ["llms", "db", "blob_db", "metadata_db", "thread_id", "selected_user_id", "global_hierarchy_access"]):
                         try:
                             logger.info("[Project Switch] Rebuilding agent graph for project=%s", selected_key)
@@ -613,6 +664,27 @@ def render_initial_ui() -> None:
                             logger.info("[Project Switch] Graph rebuilt for project=%s", selected_key)
                         except Exception as e:
                             st.error(f"Failed to rebuild agent graph after project switch: {e}")
+
+                    try:
+                        codeact_tools_snapshot = st.session_state.get("codeact_tools_snapshot") or []
+                        codeact_tools_payload = json.dumps(
+                            [
+                                {
+                                    "name": getattr(tool, "name", ""),
+                                    "description": getattr(tool, "description", ""),
+                                }
+                                for tool in codeact_tools_snapshot
+                            ],
+                            indent=2,
+                        )
+                        setup.start_codeact_coder_cache_refresh_background(
+                            llm=st.session_state.llms["CODING"],
+                            tools_payload=codeact_tools_payload,
+                            reason="project_change",
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to start CodeAct cache refresh for %s: %s", selected_key, e)
+
                     st.toast(f"Switched to project: {selected_display}", icon=":material/database:")
 
             def _on_user_change():
@@ -713,6 +785,12 @@ def render_initial_ui() -> None:
                 icon=":material/menu:",
                 use_container_width=False
             ):
+                st.toggle(
+                    label="Priority PayGo",
+                    key="priority_paygo_toggle",
+                    help="Use Vertex AI Priority PayGo for Gemini requests",
+                    on_change=_on_priority_paygo_toggle_change,
+                )
                 st.toggle(label="Developer View", key="developer_view", help="Toggle to show or hide internal LLM responses")
                 st.toggle(
                     label="Sandbox Logging",
@@ -736,6 +814,9 @@ def render_initial_ui() -> None:
                     on_click=delete_artefacts_modal,
                     use_container_width=True
                 )
+
+    if st.session_state.get("show_priority_paygo_modal", False):
+        priority_paygo_modal()
 
     if "new_chat_suggestions" not in st.session_state:
         _resample_new_chat_suggestions()

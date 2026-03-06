@@ -172,6 +172,8 @@ def clone_llm(llm: ChatGoogleGenerativeAI, **overrides: Any) -> ChatGoogleGenera
         "api_key": getattr(llm, "google_api_key", None) or getattr(llm, "api_key", None),
         "thinking_level": getattr(llm, "thinking_level", None),
         "thinking_budget": getattr(llm, "thinking_budget", None),
+        "additional_headers": getattr(llm, "additional_headers", None),
+        "client_args": getattr(llm, "client_args", None),
         "client": getattr(llm, "client", None),
     }
     base_params.update({k: v for k, v in overrides.items() if v is not None})
@@ -182,4 +184,11 @@ def clone_llm(llm: ChatGoogleGenerativeAI, **overrides: Any) -> ChatGoogleGenera
     if "model" not in filtered:
         raise ValueError("Cannot clone ChatGoogleGenerativeAI without a model name")
     target_cls = llm.__class__ if isinstance(llm, ChatGoogleGenerativeAI) else ChatGoogleGenerativeAI
-    return target_cls(**filtered)
+    cloned = target_cls(**filtered)
+    async_client = getattr(llm, "async_client", None)
+    if async_client is not None:
+        try:
+            cloned.async_client = async_client
+        except Exception:
+            pass
+    return cloned

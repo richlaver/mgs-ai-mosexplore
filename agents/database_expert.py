@@ -264,22 +264,23 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
                 raise last_exc
         raise ValueError("Instrument selection parallel calls returned no result")
 
+    def _is_cached_content_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(hint in msg for hint in ["cached content", "cachedcontent", "not found", "404"])
+
     result: list[dict[str, Any]] | None = None
     cached_invoke_kwargs: Dict[str, Any] = {}
+
     try:
-        cached_context = reconstructed_cached_context
-        cached_content_name = setup.get_or_refresh_cached_content(
+        cached_content_name = setup.get_cached_content_name(
             cache_key="instrument_selection",
-            content_text=cached_context,
             llm=llm,
-            display_prefix="instrument-selection-cache",
-            legacy_hash_keys=["instrument_selection_cached_context_hash"],
         )
         if cached_content_name:
             cached_invoke_kwargs = {"cached_content": cached_content_name}
             logger.info("Instrument selection cache attached: %s", cached_content_name)
         else:
-            logger.info("Instrument selection cache unavailable; proceeding without cached content")
+            logger.info("Instrument selection cache unavailable; using static-prompt fallback")
 
         structured_llm = llm.bind(
             response_mime_type="application/json",
@@ -290,11 +291,27 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         # Prompt to use when injecting cached content from
         # `cached_llm_content/instrument_selection_prompt_static.md`.
         message = HumanMessage(content=prompt_text)
-        structured_response_payload = _race_llm_calls(
-            lambda: structured_llm.ainvoke([message]),
-            parallel_calls=2,
-            label="instrument_selection_structured_cached" if cached_invoke_kwargs else "instrument_selection_structured",
-        )
+        try:
+            structured_response_payload = _race_llm_calls(
+                lambda: structured_llm.ainvoke([message]),
+                parallel_calls=2,
+                label="instrument_selection_structured_cached" if cached_invoke_kwargs else "instrument_selection_structured",
+            )
+        except Exception as invoke_exc:
+            if cached_invoke_kwargs and _is_cached_content_error(invoke_exc):
+                logger.warning("Instrument selection cached content invalid/unavailable at invoke time; retrying without cache")
+                cached_invoke_kwargs = {}
+                structured_llm = llm.bind(
+                    response_mime_type="application/json",
+                    response_json_schema=InstrumentSelectionList.model_json_schema(),
+                )
+                structured_response_payload = _race_llm_calls(
+                    lambda: structured_llm.ainvoke([message]),
+                    parallel_calls=2,
+                    label="instrument_selection_structured",
+                )
+            else:
+                raise
         logger.info(f"Instrument selection structured response payload: {structured_response_payload}")
 
         usage_metadata = getattr(structured_response_payload, "usage_metadata", None)
@@ -338,11 +355,24 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
         except Exception:
             invoke_messages = prompt.format_messages(**call_inputs)
         raw_llm = llm.bind(**cached_invoke_kwargs) if cached_invoke_kwargs else llm
-        response = _race_llm_calls(
-            lambda: raw_llm.ainvoke(invoke_messages),
-            parallel_calls=2,
-            label="instrument_selection_raw_cached" if cached_invoke_kwargs else "instrument_selection_raw",
-        )
+        try:
+            response = _race_llm_calls(
+                lambda: raw_llm.ainvoke(invoke_messages),
+                parallel_calls=2,
+                label="instrument_selection_raw_cached" if cached_invoke_kwargs else "instrument_selection_raw",
+            )
+        except Exception as invoke_exc:
+            if cached_invoke_kwargs and _is_cached_content_error(invoke_exc):
+                logger.warning("Instrument selection raw invoke failed due to cached content; retrying without cache")
+                cached_invoke_kwargs = {}
+                raw_llm = llm
+                response = _race_llm_calls(
+                    lambda: raw_llm.ainvoke(invoke_messages),
+                    parallel_calls=2,
+                    label="instrument_selection_raw",
+                )
+            else:
+                raise
         try:
             raw_response_text = _message_to_text(response)
             usage_metadata = getattr(response, "usage_metadata", None)
@@ -400,8 +430,48 @@ Analyze the query "{query}" and return JSON with instrument keys and their relev
             return []
 
     if not isinstance(result, list):
-        logger.warning(f"Expected list but got {type(result)}: {result}")
-        return []
+        if isinstance(result, dict):
+            logger.warning(
+                "Expected list but got dict; attempting fallback parse from key->field_names mapping"
+            )
+            fallback_items: list[dict[str, Any]] = []
+            for key, field_names in result.items():
+                if not isinstance(key, str) or not key:
+                    logger.warning("Skipping invalid fallback mapping key: %r", key)
+                    continue
+
+                if isinstance(field_names, list):
+                    parsed_fields = [
+                        field_name
+                        for field_name in field_names
+                        if isinstance(field_name, str) and field_name
+                    ]
+                else:
+                    logger.warning(
+                        "Skipping invalid fallback mapping value for key %s: %r",
+                        key,
+                        field_names,
+                    )
+                    continue
+
+                fallback_items.append(
+                    {
+                        "key": key,
+                        "database_field_names": parsed_fields,
+                    }
+                )
+
+            if fallback_items:
+                logger.info(
+                    "Fallback mapping parse succeeded with %d items", len(fallback_items)
+                )
+                result = fallback_items
+            else:
+                logger.warning("Fallback mapping parse failed; no valid items extracted")
+                return []
+        else:
+            logger.warning(f"Expected list but got {type(result)}: {result}")
+            return []
 
     valid_items = []
     for item in result:

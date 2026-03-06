@@ -6,6 +6,7 @@ across the application for configuration, conversation history, and multimedia.
 
 import streamlit as st
 import uuid
+import os
 
 
 def setup_session() -> None:
@@ -42,6 +43,13 @@ def setup_session() -> None:
         st.session_state.developer_view = True
     if "sandbox_logging" not in st.session_state:
         st.session_state.sandbox_logging = True
+    if "priority_paygo" not in st.session_state:
+        raw = str(os.environ.get("MGS_PRIORITY_PAYGO", "")).strip().lower()
+        st.session_state.priority_paygo = raw in {"1", "true", "yes", "on"}
+    if "priority_paygo_toggle" not in st.session_state:
+        st.session_state.priority_paygo_toggle = st.session_state.priority_paygo
+    if "show_priority_paygo_modal" not in st.session_state:
+        st.session_state.show_priority_paygo_modal = False
     if "min_successful_responses" not in st.session_state:
         # st.session_state.min_successful_responses = 3
         st.session_state.min_successful_responses = 1

@@ -124,7 +124,7 @@ class ContextAPIClient:
         except Exception as exc:  # noqa: BLE001
             raise ContextAPIError(f"Unable to parse instrument context: {exc}") from exc
 
-    def fetch_project_nl_context(self, db_host: str, db_name: str) -> Optional[str]:
+    def fetch_project_response_gen_info(self, db_host: str, db_name: str) -> Optional[str]:
         """Retrieve the response-gen-info text that describes the project context."""
         safe_host = self._encode_query_value(db_host, encode_dots=True)
         safe_name = self._encode_query_value(db_name)

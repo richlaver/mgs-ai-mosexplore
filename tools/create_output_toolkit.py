@@ -1,6 +1,7 @@
 import ast
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -27,6 +28,34 @@ from tools.review_level_toolkit import (
 )
 
 logger = logging.getLogger(__name__)
+
+MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR = "MGS_MAP_SPATIAL_EXTENT_PERCENTILE"
+MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT = 100.0
+
+
+def _get_map_spatial_extent_percentile() -> float:
+    raw = os.environ.get(MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR)
+    if raw is None:
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    try:
+        value = float(str(raw).strip())
+    except Exception:
+        logger.warning(
+            "Invalid %s=%r; using default %.1f",
+            MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR,
+            raw,
+            MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT,
+        )
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    if not math.isfinite(value) or value <= 0 or value > 100:
+        logger.warning(
+            "Out-of-range %s=%r; expected (0,100], using default %.1f",
+            MAP_SPATIAL_EXTENT_PERCENTILE_ENV_VAR,
+            raw,
+            MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT,
+        )
+        return MAP_SPATIAL_EXTENT_PERCENTILE_DEFAULT
+    return value
 
 def apply_general_layout(fig: go.Figure) -> None:
     """Apply general layout properties to a Plotly figure."""
@@ -1444,7 +1473,8 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
     spatial_defaults_cache: Optional[Dict[str, float]] = Field(default=None, exclude=True)
 
     def _compute_spatial_defaults_via_db(self) -> Optional[Dict[str, float]]:
-        """Compute median center and a radius covering ~90% of instruments using DB data."""
+        """Compute median center and a radius covering the configured percentile extent using DB data."""
+        logger.info("MapPlotTool deriving spatial defaults from DB fallback")
         try:
             query = (
                 """
@@ -1491,29 +1521,36 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 continue
 
         if not eastings or not northings:
+            logger.warning("MapPlotTool DB fallback returned no valid coordinate rows")
             return None
 
         arr_e = np.array(eastings)
         arr_n = np.array(northings)
         med_e = float(np.median(arr_e))
         med_n = float(np.median(arr_n))
+        extent_percentile = _get_map_spatial_extent_percentile()
+        lower_q = (100.0 - extent_percentile) / 2.0
+        upper_q = 100.0 - lower_q
         try:
-            p5_e, p95_e = np.percentile(arr_e, [5, 95])
-            p5_n, p95_n = np.percentile(arr_n, [5, 95])
-            radius = float(max(p95_e - p5_e, p95_n - p5_n) / 2.0)
+            low_e, high_e = np.percentile(arr_e, [lower_q, upper_q])
+            low_n, high_n = np.percentile(arr_n, [lower_q, upper_q])
+            radius = float(max(high_e - low_e, high_n - low_n) / 2.0)
         except Exception:
             radius = 500.0
         if not math.isfinite(radius) or radius <= 0:
             radius = 500.0
-        return {
+        computed_defaults = {
             'median_easting': med_e,
             'median_northing': med_n,
-            'radius_90_extent': radius,
+            'radius_extent': radius,
         }
+        logger.info("MapPlotTool derived DB fallback spatial defaults: %s", computed_defaults)
+        return computed_defaults
 
     def _get_spatial_defaults(self) -> Dict[str, float]:
         """Return cached or computed spatial defaults (median center and radius)."""
         if self.spatial_defaults_cache:
+            logger.info("MapPlotTool using cached spatial defaults: %s", self.spatial_defaults_cache)
             return self.spatial_defaults_cache
 
         defaults: Dict[str, float] = {}
@@ -1521,23 +1558,31 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
             defaults['median_easting'] = float(self.default_center[0])
             defaults['median_northing'] = float(self.default_center[1])
         if self.default_radius_meters is not None:
-            defaults['radius_90_extent'] = abs(float(self.default_radius_meters))
+            defaults['radius_extent'] = abs(float(self.default_radius_meters))
 
-        if not all(k in defaults for k in ('median_easting', 'median_northing', 'radius_90_extent')):
+        if defaults:
+            logger.info("MapPlotTool received startup-injected spatial defaults (possibly partial): %s", defaults)
+        else:
+            logger.info("MapPlotTool did not receive startup-injected spatial defaults; deriving fallback defaults")
+
+        if not all(k in defaults for k in ('median_easting', 'median_northing', 'radius_extent')):
             computed = self._compute_spatial_defaults_via_db()
             if computed:
                 defaults.setdefault('median_easting', computed.get('median_easting'))
                 defaults.setdefault('median_northing', computed.get('median_northing'))
-                defaults.setdefault('radius_90_extent', computed.get('radius_90_extent'))
+                defaults.setdefault('radius_extent', computed.get('radius_extent'))
+            else:
+                logger.warning("MapPlotTool failed to derive spatial defaults from DB fallback; hard defaults will be used where needed")
 
         if 'median_easting' not in defaults or defaults.get('median_easting') is None:
             defaults['median_easting'] = 0.0
         if 'median_northing' not in defaults or defaults.get('median_northing') is None:
             defaults['median_northing'] = 0.0
-        if 'radius_90_extent' not in defaults or defaults.get('radius_90_extent') is None:
-            defaults['radius_90_extent'] = 500.0
+        if 'radius_extent' not in defaults or defaults.get('radius_extent') is None:
+            defaults['radius_extent'] = 500.0
 
         self.spatial_defaults_cache = defaults
+        logger.info("MapPlotTool resolved spatial defaults: %s", defaults)
         return defaults
 
     def _get_center_coords(self, center_instrument_id: Optional[str], center_easting: Optional[float], center_northing: Optional[float]) -> Tuple[float, float]:
@@ -2453,8 +2498,6 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
     ) -> Dict[str, Any]:
         logger.info(f"MapPlotTool._run called with data_type={data_type}, plot_type={plot_type}, start_time={start_time}, end_time={end_time}, buffer_period_hours={buffer_period_hours}, series_count={len(series) if series else 0}, center_instrument_id={center_instrument_id}, center_easting={center_easting}, center_northing={center_northing}, radius_meters={radius_meters}, exclude_instrument_ids={exclude_instrument_ids}")
         try:
-            if radius_meters is None:
-                radius_meters = 500.0
             if exclude_instrument_ids is None:
                 exclude_instrument_ids = []
             if end_time is None:
@@ -2494,7 +2537,7 @@ Example: {"data_type": "readings", "plot_type": "value_at_time", "end_time": "31
                 raise ValueError("At least one series is required")
 
             spatial_defaults = self._get_spatial_defaults()
-            radius_to_use = inputs.radius_meters if inputs.radius_meters is not None and inputs.radius_meters > 0 else spatial_defaults.get('radius_90_extent', 500.0)
+            radius_to_use = inputs.radius_meters if inputs.radius_meters is not None and inputs.radius_meters > 0 else spatial_defaults.get('radius_extent', 500.0)
             center_e, center_n = self._get_center_coords(inputs.center_instrument_id, inputs.center_easting, inputs.center_northing)
             min_e, max_e, min_n, max_n = self._get_bounds(center_e, center_n, radius_to_use)
             exclude_str = ','.join(f"'{id}'" for id in inputs.exclude_instrument_ids)
@@ -2564,7 +2607,7 @@ class MapPlotWrapperTool(BaseTool):
             plot_type = input_dict['plot_type']
             end_time_str = input_dict['end_time']
             series_list = input_dict['series']
-            radius_meters = input_dict['radius_meters']
+            radius_meters = input_dict.get('radius_meters')
 
             # Extract optional fields with defaults
             start_time_str = input_dict.get('start_time')

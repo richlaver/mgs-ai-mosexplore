@@ -50,7 +50,7 @@ def create_map_plot_sandbox_subgraph(llm: BaseLanguageModel, sql_tool: GeneralSQ
                 defaults.get("median_easting"),
                 defaults.get("median_northing"),
             )
-            radius_default = defaults.get("radius_90_extent")
+            radius_default = defaults.get("radius_extent")
     except Exception as exc:
         logger.warning("Unable to load cached map spatial defaults: %s", exc)
 

@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
@@ -65,22 +66,33 @@ def perform_setup():
     st.session_state.table_relationship_graph = bootstrap_results["table_relationship_graph"]
     st.session_state.db = setup.get_db()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        futures = {
-            "map_spatial_defaults": executor.submit(setup.get_map_spatial_defaults, st.session_state.db),
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            futures = {
+                "map_spatial_defaults": executor.submit(setup.get_map_spatial_defaults, st.session_state.db),
+            }
+            st.session_state.map_spatial_defaults = futures["map_spatial_defaults"].result()
+        logger.info("Startup retrieved map spatial defaults: %s", st.session_state.map_spatial_defaults)
+    except Exception as exc:
+        logger.warning("Failed to retrieve startup map spatial defaults: %s", exc)
+        st.session_state.map_spatial_defaults = {
+            "median_easting": 0.0,
+            "median_northing": 0.0,
+            "radius_extent": 500.0,
         }
-        st.session_state.map_spatial_defaults = futures["map_spatial_defaults"].result()
+        logger.info("Startup using fallback map spatial defaults: %s", st.session_state.map_spatial_defaults)
     init_timezones(st.session_state.db)
 
     st.session_state.global_hierarchy_access = setup.get_global_hierarchy_access(db=st.session_state.db)
 
     try:
-        setup.refresh_instrument_selection_cache(
-            st.session_state.get("selected_project_key"),
-            st.session_state.llms["LONG"],
+        setup.start_instrument_selection_cache_refresh_background(
+            selected_project_key=st.session_state.get("selected_project_key"),
+            llm=st.session_state.llms["LONG"],
+            reason="startup",
         )
     except Exception as exc:
-        logger.warning("Failed to refresh instrument selection cache at startup: %s", exc)
+        logger.warning("Failed to start instrument selection cache refresh at startup: %s", exc)
 
     raw_parallel = os.environ.get("MGS_NUM_PARALLEL_EXECUTIONS")
     try:
@@ -109,6 +121,27 @@ def perform_setup():
         min_explained_variance=st.session_state.min_explained_variance,
         selected_project_key=st.session_state.get("selected_project_key"),
     )
+
+    try:
+        codeact_tools_snapshot = st.session_state.get("codeact_tools_snapshot") or []
+        codeact_tools_payload = json.dumps(
+            [
+                {
+                    "name": getattr(tool, "name", ""),
+                    "description": getattr(tool, "description", ""),
+                }
+                for tool in codeact_tools_snapshot
+            ],
+            indent=2,
+        )
+        setup.start_codeact_coder_cache_refresh_background(
+            llm=st.session_state.llms["CODING"],
+            tools_payload=codeact_tools_payload,
+            reason="startup",
+        )
+    except Exception as exc:
+        logger.warning("Failed to start CodeAct cache refresh at startup: %s", exc)
+
     st.session_state.graph_agent_state_cls_id = id(AgentState)
     st.session_state.graph_context_cls_id = id(Context)
 

@@ -410,7 +410,7 @@ def ensure_project_context(
 
     if fetch_project_specific:
         try:
-            payload["project_specific_context"] = client.fetch_project_nl_context(host, db_name) or ""
+            payload["project_specific_context"] = client.fetch_project_response_gen_info(host, db_name) or ""
             payload["_project_context_loaded"] = True
             _log_context_snapshot(
                 display_name,
